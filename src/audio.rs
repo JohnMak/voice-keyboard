@@ -1,177 +1,184 @@
 //! Audio recording module
 //!
 //! Records audio from microphone to a buffer or file.
-//! Uses cpal for cross-platform audio capture.
+//! On macOS uses cpal for real-time capture.
+//! On other platforms, only file-based operations are available.
 
 use crate::{Result, VoiceKeyboardError};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, SampleRate, Stream};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use tracing::{debug, error, info};
+use tracing::info;
 
 /// Target sample rate for Whisper (16kHz)
 pub const WHISPER_SAMPLE_RATE: u32 = 16000;
 
-/// Audio recorder for capturing microphone input
-pub struct AudioRecorder {
-    samples: Arc<Mutex<Vec<f32>>>,
-    is_recording: Arc<AtomicBool>,
-    stream: Option<Stream>,
-}
+/// Audio recorder for capturing microphone input (macOS only)
+#[cfg(target_os = "macos")]
+pub mod recorder {
+    use super::*;
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use cpal::{SampleFormat, Stream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tracing::{debug, error};
 
-impl AudioRecorder {
-    /// Create a new audio recorder
-    pub fn new() -> Result<Self> {
-        Ok(Self {
-            samples: Arc::new(Mutex::new(Vec::new())),
-            is_recording: Arc::new(AtomicBool::new(false)),
-            stream: None,
-        })
-    }
-
-    /// Start recording from the default input device
-    pub fn start(&mut self) -> Result<()> {
-        if self.is_recording.load(Ordering::SeqCst) {
-            return Ok(()); // Already recording
-        }
-
-        // Clear previous samples
-        self.samples.lock().unwrap().clear();
-
-        let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or_else(|| VoiceKeyboardError::Audio("No input device found".to_string()))?;
-
-        info!("Using input device: {}", device.name().unwrap_or_default());
-
-        // Get supported config
-        let config = device
-            .default_input_config()
-            .map_err(|e| VoiceKeyboardError::Audio(format!("Failed to get input config: {e}")))?;
-
-        debug!(
-            "Input config: {} channels, {} Hz, {:?}",
-            config.channels(),
-            config.sample_rate().0,
-            config.sample_format()
-        );
-
-        let samples = Arc::clone(&self.samples);
-        let is_recording = Arc::clone(&self.is_recording);
-        let source_rate = config.sample_rate().0;
-
-        // Build stream based on sample format
-        let stream = match config.sample_format() {
-            SampleFormat::F32 => self.build_stream::<f32>(&device, &config.into(), samples, source_rate),
-            SampleFormat::I16 => self.build_stream::<i16>(&device, &config.into(), samples, source_rate),
-            SampleFormat::U16 => self.build_stream::<u16>(&device, &config.into(), samples, source_rate),
-            format => {
-                return Err(VoiceKeyboardError::Audio(format!(
-                    "Unsupported sample format: {format:?}"
-                )))
-            }
-        }?;
-
-        stream
-            .play()
-            .map_err(|e| VoiceKeyboardError::Audio(format!("Failed to start stream: {e}")))?;
-
-        is_recording.store(true, Ordering::SeqCst);
-        self.stream = Some(stream);
-
-        info!("Recording started");
-        Ok(())
-    }
-
-    /// Stop recording and return the samples
-    pub fn stop(&mut self) -> Result<Vec<f32>> {
-        self.is_recording.store(false, Ordering::SeqCst);
-
-        if let Some(stream) = self.stream.take() {
-            drop(stream);
-        }
-
-        let samples = std::mem::take(&mut *self.samples.lock().unwrap());
-        info!("Recording stopped: {} samples captured", samples.len());
-
-        Ok(samples)
-    }
-
-    /// Check if currently recording
-    pub fn is_recording(&self) -> bool {
-        self.is_recording.load(Ordering::SeqCst)
-    }
-
-    /// Get current recording duration in seconds
-    pub fn duration_secs(&self) -> f32 {
-        let samples = self.samples.lock().unwrap();
-        samples.len() as f32 / WHISPER_SAMPLE_RATE as f32
-    }
-
-    fn build_stream<T>(
-        &self,
-        device: &cpal::Device,
-        config: &cpal::StreamConfig,
+    pub struct AudioRecorder {
         samples: Arc<Mutex<Vec<f32>>>,
-        source_rate: u32,
-    ) -> Result<Stream>
-    where
-        T: cpal::Sample + cpal::SizedSample + Send + 'static,
-        f32: cpal::FromSample<T>,
-    {
-        let channels = config.channels as usize;
-        let resample_ratio = source_rate as f64 / WHISPER_SAMPLE_RATE as f64;
+        is_recording: Arc<AtomicBool>,
+        stream: Option<Stream>,
+    }
 
-        let err_fn = |err| error!("Audio stream error: {}", err);
+    impl AudioRecorder {
+        pub fn new() -> Result<Self> {
+            Ok(Self {
+                samples: Arc::new(Mutex::new(Vec::new())),
+                is_recording: Arc::new(AtomicBool::new(false)),
+                stream: None,
+            })
+        }
 
-        let stream = device
-            .build_input_stream(
-                config,
-                move |data: &[T], _: &cpal::InputCallbackInfo| {
-                    let mut samples = samples.lock().unwrap();
+        pub fn start(&mut self) -> Result<()> {
+            if self.is_recording.load(Ordering::SeqCst) {
+                return Ok(());
+            }
 
-                    // Convert to f32 and mono
-                    for chunk in data.chunks(channels) {
-                        let mono: f32 = chunk
-                            .iter()
-                            .map(|s| f32::from_sample(*s))
-                            .sum::<f32>()
-                            / channels as f32;
+            self.samples.lock().unwrap().clear();
 
-                        // Simple decimation for resampling
-                        // TODO: Use proper resampler for production
-                        samples.push(mono);
-                    }
+            let host = cpal::default_host();
+            let device = host
+                .default_input_device()
+                .ok_or_else(|| VoiceKeyboardError::Audio("No input device found".to_string()))?;
 
-                    // Apply simple resampling if needed
-                    if resample_ratio > 1.0 {
-                        let target_len = (samples.len() as f64 / resample_ratio) as usize;
-                        if samples.len() > target_len * 2 {
-                            let resampled: Vec<f32> = (0..target_len)
-                                .map(|i| {
-                                    let idx = (i as f64 * resample_ratio) as usize;
-                                    samples.get(idx).copied().unwrap_or(0.0)
-                                })
-                                .collect();
-                            *samples = resampled;
+            info!("Using input device: {}", device.name().unwrap_or_default());
+
+            let config = device
+                .default_input_config()
+                .map_err(|e| VoiceKeyboardError::Audio(format!("Failed to get input config: {e}")))?;
+
+            debug!(
+                "Input config: {} channels, {} Hz, {:?}",
+                config.channels(),
+                config.sample_rate().0,
+                config.sample_format()
+            );
+
+            let samples = Arc::clone(&self.samples);
+            let source_rate = config.sample_rate().0;
+            let channels = config.channels() as usize;
+
+            let err_fn = |err| error!("Audio stream error: {}", err);
+
+            let stream = match config.sample_format() {
+                SampleFormat::F32 => device.build_input_stream(
+                    &config.into(),
+                    move |data: &[f32], _| {
+                        let mut samples = samples.lock().unwrap();
+                        for chunk in data.chunks(channels) {
+                            let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;
+                            samples.push(mono);
                         }
-                    }
-                },
-                err_fn,
-                None,
-            )
+                    },
+                    err_fn,
+                    None,
+                ),
+                SampleFormat::I16 => device.build_input_stream(
+                    &config.into(),
+                    move |data: &[i16], _| {
+                        let mut samples = samples.lock().unwrap();
+                        for chunk in data.chunks(channels) {
+                            let mono: f32 = chunk
+                                .iter()
+                                .map(|&s| s as f32 / i16::MAX as f32)
+                                .sum::<f32>()
+                                / channels as f32;
+                            samples.push(mono);
+                        }
+                    },
+                    err_fn,
+                    None,
+                ),
+                _ => {
+                    return Err(VoiceKeyboardError::Audio("Unsupported sample format".to_string()))
+                }
+            }
             .map_err(|e| VoiceKeyboardError::Audio(format!("Failed to build stream: {e}")))?;
 
-        Ok(stream)
+            stream
+                .play()
+                .map_err(|e| VoiceKeyboardError::Audio(format!("Failed to start stream: {e}")))?;
+
+            self.is_recording.store(true, Ordering::SeqCst);
+            self.stream = Some(stream);
+
+            info!("Recording started");
+            Ok(())
+        }
+
+        pub fn stop(&mut self) -> Result<Vec<f32>> {
+            self.is_recording.store(false, Ordering::SeqCst);
+
+            if let Some(stream) = self.stream.take() {
+                drop(stream);
+            }
+
+            let samples = std::mem::take(&mut *self.samples.lock().unwrap());
+            info!("Recording stopped: {} samples captured", samples.len());
+
+            Ok(samples)
+        }
+
+        pub fn is_recording(&self) -> bool {
+            self.is_recording.load(Ordering::SeqCst)
+        }
+
+        pub fn duration_secs(&self) -> f32 {
+            let samples = self.samples.lock().unwrap();
+            samples.len() as f32 / WHISPER_SAMPLE_RATE as f32
+        }
+    }
+
+    impl Default for AudioRecorder {
+        fn default() -> Self {
+            Self::new().expect("Failed to create audio recorder")
+        }
     }
 }
 
+#[cfg(target_os = "macos")]
+pub use recorder::AudioRecorder;
+
+/// Stub AudioRecorder for non-macOS platforms (testing only)
+#[cfg(not(target_os = "macos"))]
+pub struct AudioRecorder;
+
+#[cfg(not(target_os = "macos"))]
+impl AudioRecorder {
+    pub fn new() -> Result<Self> {
+        Ok(Self)
+    }
+
+    pub fn start(&mut self) -> Result<()> {
+        Err(VoiceKeyboardError::Audio(
+            "Audio recording not available on this platform. Use file-based testing.".to_string(),
+        ))
+    }
+
+    pub fn stop(&mut self) -> Result<Vec<f32>> {
+        Ok(vec![])
+    }
+
+    pub fn is_recording(&self) -> bool {
+        false
+    }
+
+    pub fn duration_secs(&self) -> f32 {
+        0.0
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
 impl Default for AudioRecorder {
     fn default() -> Self {
-        Self::new().expect("Failed to create audio recorder")
+        Self
     }
 }
 
@@ -201,13 +208,41 @@ pub fn save_wav(samples: &[f32], path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Load samples from a WAV file
+pub fn load_wav(path: &Path) -> Result<Vec<f32>> {
+    let reader = hound::WavReader::open(path)
+        .map_err(|e| VoiceKeyboardError::Audio(format!("Failed to open WAV: {e}")))?;
+
+    let spec = reader.spec();
+
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Int => reader
+            .into_samples::<i16>()
+            .filter_map(|s| s.ok())
+            .map(|s| s as f32 / i16::MAX as f32)
+            .collect(),
+        hound::SampleFormat::Float => {
+            reader.into_samples::<f32>().filter_map(|s| s.ok()).collect()
+        }
+    };
+
+    // Convert to mono if stereo
+    let mono_samples: Vec<f32> = if spec.channels == 2 {
+        samples.chunks(2).map(|c| (c[0] + c[1]) / 2.0).collect()
+    } else {
+        samples
+    };
+
+    Ok(mono_samples)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
 
     #[test]
-    fn test_save_wav() {
+    fn test_save_load_wav() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.wav");
 
@@ -215,5 +250,8 @@ mod tests {
         save_wav(&samples, &path).unwrap();
 
         assert!(path.exists());
+
+        let loaded = load_wav(&path).unwrap();
+        assert_eq!(loaded.len(), samples.len());
     }
 }

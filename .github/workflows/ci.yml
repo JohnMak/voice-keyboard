@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libxdo-dev
+          sudo apt-get install -y llvm-dev libclang-dev clang cmake
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -54,7 +54,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libxdo-dev
+          sudo apt-get install -y llvm-dev libclang-dev clang cmake
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -68,20 +68,17 @@ jobs:
       - name: Create test audio
         run: |
           mkdir -p test-assets
-          # Generate 2 seconds of silence as WAV for basic testing
-          # In real CI, you'd have actual speech samples
           python3 -c "
           import wave
           import struct
 
           sample_rate = 16000
-          duration = 2  # seconds
+          duration = 2
 
           with wave.open('test-assets/test.wav', 'w') as f:
               f.setnchannels(1)
               f.setsampwidth(2)
               f.setframerate(sample_rate)
-              # Write silence
               for _ in range(sample_rate * duration):
                   f.writeframes(struct.pack('<h', 0))
           "
@@ -94,7 +91,7 @@ jobs:
   # macOS build for release
   build-macos:
     name: Build (macOS)
-    runs-on: macos-14  # Apple Silicon
+    runs-on: macos-14
     needs: check
     steps:
       - uses: actions/checkout@v4
@@ -159,12 +156,6 @@ jobs:
           </dict>
           </plist>
           EOF
-
-      # Code signing would go here (requires secrets)
-      # - name: Sign app
-      #   env:
-      #     APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      #   run: codesign --sign "$APPLE_SIGNING_IDENTITY" --options runtime "Voice Keyboard.app"
 
       - name: Create DMG
         run: |

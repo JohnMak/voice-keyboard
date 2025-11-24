@@ -2,10 +2,13 @@
 //!
 //! Injects transcribed text into the active application.
 //! Two methods: clipboard + paste (reliable) or direct keyboard simulation.
+//!
+//! Note: Full functionality requires macOS. On Linux, only clipboard-only mode
+//! works (no paste simulation).
 
 use crate::{Result, VoiceKeyboardError};
 use arboard::Clipboard;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Text injection method
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -15,6 +18,8 @@ pub enum InjectionMethod {
     Clipboard,
     /// Simulate keyboard typing (may have issues with special characters)
     Keyboard,
+    /// Only copy to clipboard, no paste simulation (for testing)
+    ClipboardOnly,
 }
 
 /// Text injector
@@ -25,7 +30,7 @@ pub struct TextInjector {
 
 impl TextInjector {
     pub fn new(method: InjectionMethod) -> Result<Self> {
-        let clipboard = if method == InjectionMethod::Clipboard {
+        let clipboard = if matches!(method, InjectionMethod::Clipboard | InjectionMethod::ClipboardOnly) {
             Some(
                 Clipboard::new()
                     .map_err(|e| VoiceKeyboardError::Injection(format!("Clipboard error: {e}")))?,
@@ -49,7 +54,21 @@ impl TextInjector {
         match self.method {
             InjectionMethod::Clipboard => self.inject_via_clipboard(text),
             InjectionMethod::Keyboard => self.inject_via_keyboard(text),
+            InjectionMethod::ClipboardOnly => self.set_clipboard(text),
         }
+    }
+
+    fn set_clipboard(&mut self, text: &str) -> Result<()> {
+        let clipboard = self.clipboard.as_mut().ok_or_else(|| {
+            VoiceKeyboardError::Injection("Clipboard not initialized".to_string())
+        })?;
+
+        clipboard
+            .set_text(text.to_string())
+            .map_err(|e| VoiceKeyboardError::Injection(format!("Failed to set clipboard: {e}")))?;
+
+        info!("Text copied to clipboard");
+        Ok(())
     }
 
     fn inject_via_clipboard(&mut self, text: &str) -> Result<()> {
@@ -79,6 +98,7 @@ impl TextInjector {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     fn inject_via_keyboard(&self, text: &str) -> Result<()> {
         use enigo::{Enigo, Keyboard, Settings};
 
@@ -92,20 +112,23 @@ impl TextInjector {
         Ok(())
     }
 
+    #[cfg(not(target_os = "macos"))]
+    fn inject_via_keyboard(&self, _text: &str) -> Result<()> {
+        warn!("Keyboard injection not available on this platform");
+        Err(VoiceKeyboardError::Injection(
+            "Keyboard injection requires macOS".to_string(),
+        ))
+    }
+
+    #[cfg(target_os = "macos")]
     fn simulate_paste(&self) -> Result<()> {
         use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 
         let mut enigo = Enigo::new(&Settings::default())
             .map_err(|e| VoiceKeyboardError::Injection(format!("Failed to create Enigo: {e}")))?;
 
-        // Cmd+V on macOS, Ctrl+V on other platforms
-        #[cfg(target_os = "macos")]
-        let modifier = Key::Meta;
-        #[cfg(not(target_os = "macos"))]
-        let modifier = Key::Control;
-
         enigo
-            .key(modifier, Direction::Press)
+            .key(Key::Meta, Direction::Press)
             .map_err(|e| VoiceKeyboardError::Injection(format!("Key press failed: {e}")))?;
 
         enigo
@@ -113,10 +136,16 @@ impl TextInjector {
             .map_err(|e| VoiceKeyboardError::Injection(format!("Key click failed: {e}")))?;
 
         enigo
-            .key(modifier, Direction::Release)
+            .key(Key::Meta, Direction::Release)
             .map_err(|e| VoiceKeyboardError::Injection(format!("Key release failed: {e}")))?;
 
         debug!("Paste simulated");
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn simulate_paste(&self) -> Result<()> {
+        warn!("Paste simulation not available on this platform, text is in clipboard");
         Ok(())
     }
 }

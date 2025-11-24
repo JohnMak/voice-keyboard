@@ -11,19 +11,11 @@ repository = "https://github.com/alexmak/voice-keyboard"
 # Whisper speech recognition
 whisper-rs = "0.15"
 
-# Audio recording
-cpal = "0.15"
-hound = "3.5"  # WAV file handling
+# Audio - WAV file handling (cross-platform)
+hound = "3.5"
 
-# Global hotkeys (macOS/Windows/Linux)
-rdev = "0.5"
-
-# Text injection / clipboard
-arboard = "3"  # Cross-platform clipboard
-enigo = "0.2"  # Keyboard simulation (macOS needs Accessibility)
-
-# System tray
-tray-icon = "0.19"
+# Clipboard (cross-platform)
+arboard = "3"
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
@@ -31,7 +23,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 # Config
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-directories = "5"  # Platform-specific config paths
+directories = "5"
 
 # Logging
 tracing = "0.1"
@@ -41,15 +33,20 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 anyhow = "1"
 
+# macOS-only dependencies (require system frameworks, not available on Linux CI)
+[target.'cfg(target_os = "macos")'.dependencies]
+cpal = "0.15"       # Audio recording (uses CoreAudio)
+rdev = "0.5"        # Global hotkeys (uses IOKit)
+enigo = "0.2"       # Keyboard simulation (requires Accessibility)
+tray-icon = "0.19"  # System tray
+
 [dev-dependencies]
 tempfile = "3"
 assert_cmd = "2"
 
 [features]
 default = []
-# Use CoreML on macOS for faster inference (requires macOS build)
 coreml = ["whisper-rs/coreml"]
-# Metal GPU acceleration on macOS
 metal = ["whisper-rs/metal"]
 
 [profile.release]
@@ -57,7 +54,6 @@ lto = true
 codegen-units = 1
 strip = true
 
-# macOS app bundle settings
 [package.metadata.bundle]
 name = "Voice Keyboard"
 identifier = "com.alexmak.voice-keyboard"

@@ -5,7 +5,7 @@
 
 use crate::{Result, VoiceKeyboardError};
 use std::path::Path;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 /// Whisper model sizes
@@ -86,7 +86,7 @@ impl Transcriber {
 
     /// Transcribe audio from a WAV file
     pub fn transcribe_file(&self, audio_path: &Path) -> Result<TranscriptionResult> {
-        let samples = Self::load_wav_file(audio_path)?;
+        let samples = crate::audio::load_wav(audio_path)?;
         self.transcribe_samples(&samples)
     }
 
@@ -159,73 +159,6 @@ impl Transcriber {
             language: detected_language,
             duration_ms,
         })
-    }
-
-    /// Load WAV file and convert to 16kHz mono f32 samples
-    fn load_wav_file(path: &Path) -> Result<Vec<f32>> {
-        let reader = hound::WavReader::open(path)
-            .map_err(|e| VoiceKeyboardError::Audio(format!("Failed to open WAV: {e}")))?;
-
-        let spec = reader.spec();
-        debug!(
-            "WAV file: {} channels, {} Hz, {:?}",
-            spec.channels, spec.sample_rate, spec.sample_format
-        );
-
-        // Read samples
-        let samples: Vec<f32> = match spec.sample_format {
-            hound::SampleFormat::Int => reader
-                .into_samples::<i16>()
-                .filter_map(|s| s.ok())
-                .map(|s| s as f32 / i16::MAX as f32)
-                .collect(),
-            hound::SampleFormat::Float => {
-                reader.into_samples::<f32>().filter_map(|s| s.ok()).collect()
-            }
-        };
-
-        // Convert to mono if stereo
-        let mono_samples: Vec<f32> = if spec.channels == 2 {
-            samples.chunks(2).map(|c| (c[0] + c[1]) / 2.0).collect()
-        } else {
-            samples
-        };
-
-        // Resample to 16kHz if needed
-        let target_rate = 16000;
-        let resampled = if spec.sample_rate != target_rate {
-            warn!(
-                "Resampling from {} Hz to {} Hz (simple linear)",
-                spec.sample_rate, target_rate
-            );
-            Self::resample(&mono_samples, spec.sample_rate, target_rate)
-        } else {
-            mono_samples
-        };
-
-        Ok(resampled)
-    }
-
-    /// Simple linear resampling (for testing; production should use better algorithm)
-    fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
-        let ratio = from_rate as f64 / to_rate as f64;
-        let new_len = (samples.len() as f64 / ratio) as usize;
-        let mut resampled = Vec::with_capacity(new_len);
-
-        for i in 0..new_len {
-            let src_idx = i as f64 * ratio;
-            let idx = src_idx as usize;
-            let frac = src_idx - idx as f64;
-
-            let sample = if idx + 1 < samples.len() {
-                samples[idx] * (1.0 - frac as f32) + samples[idx + 1] * frac as f32
-            } else {
-                samples[idx]
-            };
-            resampled.push(sample);
-        }
-
-        resampled
     }
 }
 

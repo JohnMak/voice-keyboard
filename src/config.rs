@@ -105,6 +105,7 @@ pub enum InjectionMethodConfig {
     #[default]
     Clipboard,
     Keyboard,
+    ClipboardOnly,
 }
 
 impl From<InjectionMethodConfig> for InjectionMethod {
@@ -112,6 +113,7 @@ impl From<InjectionMethodConfig> for InjectionMethod {
         match config {
             InjectionMethodConfig::Clipboard => InjectionMethod::Clipboard,
             InjectionMethodConfig::Keyboard => InjectionMethod::Keyboard,
+            InjectionMethodConfig::ClipboardOnly => InjectionMethod::ClipboardOnly,
         }
     }
 }
