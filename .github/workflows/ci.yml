@@ -1,0 +1,178 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fast checks on Linux (your dev environment)
+  check:
+    name: Check & Test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libxdo-dev
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build
+
+      - name: Run unit tests
+        run: cargo test --lib
+
+  # Integration tests with Whisper model
+  integration:
+    name: Integration Tests (Linux)
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libxdo-dev
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Download Whisper tiny model
+        run: |
+          mkdir -p models
+          curl -L -o models/ggml-tiny.bin \
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
+
+      - name: Create test audio
+        run: |
+          mkdir -p test-assets
+          # Generate 2 seconds of silence as WAV for basic testing
+          # In real CI, you'd have actual speech samples
+          python3 -c "
+          import wave
+          import struct
+
+          sample_rate = 16000
+          duration = 2  # seconds
+
+          with wave.open('test-assets/test.wav', 'w') as f:
+              f.setnchannels(1)
+              f.setsampwidth(2)
+              f.setframerate(sample_rate)
+              # Write silence
+              for _ in range(sample_rate * duration):
+                  f.writeframes(struct.pack('<h', 0))
+          "
+
+      - name: Run integration tests
+        env:
+          MODEL_PATH: ./models/ggml-tiny.bin
+        run: cargo test --test transcription_test -- --ignored
+
+  # macOS build for release
+  build-macos:
+    name: Build (macOS)
+    runs-on: macos-14  # Apple Silicon
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-keyboard-macos-arm64
+          path: target/release/voice-keyboard
+
+  # Release build with signing (manual trigger)
+  release:
+    name: Release (macOS signed)
+    runs-on: macos-14
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [check, build-macos]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Create app bundle
+        run: |
+          mkdir -p "Voice Keyboard.app/Contents/MacOS"
+          mkdir -p "Voice Keyboard.app/Contents/Resources"
+          cp target/release/voice-keyboard "Voice Keyboard.app/Contents/MacOS/"
+
+          cat > "Voice Keyboard.app/Contents/Info.plist" << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>voice-keyboard</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.alexmak.voice-keyboard</string>
+              <key>CFBundleName</key>
+              <string>Voice Keyboard</string>
+              <key>CFBundleVersion</key>
+              <string>${{ github.ref_name }}</string>
+              <key>CFBundleShortVersionString</key>
+              <string>${{ github.ref_name }}</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>12.0</string>
+              <key>LSUIElement</key>
+              <true/>
+              <key>NSMicrophoneUsageDescription</key>
+              <string>Voice Keyboard needs microphone access to transcribe your speech.</string>
+          </dict>
+          </plist>
+          EOF
+
+      # Code signing would go here (requires secrets)
+      # - name: Sign app
+      #   env:
+      #     APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      #   run: codesign --sign "$APPLE_SIGNING_IDENTITY" --options runtime "Voice Keyboard.app"
+
+      - name: Create DMG
+        run: |
+          hdiutil create -volname "Voice Keyboard" -srcfolder "Voice Keyboard.app" \
+            -ov -format UDZO "voice-keyboard-${{ github.ref_name }}-arm64.dmg"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-keyboard-dmg
+          path: "*.dmg"

@@ -1,0 +1,247 @@
+//! Whisper speech-to-text transcription
+//!
+//! Supports both file-based and buffer-based transcription.
+//! File-based is used for testing, buffer-based for real-time recording.
+
+use crate::{Result, VoiceKeyboardError};
+use std::path::Path;
+use tracing::{debug, info, warn};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+/// Whisper model sizes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelSize {
+    Tiny,
+    Base,
+    Small,
+    Medium,
+    LargeV3Turbo,
+}
+
+impl ModelSize {
+    pub fn filename(&self) -> &'static str {
+        match self {
+            ModelSize::Tiny => "ggml-tiny.bin",
+            ModelSize::Base => "ggml-base.bin",
+            ModelSize::Small => "ggml-small.bin",
+            ModelSize::Medium => "ggml-medium.bin",
+            ModelSize::LargeV3Turbo => "ggml-large-v3-turbo.bin",
+        }
+    }
+
+    /// Approximate RAM usage in MB
+    pub fn ram_mb(&self) -> usize {
+        match self {
+            ModelSize::Tiny => 400,
+            ModelSize::Base => 500,
+            ModelSize::Small => 1000,
+            ModelSize::Medium => 3000,
+            ModelSize::LargeV3Turbo => 3000,
+        }
+    }
+}
+
+/// Transcription result
+#[derive(Debug, Clone)]
+pub struct TranscriptionResult {
+    pub text: String,
+    pub language: Option<String>,
+    pub duration_ms: u64,
+}
+
+/// Whisper transcriber
+pub struct Transcriber {
+    ctx: WhisperContext,
+    language: Option<String>,
+}
+
+impl Transcriber {
+    /// Create a new transcriber with the specified model
+    pub fn new(model_path: &Path) -> Result<Self> {
+        if !model_path.exists() {
+            return Err(VoiceKeyboardError::ModelNotFound(
+                model_path.display().to_string(),
+            ));
+        }
+
+        info!("Loading Whisper model from: {}", model_path.display());
+
+        let params = WhisperContextParameters::default();
+        let ctx = WhisperContext::new_with_params(model_path.to_str().unwrap(), params)
+            .map_err(|e| VoiceKeyboardError::Transcription(format!("Failed to load model: {e}")))?;
+
+        info!("Whisper model loaded successfully");
+
+        Ok(Self {
+            ctx,
+            language: None,
+        })
+    }
+
+    /// Set the language for transcription (e.g., "en", "ru", "auto")
+    pub fn set_language(&mut self, language: impl Into<String>) {
+        let lang = language.into();
+        self.language = if lang == "auto" { None } else { Some(lang) };
+    }
+
+    /// Transcribe audio from a WAV file
+    pub fn transcribe_file(&self, audio_path: &Path) -> Result<TranscriptionResult> {
+        let samples = Self::load_wav_file(audio_path)?;
+        self.transcribe_samples(&samples)
+    }
+
+    /// Transcribe audio from raw samples (16kHz mono f32)
+    pub fn transcribe_samples(&self, samples: &[f32]) -> Result<TranscriptionResult> {
+        let start = std::time::Instant::now();
+
+        debug!("Transcribing {} samples", samples.len());
+
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+
+        // Configure parameters
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_translate(false);
+        params.set_no_context(true);
+        params.set_single_segment(false);
+
+        // Set language if specified
+        if let Some(ref lang) = self.language {
+            params.set_language(Some(lang));
+        } else {
+            params.set_language(None); // Auto-detect
+        }
+
+        // Create state and run inference
+        let mut state = self
+            .ctx
+            .create_state()
+            .map_err(|e| VoiceKeyboardError::Transcription(format!("Failed to create state: {e}")))?;
+
+        state
+            .full(params, samples)
+            .map_err(|e| VoiceKeyboardError::Transcription(format!("Transcription failed: {e}")))?;
+
+        // Collect results
+        let num_segments = state.full_n_segments().map_err(|e| {
+            VoiceKeyboardError::Transcription(format!("Failed to get segments: {e}"))
+        })?;
+
+        let mut text = String::new();
+        for i in 0..num_segments {
+            if let Ok(segment) = state.full_get_segment_text(i) {
+                text.push_str(&segment);
+            }
+        }
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        // Detect language if auto
+        let detected_language = if self.language.is_none() {
+            state
+                .full_lang_id()
+                .ok()
+                .and_then(|id| whisper_rs::get_lang_str(id).map(|s| s.to_string()))
+        } else {
+            self.language.clone()
+        };
+
+        info!(
+            "Transcription completed in {}ms: {} chars",
+            duration_ms,
+            text.len()
+        );
+
+        Ok(TranscriptionResult {
+            text: text.trim().to_string(),
+            language: detected_language,
+            duration_ms,
+        })
+    }
+
+    /// Load WAV file and convert to 16kHz mono f32 samples
+    fn load_wav_file(path: &Path) -> Result<Vec<f32>> {
+        let reader = hound::WavReader::open(path)
+            .map_err(|e| VoiceKeyboardError::Audio(format!("Failed to open WAV: {e}")))?;
+
+        let spec = reader.spec();
+        debug!(
+            "WAV file: {} channels, {} Hz, {:?}",
+            spec.channels, spec.sample_rate, spec.sample_format
+        );
+
+        // Read samples
+        let samples: Vec<f32> = match spec.sample_format {
+            hound::SampleFormat::Int => reader
+                .into_samples::<i16>()
+                .filter_map(|s| s.ok())
+                .map(|s| s as f32 / i16::MAX as f32)
+                .collect(),
+            hound::SampleFormat::Float => {
+                reader.into_samples::<f32>().filter_map(|s| s.ok()).collect()
+            }
+        };
+
+        // Convert to mono if stereo
+        let mono_samples: Vec<f32> = if spec.channels == 2 {
+            samples.chunks(2).map(|c| (c[0] + c[1]) / 2.0).collect()
+        } else {
+            samples
+        };
+
+        // Resample to 16kHz if needed
+        let target_rate = 16000;
+        let resampled = if spec.sample_rate != target_rate {
+            warn!(
+                "Resampling from {} Hz to {} Hz (simple linear)",
+                spec.sample_rate, target_rate
+            );
+            Self::resample(&mono_samples, spec.sample_rate, target_rate)
+        } else {
+            mono_samples
+        };
+
+        Ok(resampled)
+    }
+
+    /// Simple linear resampling (for testing; production should use better algorithm)
+    fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+        let ratio = from_rate as f64 / to_rate as f64;
+        let new_len = (samples.len() as f64 / ratio) as usize;
+        let mut resampled = Vec::with_capacity(new_len);
+
+        for i in 0..new_len {
+            let src_idx = i as f64 * ratio;
+            let idx = src_idx as usize;
+            let frac = src_idx - idx as f64;
+
+            let sample = if idx + 1 < samples.len() {
+                samples[idx] * (1.0 - frac as f32) + samples[idx + 1] * frac as f32
+            } else {
+                samples[idx]
+            };
+            resampled.push(sample);
+        }
+
+        resampled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_model_size_filename() {
+        assert_eq!(ModelSize::Tiny.filename(), "ggml-tiny.bin");
+        assert_eq!(ModelSize::LargeV3Turbo.filename(), "ggml-large-v3-turbo.bin");
+    }
+
+    #[test]
+    fn test_model_not_found() {
+        let result = Transcriber::new(Path::new("/nonexistent/model.bin"));
+        assert!(matches!(result, Err(VoiceKeyboardError::ModelNotFound(_))));
+    }
+}

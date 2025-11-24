@@ -1,0 +1,66 @@
+[package]
+name = "voice-keyboard"
+version = "0.1.0"
+edition = "2021"
+authors = ["Alex Mak"]
+description = "Push-to-talk voice keyboard with local Whisper recognition"
+license = "MIT"
+repository = "https://github.com/alexmak/voice-keyboard"
+
+[dependencies]
+# Whisper speech recognition
+whisper-rs = "0.15"
+
+# Audio recording
+cpal = "0.15"
+hound = "3.5"  # WAV file handling
+
+# Global hotkeys (macOS/Windows/Linux)
+rdev = "0.5"
+
+# Text injection / clipboard
+arboard = "3"  # Cross-platform clipboard
+enigo = "0.2"  # Keyboard simulation (macOS needs Accessibility)
+
+# System tray
+tray-icon = "0.19"
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+# Config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "5"  # Platform-specific config paths
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+
+[features]
+default = []
+# Use CoreML on macOS for faster inference (requires macOS build)
+coreml = ["whisper-rs/coreml"]
+# Metal GPU acceleration on macOS
+metal = ["whisper-rs/metal"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# macOS app bundle settings
+[package.metadata.bundle]
+name = "Voice Keyboard"
+identifier = "com.alexmak.voice-keyboard"
+icon = ["icons/icon.icns"]
+category = "public.app-category.productivity"
+short_description = "Voice to text input"
