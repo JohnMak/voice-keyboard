@@ -40,7 +40,6 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn run_macos() {
-    use enigo::{Direction, Enigo, Key as EnigoKey, Keyboard, Settings};
 
     let last_tap: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let last_tap_clone = Arc::clone(&last_tap);
