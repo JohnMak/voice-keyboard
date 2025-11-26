@@ -1,7 +1,6 @@
 //! Voice Typer - Record audio, transcribe with Whisper, paste text
 //!
-//! Double-tap Left Control to start recording
-//! Single tap Left Control to stop, transcribe, and paste text
+//! Push-to-talk: Hold Fn key to record, release to transcribe and paste
 //!
 //! Usage:
 //!   cargo run --bin voice-typer --features whisper
@@ -21,8 +20,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use arboard::Clipboard;
 
-/// Double-tap detection timeout
-const DOUBLE_TAP_TIMEOUT_MS: u64 = 500;
+/// Minimum recording duration to process (avoid accidental taps)
+const MIN_RECORDING_MS: u64 = 300;
 
 /// Whisper sample rate (16kHz)
 #[allow(dead_code)]
@@ -454,7 +453,7 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
     let state: Arc<Mutex<RecordingState>> = Arc::new(Mutex::new(RecordingState::Idle));
     let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
     let stream: Arc<Mutex<Option<Stream>>> = Arc::new(Mutex::new(None));
-    let last_tap: Arc<Mutex<(Option<Instant>, Option<Instant>)>> = Arc::new(Mutex::new((None, None)));
+    let recording_start: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
     // Streaming transcription state
     let transcriber: Arc<Mutex<StreamingTranscriber>> = Arc::new(Mutex::new(StreamingTranscriber::new()));
@@ -466,7 +465,7 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
     let state_clone = Arc::clone(&state);
     let samples_clone = Arc::clone(&samples);
     let stream_clone = Arc::clone(&stream);
-    let last_tap_clone = Arc::clone(&last_tap);
+    let recording_start_clone = Arc::clone(&recording_start);
     let whisper_clone = Arc::clone(&whisper);
     let transcriber_clone = Arc::clone(&transcriber);
     let result_tx_clone = result_tx;
@@ -527,63 +526,66 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
     });
 
     let callback = move |event: Event| {
-        if let EventType::KeyRelease(Key::ControlLeft) = event.event_type {
-            let mut tap_state = last_tap_clone.lock().unwrap();
-            let now = Instant::now();
+        match event.event_type {
+            // Fn key pressed - start recording
+            EventType::KeyPress(Key::Function) => {
+                let mut rec_state = state_clone.lock().unwrap();
 
-            // Cooldown after action
-            if let Some(last_insert) = tap_state.1 {
-                if now.duration_since(last_insert) < Duration::from_millis(500) {
-                    return;
+                if *rec_state == RecordingState::Idle {
+                    // Reset transcriber for new recording
+                    transcriber_clone.lock().unwrap().reset();
+
+                    // Clear previous samples
+                    samples_clone.lock().unwrap().clear();
+
+                    // Play start beep
+                    play_start_beep();
+
+                    // Record start time
+                    *recording_start_clone.lock().unwrap() = Some(Instant::now());
+
+                    println!("[{}] Recording...", timestamp());
+
+                    // Start recording
+                    let samples_for_stream = Arc::clone(&samples_clone);
+                    match start_recording(samples_for_stream) {
+                        Ok(new_stream) => {
+                            *stream_clone.lock().unwrap() = Some(new_stream);
+                            *rec_state = RecordingState::Recording;
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to start recording: {}", e);
+                        }
+                    }
                 }
             }
 
-            let mut rec_state = state_clone.lock().unwrap();
+            // Fn key released - stop and transcribe
+            EventType::KeyRelease(Key::Function) => {
+                let mut rec_state = state_clone.lock().unwrap();
 
-            match *rec_state {
-                RecordingState::Idle => {
-                    // Check for double-tap to start recording
-                    if let Some(prev) = tap_state.0 {
-                        if now.duration_since(prev) < Duration::from_millis(DOUBLE_TAP_TIMEOUT_MS) {
-                            // Double-tap detected - start recording
-                            tap_state.0 = None;
-                            tap_state.1 = Some(now);
+                if *rec_state == RecordingState::Recording {
+                    // Check recording duration
+                    let recording_duration = recording_start_clone.lock().unwrap()
+                        .map(|start| start.elapsed())
+                        .unwrap_or(Duration::ZERO);
 
-                            // Reset transcriber for new recording
-                            transcriber_clone.lock().unwrap().reset();
-
-                            // Play start beep
-                            play_start_beep();
-
-                            println!("[{}] Recording (streaming)...", timestamp());
-
-                            // Start recording
-                            let samples_for_stream = Arc::clone(&samples_clone);
-                            match start_recording(samples_for_stream) {
-                                Ok(new_stream) => {
-                                    *stream_clone.lock().unwrap() = Some(new_stream);
-                                    *rec_state = RecordingState::Recording;
-                                }
-                                Err(e) => {
-                                    eprintln!("Failed to start recording: {}", e);
-                                }
-                            }
-                            return;
-                        }
-                    }
-                    // First tap - record time
-                    tap_state.0 = Some(now);
-                    println!("[{}] (double-tap to record)", timestamp());
-                }
-                RecordingState::Recording => {
                     // Play stop beep
                     play_stop_beep();
-
-                    tap_state.1 = Some(now);
 
                     // Stop stream
                     if let Some(s) = stream_clone.lock().unwrap().take() {
                         drop(s);
+                    }
+
+                    *rec_state = RecordingState::Idle;
+                    *recording_start_clone.lock().unwrap() = None;
+
+                    // Check minimum duration
+                    if recording_duration < Duration::from_millis(MIN_RECORDING_MS) {
+                        println!("[{}] Recording too short, ignoring", timestamp());
+                        samples_clone.lock().unwrap().clear();
+                        return;
                     }
 
                     // Get samples and remaining chunk
@@ -593,12 +595,8 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                         (trans.get_remaining(&s), trans.chunks_sent)
                     };
 
-                    *rec_state = RecordingState::Idle;
-                    tap_state.0 = None;
-
-                    // Drop locks before processing
+                    // Drop lock before processing
                     drop(rec_state);
-                    drop(tap_state);
 
                     // Collect any completed chunk results
                     {
@@ -608,7 +606,11 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                         }
                     }
 
-                    println!("[{}] Finalizing ({} chunks pre-processed)...", timestamp(), chunks_sent);
+                    if chunks_sent > 0 {
+                        println!("[{}] Finalizing ({} chunks pre-processed)...", timestamp(), chunks_sent);
+                    } else {
+                        println!("[{}] Transcribing...", timestamp());
+                    }
 
                     // Process remaining audio (last chunk)
                     if !remaining_samples.is_empty() {
@@ -644,7 +646,7 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                         if transcriber_clone.lock().unwrap().all_chunks_done() {
                             break;
                         }
-                        thread::sleep(Duration::from_millis(50));
+                        std::thread::sleep(Duration::from_millis(50));
                     }
 
                     // Get final text
@@ -665,10 +667,12 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                     }
                 }
             }
+
+            _ => {}
         }
     };
 
-    println!("[{}] Ready! Double-tap Control to record.", timestamp());
+    println!("[{}] Ready! Hold Fn key to record, release to transcribe.", timestamp());
     println!("Streaming mode: chunks processed every {:.0}s", STREAM_CHUNK_SECS);
 
     if let Err(e) = listen(callback) {
