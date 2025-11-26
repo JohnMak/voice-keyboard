@@ -804,9 +804,20 @@ fn timestamp() -> String {
     format!("{:02}:{:02}:{:02}", hours, mins, secs)
 }
 
-/// Play a beep sound at the specified frequency using Core Audio
+/// Play a beep sound at the specified frequency using Core Audio (non-blocking)
 #[cfg(target_os = "macos")]
 fn play_beep(frequency: f32, duration_ms: u64) {
+    use std::thread;
+
+    // Spawn thread to play sound without blocking
+    thread::spawn(move || {
+        play_beep_blocking(frequency, duration_ms);
+    });
+}
+
+/// Play a beep sound (blocking version)
+#[cfg(target_os = "macos")]
+fn play_beep_blocking(frequency: f32, duration_ms: u64) {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use std::sync::atomic::{AtomicBool, Ordering};
 
