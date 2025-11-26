@@ -111,6 +111,9 @@ fn insert_text(text: &str) -> Result<(), String> {
     clipboard.set_text(text.to_string())
         .map_err(|e| format!("Failed to set clipboard: {}", e))?;
 
+    // Small delay to ensure clipboard is updated
+    std::thread::sleep(Duration::from_millis(10));
+
     // Simulate Cmd+V
     #[cfg(target_os = "macos")]
     {
