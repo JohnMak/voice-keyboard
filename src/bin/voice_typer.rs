@@ -1,0 +1,375 @@
+//! Voice Typer - Record audio, transcribe with Whisper, paste text
+//!
+//! Double-tap Left Control to start recording
+//! Single tap Left Control to stop, transcribe, and paste text
+//!
+//! Usage:
+//!   cargo run --bin voice-typer --features whisper
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+#[cfg(target_os = "macos")]
+use rdev::{listen, Event, EventType, Key};
+
+#[cfg(target_os = "macos")]
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+use arboard::Clipboard;
+
+/// Double-tap detection timeout
+const DOUBLE_TAP_TIMEOUT_MS: u64 = 500;
+
+/// Whisper sample rate (16kHz)
+const WHISPER_SAMPLE_RATE: u32 = 16000;
+
+/// Recording state
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RecordingState {
+    Idle,
+    Recording,
+}
+
+fn main() {
+    println!("Voice Typer");
+    println!("===========");
+    println!("Double-tap Left Control to START recording");
+    println!("Single tap Left Control to STOP, transcribe, and paste text");
+    println!("Press Ctrl+C to exit\n");
+
+    // Check for Whisper model
+    let model_path = get_model_path();
+    if !model_path.exists() {
+        eprintln!("Whisper model not found at: {}", model_path.display());
+        eprintln!("\nPlease download a model:");
+        eprintln!("  mkdir -p ~/.local/share/voice-keyboard/models");
+        eprintln!("  curl -L -o ~/.local/share/voice-keyboard/models/ggml-base.bin \\");
+        eprintln!("    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin");
+        std::process::exit(1);
+    }
+
+    println!("Loading Whisper model: {}", model_path.display());
+
+    #[cfg(feature = "whisper")]
+    {
+        match load_whisper(&model_path) {
+            Ok(ctx) => {
+                println!("Whisper model loaded!\n");
+                #[cfg(target_os = "macos")]
+                run_macos(ctx);
+            }
+            Err(e) => {
+                eprintln!("Failed to load Whisper model: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "whisper"))]
+    {
+        eprintln!("This binary requires the 'whisper' feature.");
+        eprintln!("Run with: cargo run --bin voice-typer --features whisper");
+        std::process::exit(1);
+    }
+}
+
+fn get_model_path() -> PathBuf {
+    // Check environment variable first
+    if let Ok(path) = std::env::var("MODEL_PATH") {
+        return PathBuf::from(path);
+    }
+
+    // Default path
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".local/share/voice-keyboard/models/ggml-base.bin")
+}
+
+#[cfg(feature = "whisper")]
+fn load_whisper(model_path: &PathBuf) -> Result<whisper_rs::WhisperContext, String> {
+    use whisper_rs::WhisperContextParameters;
+
+    let params = WhisperContextParameters::default();
+    whisper_rs::WhisperContext::new_with_params(
+        model_path.to_str().unwrap(),
+        params,
+    ).map_err(|e| format!("Failed to load model: {}", e))
+}
+
+#[cfg(feature = "whisper")]
+fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32]) -> Result<String, String> {
+    use whisper_rs::{FullParams, SamplingStrategy};
+
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+
+    // Configure for best results
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    params.set_translate(false);
+    params.set_no_context(true);
+    params.set_single_segment(false);
+    params.set_language(None); // Auto-detect
+
+    let mut state = ctx.create_state()
+        .map_err(|e| format!("Failed to create state: {}", e))?;
+
+    state.full(params, samples)
+        .map_err(|e| format!("Transcription failed: {}", e))?;
+
+    let num_segments = state.full_n_segments()
+        .map_err(|e| format!("Failed to get segments: {}", e))?;
+
+    let mut text = String::new();
+    for i in 0..num_segments {
+        if let Ok(segment) = state.full_get_segment_text(i) {
+            text.push_str(&segment);
+        }
+    }
+
+    Ok(text.trim().to_string())
+}
+
+#[cfg(all(target_os = "macos", feature = "whisper"))]
+fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
+    use cpal::Stream;
+
+    // Wrap Whisper context in Arc for sharing
+    let whisper = Arc::new(whisper_ctx);
+
+    // Shared state
+    let state: Arc<Mutex<RecordingState>> = Arc::new(Mutex::new(RecordingState::Idle));
+    let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+    let stream: Arc<Mutex<Option<Stream>>> = Arc::new(Mutex::new(None));
+    let last_tap: Arc<Mutex<(Option<Instant>, Option<Instant>)>> = Arc::new(Mutex::new((None, None)));
+
+    let state_clone = Arc::clone(&state);
+    let samples_clone = Arc::clone(&samples);
+    let stream_clone = Arc::clone(&stream);
+    let last_tap_clone = Arc::clone(&last_tap);
+    let whisper_clone = Arc::clone(&whisper);
+
+    let callback = move |event: Event| {
+        if let EventType::KeyRelease(Key::ControlLeft) = event.event_type {
+            let mut tap_state = last_tap_clone.lock().unwrap();
+            let now = Instant::now();
+
+            // Cooldown after action
+            if let Some(last_insert) = tap_state.1 {
+                if now.duration_since(last_insert) < Duration::from_millis(500) {
+                    return;
+                }
+            }
+
+            let mut rec_state = state_clone.lock().unwrap();
+
+            match *rec_state {
+                RecordingState::Idle => {
+                    // Check for double-tap to start recording
+                    if let Some(prev) = tap_state.0 {
+                        if now.duration_since(prev) < Duration::from_millis(DOUBLE_TAP_TIMEOUT_MS) {
+                            // Double-tap detected - start recording
+                            println!("[{}] Recording...", timestamp());
+
+                            tap_state.0 = None;
+                            tap_state.1 = Some(now);
+
+                            // Start recording
+                            let samples_for_stream = Arc::clone(&samples_clone);
+                            match start_recording(samples_for_stream) {
+                                Ok(new_stream) => {
+                                    *stream_clone.lock().unwrap() = Some(new_stream);
+                                    *rec_state = RecordingState::Recording;
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to start recording: {}", e);
+                                }
+                            }
+                            return;
+                        }
+                    }
+                    // First tap - record time
+                    tap_state.0 = Some(now);
+                    println!("[{}] (double-tap to record)", timestamp());
+                }
+                RecordingState::Recording => {
+                    // Single tap while recording - stop and transcribe
+                    println!("[{}] Transcribing...", timestamp());
+
+                    tap_state.1 = Some(now);
+
+                    // Stop stream
+                    if let Some(s) = stream_clone.lock().unwrap().take() {
+                        drop(s);
+                    }
+
+                    // Get samples
+                    let recorded_samples: Vec<f32> = {
+                        let mut s = samples_clone.lock().unwrap();
+                        std::mem::take(&mut *s)
+                    };
+
+                    *rec_state = RecordingState::Idle;
+                    tap_state.0 = None;
+
+                    // Drop locks before processing
+                    drop(rec_state);
+                    drop(tap_state);
+
+                    if recorded_samples.is_empty() {
+                        println!("[{}] No audio recorded", timestamp());
+                        return;
+                    }
+
+                    let duration_secs = recorded_samples.len() as f32 / 48000.0;
+                    println!("[{}] Recorded {:.1}s", timestamp(), duration_secs);
+
+                    // Resample from 48kHz to 16kHz for Whisper
+                    let resampled = resample_48k_to_16k(&recorded_samples);
+
+                    // Transcribe
+                    match transcribe(&whisper_clone, &resampled) {
+                        Ok(text) => {
+                            if text.is_empty() {
+                                println!("[{}] (no speech detected)", timestamp());
+                            } else {
+                                println!("[{}] \"{}\"", timestamp(), text);
+
+                                // Paste text
+                                if let Err(e) = paste_text(&text) {
+                                    eprintln!("Failed to paste: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Transcription error: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    println!("[{}] Ready! Double-tap Control to record.", timestamp());
+
+    if let Err(e) = listen(callback) {
+        eprintln!("Error: {:?}", e);
+        eprintln!("\nGrant Input Monitoring permission:");
+        eprintln!("System Settings → Privacy & Security → Input Monitoring");
+    }
+}
+
+/// Resample from 48kHz to 16kHz (simple decimation)
+fn resample_48k_to_16k(samples: &[f32]) -> Vec<f32> {
+    // 48000 / 16000 = 3, so take every 3rd sample
+    samples.iter().step_by(3).copied().collect()
+}
+
+#[cfg(target_os = "macos")]
+fn start_recording(samples: Arc<Mutex<Vec<f32>>>) -> Result<cpal::Stream, String> {
+    use cpal::SampleFormat;
+
+    let host = cpal::default_host();
+    let device = host.default_input_device()
+        .ok_or("No input device found")?;
+
+    let config = device.default_input_config()
+        .map_err(|e| format!("Failed to get input config: {}", e))?;
+
+    let channels = config.channels() as usize;
+
+    // Clear previous samples
+    samples.lock().unwrap().clear();
+
+    let err_fn = |err| eprintln!("Audio stream error: {}", err);
+
+    let stream = match config.sample_format() {
+        SampleFormat::F32 => device.build_input_stream(
+            &config.into(),
+            move |data: &[f32], _| {
+                let mut s = samples.lock().unwrap();
+                for chunk in data.chunks(channels) {
+                    let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;
+                    s.push(mono);
+                }
+            },
+            err_fn,
+            None,
+        ),
+        SampleFormat::I16 => {
+            let samples_clone = Arc::clone(&samples);
+            device.build_input_stream(
+                &config.into(),
+                move |data: &[i16], _| {
+                    let mut s = samples_clone.lock().unwrap();
+                    for chunk in data.chunks(channels) {
+                        let mono: f32 = chunk.iter()
+                            .map(|&x| x as f32 / i16::MAX as f32)
+                            .sum::<f32>() / channels as f32;
+                        s.push(mono);
+                    }
+                },
+                err_fn,
+                None,
+            )
+        }
+        _ => return Err("Unsupported sample format".to_string()),
+    }.map_err(|e| format!("Failed to build stream: {}", e))?;
+
+    stream.play().map_err(|e| format!("Failed to start stream: {}", e))?;
+
+    Ok(stream)
+}
+
+fn paste_text(text: &str) -> Result<(), String> {
+    let mut clipboard = Clipboard::new()
+        .map_err(|e| format!("Clipboard error: {}", e))?;
+
+    // Save previous clipboard
+    let previous = clipboard.get_text().ok();
+
+    // Set text
+    clipboard.set_text(text.to_string())
+        .map_err(|e| format!("Failed to set clipboard: {}", e))?;
+
+    // Small delay
+    std::thread::sleep(Duration::from_millis(10));
+
+    // Simulate Cmd+V
+    #[cfg(target_os = "macos")]
+    {
+        use enigo::{Direction, Enigo, Key as EnigoKey, Keyboard, Settings};
+
+        let mut enigo = Enigo::new(&Settings::default())
+            .map_err(|e| format!("Enigo error: {}", e))?;
+
+        enigo.key(EnigoKey::Meta, Direction::Press)
+            .map_err(|e| format!("Key error: {}", e))?;
+        enigo.key(EnigoKey::Unicode('v'), Direction::Click)
+            .map_err(|e| format!("Key error: {}", e))?;
+        enigo.key(EnigoKey::Meta, Direction::Release)
+            .map_err(|e| format!("Key error: {}", e))?;
+    }
+
+    // Restore previous clipboard
+    std::thread::sleep(Duration::from_millis(100));
+    if let Some(prev) = previous {
+        let _ = clipboard.set_text(prev);
+    }
+
+    Ok(())
+}
+
+fn timestamp() -> String {
+    use std::time::SystemTime;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap();
+    let secs = now.as_secs() % 86400;
+    let hours = (secs / 3600) % 24;
+    let mins = (secs % 3600) / 60;
+    let secs = secs % 60;
+    format!("{:02}:{:02}:{:02}", hours, mins, secs)
+}

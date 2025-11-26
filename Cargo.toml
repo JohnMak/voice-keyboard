@@ -52,6 +52,11 @@ path = "src/bin/minimal.rs"
 name = "voice-recorder"
 path = "src/bin/voice_recorder.rs"
 
+# Voice typer binary - record, transcribe with Whisper, paste text
+[[bin]]
+name = "voice-typer"
+path = "src/bin/voice_typer.rs"
+
 [dev-dependencies]
 tempfile = "3"
 assert_cmd = "2"
