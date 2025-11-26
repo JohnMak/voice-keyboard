@@ -150,14 +150,79 @@ Voice Keyboard requires these permissions:
 
 ## Models
 
-| Model | Size | RAM | Speed | Quality |
-|-------|------|-----|-------|---------|
-| tiny | 75 MB | ~400 MB | ~30x | Basic |
-| base | 142 MB | ~500 MB | ~20x | Good |
-| small | 466 MB | ~1 GB | ~10x | Better |
-| **large-v3-turbo** | 1.6 GB | ~3 GB | ~10x | **Best** |
+### Comparison
 
-Download from [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp).
+| Model | Size | RAM | Speed | Quality | Best For |
+|-------|------|-----|-------|---------|----------|
+| tiny | 75 MB | ~400 MB | ~32x | Basic | Testing, low-end devices |
+| base | 142 MB | ~500 MB | ~16x | Good | Quick transcription |
+| small | 466 MB | ~1 GB | ~6x | Very Good | Balanced quality/speed |
+| medium | 1.5 GB | ~3 GB | ~2x | Excellent | High accuracy |
+| **large-v3-turbo** | **1.6 GB** | **~3 GB** | **~8x** | **Best** | **Recommended** |
+
+> **Recommendation**: Use **large-v3-turbo** for the best quality with good speed. It's optimized to run nearly as fast as medium while maintaining large-v3 quality. Excellent for Russian and English.
+
+### Installation
+
+Models are stored in `~/.local/share/voice-keyboard/models/`
+
+```bash
+# Create models directory
+mkdir -p ~/.local/share/voice-keyboard/models
+cd ~/.local/share/voice-keyboard/models
+```
+
+#### Recommended: large-v3-turbo (Best quality, fast)
+
+```bash
+curl -L -O https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
+```
+
+#### Alternative models
+
+```bash
+# tiny - For testing (75 MB)
+curl -L -O https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
+
+# base - Good balance for older hardware (142 MB)
+curl -L -O https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+
+# small - Very good quality (466 MB)
+curl -L -O https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
+
+# medium - Excellent quality, slower (1.5 GB)
+curl -L -O https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin
+```
+
+### Hardware Acceleration (macOS)
+
+For Apple Silicon Macs (M1/M2/M3/M4), enable GPU acceleration:
+
+```bash
+# Metal acceleration (recommended for Apple Silicon)
+cargo build --release --features "whisper,metal"
+
+# CoreML acceleration (alternative)
+cargo build --release --features "whisper,coreml"
+```
+
+Metal provides ~2-3x speedup over CPU-only inference.
+
+### Specifying Model Path
+
+Set the model path via environment variable or config:
+
+```bash
+# Via environment variable
+MODEL_PATH=~/.local/share/voice-keyboard/models/ggml-large-v3-turbo.bin ./voice-typer
+
+# Or in config.json
+{
+  "model_path": "~/.local/share/voice-keyboard/models/ggml-large-v3-turbo.bin"
+}
+```
+
+All models available at [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp).
 
 ## License
 
