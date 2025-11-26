@@ -620,9 +620,10 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                             match transcribe(&whisper_clone, &resampled) {
                                 Ok(text) => {
                                     let mut trans = transcriber_clone.lock().unwrap();
+                                    let chunk_index = trans.chunks_sent;
                                     trans.add_result(ChunkResult {
                                         text,
-                                        chunk_index: trans.chunks_sent,
+                                        chunk_index,
                                     });
                                     trans.chunks_sent += 1;
                                 }
