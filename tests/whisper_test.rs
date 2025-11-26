@@ -72,12 +72,14 @@ mod tests {
         let mut state = ctx.create_state().expect("Failed to create state");
         state.full(params, samples).expect("Transcription failed");
 
-        let num_segments = state.full_n_segments().expect("Failed to get segments");
+        let num_segments = state.full_n_segments();
 
         let mut text = String::new();
         for i in 0..num_segments {
-            if let Ok(segment) = state.full_get_segment_text(i) {
-                text.push_str(&segment);
+            if let Some(segment) = state.get_segment(i) {
+                if let Ok(segment_text) = segment.to_str_lossy() {
+                    text.push_str(&segment_text);
+                }
             }
         }
 

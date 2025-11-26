@@ -125,14 +125,14 @@ impl Transcriber {
             .map_err(|e| VoiceKeyboardError::Transcription(format!("Transcription failed: {e}")))?;
 
         // Collect results
-        let num_segments = state.full_n_segments().map_err(|e| {
-            VoiceKeyboardError::Transcription(format!("Failed to get segments: {e}"))
-        })?;
+        let num_segments = state.full_n_segments();
 
         let mut text = String::new();
         for i in 0..num_segments {
-            if let Ok(segment) = state.full_get_segment_text(i) {
-                text.push_str(&segment);
+            if let Some(segment) = state.get_segment(i) {
+                if let Ok(segment_text) = segment.to_str_lossy() {
+                    text.push_str(&segment_text);
+                }
             }
         }
 
@@ -140,10 +140,8 @@ impl Transcriber {
 
         // Detect language if auto
         let detected_language = if self.language.is_none() {
-            state
-                .full_lang_id()
-                .ok()
-                .and_then(|id| whisper_rs::get_lang_str(id).map(|s| s.to_string()))
+            let lang_id = state.full_lang_id_from_state();
+            whisper_rs::get_lang_str(lang_id).map(|s| s.to_string())
         } else {
             self.language.clone()
         };

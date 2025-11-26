@@ -119,13 +119,14 @@ fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32]) -> Result<Strin
     state.full(params, samples)
         .map_err(|e| format!("Transcription failed: {}", e))?;
 
-    let num_segments = state.full_n_segments()
-        .map_err(|e| format!("Failed to get segments: {}", e))?;
+    let num_segments = state.full_n_segments();
 
     let mut text = String::new();
     for i in 0..num_segments {
-        if let Ok(segment) = state.full_get_segment_text(i) {
-            text.push_str(&segment);
+        if let Some(segment) = state.get_segment(i) {
+            if let Ok(segment_text) = segment.to_str_lossy() {
+                text.push_str(&segment_text);
+            }
         }
     }
 
