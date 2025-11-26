@@ -105,15 +105,19 @@ const BEEP_START_FREQ: f32 = 880.0;  // A5 - higher pitch for start
 const BEEP_STOP_FREQ: f32 = 440.0;   // A4 - lower pitch for stop
 const BEEP_DURATION_MS: u64 = 100;
 
-/// Streaming transcription settings
-/// Chunk size in seconds - process audio every N seconds while recording
-/// 1 second is the minimum recommended for Whisper
-const STREAM_CHUNK_SECS: f32 = 2.0;
-/// No overlap to avoid word duplication between chunks
-/// (overlap requires LocalAgreement algorithm to handle properly)
-const STREAM_OVERLAP_SECS: f32 = 0.0;
 /// Sample rate for recording (48kHz is typical for macOS)
 const RECORDING_SAMPLE_RATE: u32 = 48000;
+
+/// VAD (Voice Activity Detection) settings
+/// Energy threshold for speech detection (0.0 - 1.0)
+/// Lower = more sensitive, higher = less sensitive
+const VAD_ENERGY_THRESHOLD: f32 = 0.01;
+/// Silence duration to consider end of phrase (in milliseconds)
+const VAD_SILENCE_MS: u64 = 300;
+/// Minimum speech duration to process (in milliseconds)
+const VAD_MIN_SPEECH_MS: u64 = 200;
+/// Window size for energy calculation (in milliseconds)
+const VAD_WINDOW_MS: u64 = 20;
 
 /// Recording state
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -122,110 +126,117 @@ enum RecordingState {
     Recording,
 }
 
-/// Result from a streaming chunk transcription
+/// VAD-based phrase detector
 #[cfg(all(target_os = "macos", feature = "whisper"))]
-struct ChunkResult {
-    text: String,
-    chunk_index: usize,
-}
-
-/// Streaming transcription manager
-#[cfg(all(target_os = "macos", feature = "whisper"))]
-struct StreamingTranscriber {
-    /// Accumulated transcription results from completed chunks
-    results: Vec<String>,
-    /// Number of chunks that have been sent for processing
-    chunks_sent: usize,
-    /// Number of chunks that have completed processing
-    chunks_done: usize,
-    /// Samples per chunk at recording sample rate
-    samples_per_chunk: usize,
-    /// Overlap samples at recording sample rate
-    overlap_samples: usize,
+struct VadPhraseDetector {
+    /// Samples per VAD window
+    window_samples: usize,
+    /// Number of silent windows to trigger end of phrase
+    silence_windows_threshold: usize,
+    /// Minimum windows of speech to consider valid
+    min_speech_windows: usize,
+    /// Current count of consecutive silent windows
+    silent_windows: usize,
+    /// Whether we're currently in speech
+    in_speech: bool,
+    /// Start position of current phrase
+    phrase_start: usize,
     /// Position up to which we've processed
     processed_pos: usize,
 }
 
 #[cfg(all(target_os = "macos", feature = "whisper"))]
-impl StreamingTranscriber {
+impl VadPhraseDetector {
     fn new() -> Self {
-        let samples_per_chunk = (STREAM_CHUNK_SECS * RECORDING_SAMPLE_RATE as f32) as usize;
-        let overlap_samples = (STREAM_OVERLAP_SECS * RECORDING_SAMPLE_RATE as f32) as usize;
+        let window_samples = (VAD_WINDOW_MS as f32 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize;
+        let silence_windows_threshold = (VAD_SILENCE_MS / VAD_WINDOW_MS) as usize;
+        let min_speech_windows = (VAD_MIN_SPEECH_MS / VAD_WINDOW_MS) as usize;
 
         Self {
-            results: Vec::new(),
-            chunks_sent: 0,
-            chunks_done: 0,
-            samples_per_chunk,
-            overlap_samples,
+            window_samples,
+            silence_windows_threshold,
+            min_speech_windows,
+            silent_windows: 0,
+            in_speech: false,
+            phrase_start: 0,
             processed_pos: 0,
         }
     }
 
-    /// Check if there's enough audio for a new chunk
-    fn has_pending_chunk(&self, total_samples: usize) -> bool {
-        let next_chunk_end = self.processed_pos + self.samples_per_chunk;
-        total_samples >= next_chunk_end
+    /// Calculate RMS energy of a window
+    fn calculate_energy(&self, samples: &[f32]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+        (sum_sq / samples.len() as f32).sqrt()
     }
 
-    /// Get the next chunk to process (with overlap from previous)
-    fn get_next_chunk(&mut self, all_samples: &[f32]) -> Option<(Vec<f32>, usize)> {
-        let chunk_end = self.processed_pos + self.samples_per_chunk;
+    /// Check for completed phrases and return them
+    /// Returns (phrase_samples, phrase_found)
+    fn detect_phrase(&mut self, all_samples: &[f32]) -> Option<Vec<f32>> {
+        // Process new windows
+        while self.processed_pos + self.window_samples <= all_samples.len() {
+            let window_start = self.processed_pos;
+            let window_end = window_start + self.window_samples;
+            let window = &all_samples[window_start..window_end];
 
-        if all_samples.len() < chunk_end {
-            return None;
+            let energy = self.calculate_energy(window);
+            let is_speech = energy >= VAD_ENERGY_THRESHOLD;
+
+            if is_speech {
+                if !self.in_speech {
+                    // Speech started
+                    self.in_speech = true;
+                    self.phrase_start = window_start;
+                }
+                self.silent_windows = 0;
+            } else if self.in_speech {
+                // In speech but current window is silent
+                self.silent_windows += 1;
+
+                if self.silent_windows >= self.silence_windows_threshold {
+                    // End of phrase detected
+                    let phrase_end = window_start - (self.silent_windows - 1) * self.window_samples;
+                    let phrase_len = phrase_end.saturating_sub(self.phrase_start);
+
+                    // Check minimum length
+                    if phrase_len >= self.min_speech_windows * self.window_samples {
+                        let phrase = all_samples[self.phrase_start..phrase_end].to_vec();
+                        self.in_speech = false;
+                        self.silent_windows = 0;
+                        self.processed_pos = window_end;
+                        return Some(phrase);
+                    } else {
+                        // Too short, ignore
+                        self.in_speech = false;
+                        self.silent_windows = 0;
+                    }
+                }
+            }
+
+            self.processed_pos = window_end;
         }
 
-        // Include overlap from before if available
-        let chunk_start = if self.processed_pos > self.overlap_samples {
-            self.processed_pos - self.overlap_samples
-        } else {
-            0
-        };
-
-        let chunk: Vec<f32> = all_samples[chunk_start..chunk_end].to_vec();
-        let chunk_index = self.chunks_sent;
-
-        self.chunks_sent += 1;
-        self.processed_pos = chunk_end;
-
-        Some((chunk, chunk_index))
+        None
     }
 
-    /// Get remaining audio that hasn't been fully processed
-    fn get_remaining(&self, all_samples: &[f32]) -> Vec<f32> {
-        if self.processed_pos > self.overlap_samples {
-            all_samples[(self.processed_pos - self.overlap_samples)..].to_vec()
-        } else {
-            all_samples.to_vec()
+    /// Get any remaining speech when recording stops
+    fn get_remaining(&self, all_samples: &[f32]) -> Option<Vec<f32>> {
+        if self.in_speech && all_samples.len() > self.phrase_start {
+            let phrase_len = all_samples.len() - self.phrase_start;
+            if phrase_len >= self.min_speech_windows * self.window_samples {
+                return Some(all_samples[self.phrase_start..].to_vec());
+            }
         }
-    }
-
-    /// Record a completed chunk result
-    fn add_result(&mut self, result: ChunkResult) {
-        // Ensure results vector is large enough
-        while self.results.len() <= result.chunk_index {
-            self.results.push(String::new());
-        }
-        self.results[result.chunk_index] = result.text;
-        self.chunks_done += 1;
-    }
-
-    /// Check if all sent chunks are done
-    fn all_chunks_done(&self) -> bool {
-        self.chunks_done >= self.chunks_sent
-    }
-
-    /// Get the final combined transcription
-    fn get_final_text(&self) -> String {
-        self.results.join(" ").trim().to_string()
+        None
     }
 
     /// Reset for new recording
     fn reset(&mut self) {
-        self.results.clear();
-        self.chunks_sent = 0;
-        self.chunks_done = 0;
+        self.silent_windows = 0;
+        self.in_speech = false;
+        self.phrase_start = 0;
         self.processed_pos = 0;
     }
 }
@@ -445,7 +456,6 @@ fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32]) -> Result<Strin
 #[cfg(all(target_os = "macos", feature = "whisper"))]
 fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
     use cpal::Stream;
-    use std::sync::mpsc;
     use std::thread;
 
     // Wrap Whisper context in Arc for sharing
@@ -457,35 +467,29 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
     let stream: Arc<Mutex<Option<Stream>>> = Arc::new(Mutex::new(None));
     let recording_start: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
-    // Streaming transcription state
-    let transcriber: Arc<Mutex<StreamingTranscriber>> = Arc::new(Mutex::new(StreamingTranscriber::new()));
-
-    // Channel for chunk results
-    let (result_tx, result_rx): (mpsc::Sender<ChunkResult>, mpsc::Receiver<ChunkResult>) = mpsc::channel();
-    let result_rx = Arc::new(Mutex::new(result_rx));
+    // VAD phrase detector
+    let vad: Arc<Mutex<VadPhraseDetector>> = Arc::new(Mutex::new(VadPhraseDetector::new()));
 
     let state_clone = Arc::clone(&state);
     let samples_clone = Arc::clone(&samples);
     let stream_clone = Arc::clone(&stream);
     let recording_start_clone = Arc::clone(&recording_start);
     let whisper_clone = Arc::clone(&whisper);
-    let transcriber_clone = Arc::clone(&transcriber);
-    let result_tx_clone = result_tx;
-    let result_rx_clone = Arc::clone(&result_rx);
+    let vad_clone = Arc::clone(&vad);
 
-    // Spawn a timer thread to check for pending chunks during recording
-    let state_for_timer = Arc::clone(&state);
-    let samples_for_timer = Arc::clone(&samples);
-    let whisper_for_timer = Arc::clone(&whisper);
-    let transcriber_for_timer = Arc::clone(&transcriber);
+    // Spawn VAD monitoring thread - detects pauses and transcribes phrases
+    let state_for_vad = Arc::clone(&state);
+    let samples_for_vad = Arc::clone(&samples);
+    let whisper_for_vad = Arc::clone(&whisper);
+    let vad_for_thread = Arc::clone(&vad);
 
     thread::spawn(move || {
         loop {
-            thread::sleep(Duration::from_millis(500)); // Check every 500ms
+            thread::sleep(Duration::from_millis(50)); // Check every 50ms for responsiveness
 
             // Check if we're recording
             let is_recording = {
-                let s = state_for_timer.lock().unwrap();
+                let s = state_for_vad.lock().unwrap();
                 *s == RecordingState::Recording
             };
 
@@ -493,34 +497,31 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                 continue;
             }
 
-            // Check if there's a pending chunk
-            let chunk_data = {
-                let samples = samples_for_timer.lock().unwrap();
-                let mut trans = transcriber_for_timer.lock().unwrap();
-
-                if trans.has_pending_chunk(samples.len()) {
-                    trans.get_next_chunk(&samples)
-                } else {
-                    None
-                }
+            // Check for completed phrases
+            let phrase = {
+                let samples = samples_for_vad.lock().unwrap();
+                let mut vad = vad_for_thread.lock().unwrap();
+                vad.detect_phrase(&samples)
             };
 
-            if let Some((chunk, chunk_index)) = chunk_data {
-                // Process chunk in this thread
-                let whisper = Arc::clone(&whisper_for_timer);
-                let tx = result_tx_clone.clone();
-
-                println!("[{}] Processing chunk {}...", timestamp(), chunk_index + 1);
+            if let Some(phrase_samples) = phrase {
+                let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
+                println!("[{}] Phrase detected ({:.1}s), transcribing...", timestamp(), duration_secs);
 
                 // Resample and transcribe
-                let resampled = resample_48k_to_16k(&chunk);
-                match transcribe(&whisper, &resampled) {
+                let resampled = resample_48k_to_16k(&phrase_samples);
+                match transcribe(&whisper_for_vad, &resampled) {
                     Ok(text) => {
-                        let _ = tx.send(ChunkResult { text, chunk_index });
+                        if !text.is_empty() {
+                            println!("[{}] \"{}\"", timestamp(), text);
+                            // Paste immediately
+                            if let Err(e) = paste_text(&text) {
+                                eprintln!("Failed to paste: {}", e);
+                            }
+                        }
                     }
                     Err(e) => {
-                        eprintln!("Chunk {} error: {}", chunk_index + 1, e);
-                        let _ = tx.send(ChunkResult { text: String::new(), chunk_index });
+                        eprintln!("Transcription error: {}", e);
                     }
                 }
             }
@@ -534,8 +535,8 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                 let mut rec_state = state_clone.lock().unwrap();
 
                 if *rec_state == RecordingState::Idle {
-                    // Reset transcriber for new recording
-                    transcriber_clone.lock().unwrap().reset();
+                    // Reset VAD for new recording
+                    vad_clone.lock().unwrap().reset();
 
                     // Clear previous samples
                     samples_clone.lock().unwrap().clear();
@@ -546,7 +547,7 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                     // Record start time
                     *recording_start_clone.lock().unwrap() = Some(Instant::now());
 
-                    println!("[{}] Recording...", timestamp());
+                    println!("[{}] Recording (VAD mode)...", timestamp());
 
                     // Start recording
                     let samples_for_stream = Arc::clone(&samples_clone);
@@ -562,7 +563,7 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                 }
             }
 
-            // Fn key released - stop and transcribe
+            // Fn key released - stop and process remaining
             EventType::KeyRelease(Key::Function) => {
                 let mut rec_state = state_clone.lock().unwrap();
 
@@ -590,84 +591,42 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                         return;
                     }
 
-                    // Get samples and remaining chunk
-                    let (remaining_samples, chunks_sent) = {
-                        let s = samples_clone.lock().unwrap();
-                        let trans = transcriber_clone.lock().unwrap();
-                        (trans.get_remaining(&s), trans.chunks_sent)
+                    // Process any remaining speech
+                    let remaining = {
+                        let samples = samples_clone.lock().unwrap();
+                        let vad = vad_clone.lock().unwrap();
+                        vad.get_remaining(&samples)
                     };
 
                     // Drop lock before processing
                     drop(rec_state);
 
-                    // Collect any completed chunk results
-                    {
-                        let rx = result_rx_clone.lock().unwrap();
-                        while let Ok(result) = rx.try_recv() {
-                            transcriber_clone.lock().unwrap().add_result(result);
-                        }
-                    }
+                    if let Some(phrase_samples) = remaining {
+                        let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
+                        println!("[{}] Final phrase ({:.1}s), transcribing...", timestamp(), duration_secs);
 
-                    if chunks_sent > 0 {
-                        println!("[{}] Finalizing ({} chunks pre-processed)...", timestamp(), chunks_sent);
+                        let resampled = resample_48k_to_16k(&phrase_samples);
+                        match transcribe(&whisper_clone, &resampled) {
+                            Ok(text) => {
+                                if !text.is_empty() {
+                                    println!("[{}] \"{}\"", timestamp(), text);
+                                    if let Err(e) = paste_text(&text) {
+                                        eprintln!("Failed to paste: {}", e);
+                                    }
+                                } else {
+                                    println!("[{}] (no speech detected)", timestamp());
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Transcription error: {}", e);
+                            }
+                        }
                     } else {
-                        println!("[{}] Transcribing...", timestamp());
+                        println!("[{}] Done", timestamp());
                     }
-
-                    // Process remaining audio (last chunk)
-                    if !remaining_samples.is_empty() {
-                        let duration_secs = remaining_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
-                        if duration_secs > 0.3 { // Only process if more than 300ms
-                            let resampled = resample_48k_to_16k(&remaining_samples);
-                            match transcribe(&whisper_clone, &resampled) {
-                                Ok(text) => {
-                                    let mut trans = transcriber_clone.lock().unwrap();
-                                    let chunk_index = trans.chunks_sent;
-                                    trans.add_result(ChunkResult {
-                                        text,
-                                        chunk_index,
-                                    });
-                                    trans.chunks_sent += 1;
-                                }
-                                Err(e) => {
-                                    eprintln!("Final chunk error: {}", e);
-                                }
-                            }
-                        }
-                    }
-
-                    // Wait briefly for any remaining chunk processing
-                    let start_wait = Instant::now();
-                    while start_wait.elapsed() < Duration::from_millis(500) {
-                        {
-                            let rx = result_rx_clone.lock().unwrap();
-                            while let Ok(result) = rx.try_recv() {
-                                transcriber_clone.lock().unwrap().add_result(result);
-                            }
-                        }
-
-                        if transcriber_clone.lock().unwrap().all_chunks_done() {
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-
-                    // Get final text
-                    let final_text = transcriber_clone.lock().unwrap().get_final_text();
 
                     // Clear samples for next recording
                     samples_clone.lock().unwrap().clear();
-
-                    if final_text.is_empty() {
-                        println!("[{}] (no speech detected)", timestamp());
-                    } else {
-                        println!("[{}] \"{}\"", timestamp(), final_text);
-
-                        // Paste text
-                        if let Err(e) = paste_text(&final_text) {
-                            eprintln!("Failed to paste: {}", e);
-                        }
-                    }
                 }
             }
 
@@ -675,8 +634,8 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
         }
     };
 
-    println!("[{}] Ready! Hold Fn key to record, release to transcribe.", timestamp());
-    println!("Streaming mode: chunks processed every {:.0}s", STREAM_CHUNK_SECS);
+    println!("[{}] Ready! Hold Fn key to record, release to stop.", timestamp());
+    println!("VAD mode: phrases transcribed on {}ms silence", VAD_SILENCE_MS);
 
     if let Err(e) = listen(callback) {
         eprintln!("Error: {:?}", e);

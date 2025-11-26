@@ -8,7 +8,7 @@
 
 use crate::{Result, VoiceKeyboardError};
 use arboard::Clipboard;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Text injection method
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
