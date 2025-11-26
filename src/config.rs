@@ -1,8 +1,6 @@
 //! Configuration management
 
-use crate::hotkey::HotkeyConfig;
 use crate::inject::InjectionMethod;
-use crate::transcribe::ModelSize;
 use crate::{Result, VoiceKeyboardError};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -58,17 +56,6 @@ pub enum ModelSizeConfig {
     LargeV3Turbo,
 }
 
-impl From<ModelSizeConfig> for ModelSize {
-    fn from(config: ModelSizeConfig) -> Self {
-        match config {
-            ModelSizeConfig::Tiny => ModelSize::Tiny,
-            ModelSizeConfig::Base => ModelSize::Base,
-            ModelSizeConfig::Small => ModelSize::Small,
-            ModelSizeConfig::Medium => ModelSize::Medium,
-            ModelSizeConfig::LargeV3Turbo => ModelSize::LargeV3Turbo,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HotkeyConfigSerde {
@@ -184,7 +171,7 @@ impl Default for Config {
         let models_dir = Self::models_dir().unwrap_or_else(|_| PathBuf::from("./models"));
 
         Self {
-            model_path: models_dir.join(ModelSize::LargeV3Turbo.filename()),
+            model_path: models_dir.join("ggml-large-v3-turbo.bin"),
             model_size: ModelSizeConfig::LargeV3Turbo,
             language: "auto".to_string(),
             hotkey: HotkeyConfigSerde::default(),

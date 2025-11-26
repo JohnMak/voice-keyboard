@@ -8,8 +8,8 @@ license = "MIT"
 repository = "https://github.com/alexmak/voice-keyboard"
 
 [dependencies]
-# Whisper speech recognition
-whisper-rs = "0.15"
+# Whisper speech recognition (optional, needs cmake)
+whisper-rs = { version = "0.15", optional = true }
 
 # Audio - WAV file handling (cross-platform)
 hound = "3.5"
@@ -40,12 +40,18 @@ rdev = "0.5"        # Global hotkeys (uses IOKit)
 enigo = "0.2"       # Keyboard simulation (requires Accessibility)
 tray-icon = "0.19"  # System tray
 
+# Minimal binary - standalone, no whisper dependency
+[[bin]]
+name = "minimal"
+path = "src/bin/minimal.rs"
+
 [dev-dependencies]
 tempfile = "3"
 assert_cmd = "2"
 
 [features]
 default = []
+whisper = ["whisper-rs"]
 coreml = ["whisper-rs/coreml"]
 metal = ["whisper-rs/metal"]
 

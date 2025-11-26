@@ -3,13 +3,15 @@
 //! Architecture:
 //! - `hotkey`: Global hotkey listener (push-to-talk trigger)
 //! - `audio`: Microphone recording to WAV buffer
-//! - `transcribe`: Whisper speech-to-text
+//! - `transcribe`: Whisper speech-to-text (requires "whisper" feature)
 //! - `inject`: Text injection into active application
 
 pub mod audio;
 pub mod config;
 pub mod hotkey;
 pub mod inject;
+
+#[cfg(feature = "whisper")]
 pub mod transcribe;
 
 pub use config::Config;
