@@ -62,7 +62,7 @@ pub mod recorder {
             );
 
             let samples = Arc::clone(&self.samples);
-            let source_rate = config.sample_rate().0;
+            let _source_rate = config.sample_rate().0;
             let channels = config.channels() as usize;
 
             let err_fn = |err| error!("Audio stream error: {}", err);

@@ -8,7 +8,7 @@
 
 use crate::{Result, VoiceKeyboardError};
 use arboard::Clipboard;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Text injection method
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -72,15 +72,14 @@ impl TextInjector {
     }
 
     fn inject_via_clipboard(&mut self, text: &str) -> Result<()> {
-        let clipboard = self.clipboard.as_mut().ok_or_else(|| {
-            VoiceKeyboardError::Injection("Clipboard not initialized".to_string())
-        })?;
-
         // Save current clipboard content
-        let previous = clipboard.get_text().ok();
+        let previous = self.clipboard.as_mut()
+            .ok_or_else(|| VoiceKeyboardError::Injection("Clipboard not initialized".to_string()))?
+            .get_text().ok();
 
         // Set new text
-        clipboard
+        self.clipboard.as_mut()
+            .ok_or_else(|| VoiceKeyboardError::Injection("Clipboard not initialized".to_string()))?
             .set_text(text.to_string())
             .map_err(|e| VoiceKeyboardError::Injection(format!("Failed to set clipboard: {e}")))?;
 
@@ -92,7 +91,9 @@ impl TextInjector {
 
         // Restore previous clipboard content
         if let Some(prev) = previous {
-            let _ = clipboard.set_text(prev);
+            if let Some(clipboard) = self.clipboard.as_mut() {
+                let _ = clipboard.set_text(prev);
+            }
         }
 
         Ok(())
