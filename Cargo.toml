@@ -14,6 +14,10 @@ whisper-rs = { version = "0.15", optional = true }
 # Audio - WAV file handling (cross-platform)
 hound = "3.5"
 
+# OGG Opus encoding
+ogg = "0.9"
+opus = "0.3"
+
 # Clipboard (cross-platform)
 arboard = "3"
 
@@ -39,11 +43,18 @@ cpal = "0.15"       # Audio recording (uses CoreAudio)
 rdev = "0.5"        # Global hotkeys (uses IOKit)
 enigo = "0.2"       # Keyboard simulation (requires Accessibility)
 tray-icon = "0.19"  # System tray
+cocoa = "0.26"      # macOS clipboard for files
+objc = "0.2"        # Objective-C runtime
 
 # Minimal binary - standalone, no whisper dependency
 [[bin]]
 name = "minimal"
 path = "src/bin/minimal.rs"
+
+# Voice recorder binary - record audio and paste as OGG file
+[[bin]]
+name = "voice-recorder"
+path = "src/bin/voice_recorder.rs"
 
 [dev-dependencies]
 tempfile = "3"
