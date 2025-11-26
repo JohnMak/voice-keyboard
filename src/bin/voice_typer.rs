@@ -755,8 +755,9 @@ fn paste_text(text: &str) -> Result<(), String> {
     clipboard.set_text(text.to_string())
         .map_err(|e| format!("Failed to set clipboard: {}", e))?;
 
-    // Small delay
-    std::thread::sleep(Duration::from_millis(10));
+    // Delay before paste - important for some apps like Telegram
+    // Gives time for clipboard to be ready and app to be focused
+    std::thread::sleep(Duration::from_millis(50));
 
     // Simulate Cmd+V
     #[cfg(target_os = "macos")]
@@ -766,16 +767,23 @@ fn paste_text(text: &str) -> Result<(), String> {
         let mut enigo = Enigo::new(&Settings::default())
             .map_err(|e| format!("Enigo error: {}", e))?;
 
+        // Add small delays between key events for reliability
         enigo.key(EnigoKey::Meta, Direction::Press)
             .map_err(|e| format!("Key error: {}", e))?;
+
+        std::thread::sleep(Duration::from_millis(10));
+
         enigo.key(EnigoKey::Unicode('v'), Direction::Click)
             .map_err(|e| format!("Key error: {}", e))?;
+
+        std::thread::sleep(Duration::from_millis(10));
+
         enigo.key(EnigoKey::Meta, Direction::Release)
             .map_err(|e| format!("Key error: {}", e))?;
     }
 
-    // Restore previous clipboard
-    std::thread::sleep(Duration::from_millis(100));
+    // Restore previous clipboard after paste completes
+    std::thread::sleep(Duration::from_millis(150));
     if let Some(prev) = previous {
         let _ = clipboard.set_text(prev);
     }
