@@ -5,7 +5,10 @@
 //!
 //! Usage:
 //!   cargo run --bin voice-typer --features whisper
+//!   cargo run --bin voice-typer --features whisper -- --model tiny
+//!   cargo run --bin voice-typer --features whisper -- --model /path/to/model.bin
 
+use std::env;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -22,7 +25,18 @@ use arboard::Clipboard;
 const DOUBLE_TAP_TIMEOUT_MS: u64 = 500;
 
 /// Whisper sample rate (16kHz)
+#[allow(dead_code)]
 const WHISPER_SAMPLE_RATE: u32 = 16000;
+
+/// Available model presets
+const MODEL_PRESETS: &[(&str, &str)] = &[
+    ("tiny", "ggml-tiny.bin"),
+    ("base", "ggml-base.bin"),
+    ("small", "ggml-small.bin"),
+    ("medium", "ggml-medium.bin"),
+    ("large-v3-turbo", "ggml-large-v3-turbo.bin"),
+    ("turbo", "ggml-large-v3-turbo.bin"), // alias
+];
 
 /// Recording state
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -31,7 +45,81 @@ enum RecordingState {
     Recording,
 }
 
+fn print_usage() {
+    println!("Usage: voice-typer [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --model <MODEL>    Model name or path to .bin file");
+    println!("                     Presets: tiny, base, small, medium, large-v3-turbo (or turbo)");
+    println!("                     Default: base");
+    println!("  --list-models      List available model presets");
+    println!("  --help, -h         Show this help");
+    println!();
+    println!("Examples:");
+    println!("  voice-typer --model tiny");
+    println!("  voice-typer --model large-v3-turbo");
+    println!("  voice-typer --model ~/models/ggml-custom.bin");
+    println!();
+    println!("Environment:");
+    println!("  MODEL_PATH         Override model path (lower priority than --model)");
+}
+
+fn list_models() {
+    println!("Available model presets:");
+    println!();
+    println!("  {:20} {:15} {:10} {}", "Name", "File", "Size", "Quality");
+    println!("  {:20} {:15} {:10} {}", "----", "----", "----", "-------");
+    println!("  {:20} {:15} {:10} {}", "tiny", "ggml-tiny.bin", "75 MB", "Basic");
+    println!("  {:20} {:15} {:10} {}", "base", "ggml-base.bin", "142 MB", "Good");
+    println!("  {:20} {:15} {:10} {}", "small", "ggml-small.bin", "466 MB", "Very Good");
+    println!("  {:20} {:15} {:10} {}", "medium", "ggml-medium.bin", "1.5 GB", "Excellent");
+    println!("  {:20} {:15} {:10} {}", "large-v3-turbo", "ggml-large-v3-turbo.bin", "1.6 GB", "Best (recommended)");
+    println!("  {:20} {:15} {:10} {}", "turbo", "(alias for large-v3-turbo)", "", "");
+    println!();
+    println!("Models directory: ~/.local/share/voice-keyboard/models/");
+    println!();
+    println!("Download example:");
+    println!("  curl -L -o ~/.local/share/voice-keyboard/models/ggml-tiny.bin \\");
+    println!("    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin");
+}
+
 fn main() {
+    // Parse command line arguments
+    let args: Vec<String> = env::args().collect();
+    let mut model_arg: Option<String> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--help" | "-h" => {
+                print_usage();
+                return;
+            }
+            "--list-models" => {
+                list_models();
+                return;
+            }
+            "--model" => {
+                if i + 1 < args.len() {
+                    model_arg = Some(args[i + 1].clone());
+                    i += 1;
+                } else {
+                    eprintln!("Error: --model requires an argument");
+                    std::process::exit(1);
+                }
+            }
+            arg if arg.starts_with("--model=") => {
+                model_arg = Some(arg.trim_start_matches("--model=").to_string());
+            }
+            arg => {
+                eprintln!("Unknown argument: {}", arg);
+                eprintln!("Use --help for usage information");
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
     println!("Voice Typer");
     println!("===========");
     println!("Double-tap Left Control to START recording");
@@ -39,7 +127,7 @@ fn main() {
     println!("Press Ctrl+C to exit\n");
 
     // Check for Whisper model
-    let model_path = get_model_path();
+    let model_path = get_model_path(model_arg);
     if !model_path.exists() {
         eprintln!("Whisper model not found at: {}", model_path.display());
         eprintln!("\nPlease download a model:");
@@ -74,16 +162,46 @@ fn main() {
     }
 }
 
-fn get_model_path() -> PathBuf {
-    // Check environment variable first
-    if let Ok(path) = std::env::var("MODEL_PATH") {
+fn get_models_dir() -> PathBuf {
+    let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".local/share/voice-keyboard/models")
+}
+
+fn resolve_model_path(model: &str) -> PathBuf {
+    // Check if it's a preset name
+    for (name, filename) in MODEL_PRESETS {
+        if model.eq_ignore_ascii_case(name) {
+            return get_models_dir().join(filename);
+        }
+    }
+
+    // Check if it's a path (contains / or \ or ends with .bin)
+    if model.contains('/') || model.contains('\\') || model.ends_with(".bin") {
+        let path = PathBuf::from(model);
+        // Expand ~ to home directory
+        if model.starts_with("~/") {
+            let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            return PathBuf::from(home).join(&model[2..]);
+        }
+        return path;
+    }
+
+    // Assume it's a filename in models directory
+    get_models_dir().join(format!("ggml-{}.bin", model))
+}
+
+fn get_model_path(model_arg: Option<String>) -> PathBuf {
+    // Priority: 1. --model argument, 2. MODEL_PATH env, 3. default (base)
+    if let Some(model) = model_arg {
+        return resolve_model_path(&model);
+    }
+
+    if let Ok(path) = env::var("MODEL_PATH") {
         return PathBuf::from(path);
     }
 
-    // Default path
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".local/share/voice-keyboard/models/ggml-base.bin")
+    // Default to base model
+    get_models_dir().join("ggml-base.bin")
 }
 
 #[cfg(feature = "whisper")]
