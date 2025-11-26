@@ -173,7 +173,6 @@ impl VadPhraseDetector {
     }
 
     /// Check for completed phrases and return them
-    /// Returns (phrase_samples, phrase_found)
     fn detect_phrase(&mut self, all_samples: &[f32]) -> Option<Vec<f32>> {
         // Process new windows
         while self.processed_pos + self.window_samples <= all_samples.len() {
@@ -205,12 +204,14 @@ impl VadPhraseDetector {
                         let phrase = all_samples[self.phrase_start..phrase_end].to_vec();
                         self.in_speech = false;
                         self.silent_windows = 0;
+                        self.phrase_start = window_end; // Reset for next phrase
                         self.processed_pos = window_end;
                         return Some(phrase);
                     } else {
                         // Too short, ignore
                         self.in_speech = false;
                         self.silent_windows = 0;
+                        self.phrase_start = window_end; // Reset for next phrase
                     }
                 }
             }
@@ -227,6 +228,13 @@ impl VadPhraseDetector {
             let phrase_len = all_samples.len() - self.phrase_start;
             if phrase_len >= self.min_speech_windows * self.window_samples {
                 return Some(all_samples[self.phrase_start..].to_vec());
+            }
+        }
+        // Also check if there's unprocessed audio at the end
+        if !self.in_speech && self.processed_pos < all_samples.len() {
+            let remaining_len = all_samples.len() - self.processed_pos;
+            if remaining_len >= self.min_speech_windows * self.window_samples {
+                return Some(all_samples[self.processed_pos..].to_vec());
             }
         }
         None
