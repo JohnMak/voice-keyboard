@@ -40,38 +40,36 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn run_macos() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    let last_tap: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
-    let last_tap_clone = Arc::clone(&last_tap);
-
-    // Flag to ignore events during text insertion
-    let inserting: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    let inserting_clone = Arc::clone(&inserting);
+    // Tracks: (last_tap_time, last_insert_time)
+    let state: Arc<Mutex<(Option<Instant>, Option<Instant>)>> = Arc::new(Mutex::new((None, None)));
+    let state_clone = Arc::clone(&state);
 
     let callback = move |event: Event| {
-        // Ignore events while we're inserting text
-        if inserting_clone.load(Ordering::SeqCst) {
-            return;
-        }
-
         // Only react to KeyRelease of ControlLeft (double-tap detection on release)
         if let EventType::KeyRelease(Key::ControlLeft) = event.event_type {
-            let mut last = last_tap_clone.lock().unwrap();
+            let mut state = state_clone.lock().unwrap();
             let now = Instant::now();
 
-            if let Some(prev) = *last {
+            // Ignore if we inserted recently (cooldown period)
+            if let Some(last_insert) = state.1 {
+                if now.duration_since(last_insert) < Duration::from_millis(500) {
+                    println!("[{}] Ignoring (cooldown after insert)", chrono_lite());
+                    return;
+                }
+            }
+
+            if let Some(prev) = state.0 {
                 let elapsed = now.duration_since(prev);
                 if elapsed < Duration::from_millis(DOUBLE_TAP_TIMEOUT_MS) {
                     // Double-tap detected!
-                    println!("[{}] Double-tap detected! Inserting text...",
-                        chrono_lite());
+                    println!("[{}] Double-tap detected! Inserting text...", chrono_lite());
 
-                    // Clear the last tap to prevent triple-tap triggering again
-                    *last = None;
+                    // Clear the last tap and set insert time
+                    state.0 = None;
+                    state.1 = Some(now);
 
-                    // Set inserting flag
-                    inserting_clone.store(true, Ordering::SeqCst);
+                    // Drop the lock before sleeping/inserting
+                    drop(state);
 
                     // Small delay to ensure Control key is fully released
                     std::thread::sleep(Duration::from_millis(50));
@@ -82,22 +80,12 @@ fn run_macos() {
                     } else {
                         println!("[{}] Text inserted successfully!", chrono_lite());
                     }
-
-                    // Clear inserting flag after a delay
-                    std::thread::sleep(Duration::from_millis(200));
-                    inserting_clone.store(false, Ordering::SeqCst);
-                    return;
-                } else {
-                    // Too slow - this is a new first tap, not a second tap
-                    // Reset and start fresh
-                    *last = Some(now);
-                    println!("[{}] Control released (waiting for double-tap...)", chrono_lite());
                     return;
                 }
             }
 
-            // First tap ever - record it
-            *last = Some(now);
+            // Record this tap (first tap or too slow = new first tap)
+            state.0 = Some(now);
             println!("[{}] Control released (waiting for double-tap...)", chrono_lite());
         }
     };
