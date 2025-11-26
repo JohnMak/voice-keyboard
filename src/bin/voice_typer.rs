@@ -38,6 +38,74 @@ const MODEL_PRESETS: &[(&str, &str)] = &[
     ("turbo", "ggml-large-v3-turbo.bin"), // alias
 ];
 
+/// Initial prompt for Whisper to help with code-switching (Russian + English tech terms)
+/// This helps the model recognize programming terminology and keep anglicisms in English
+const PROGRAMMER_PROMPT: &str = "\
+Технический текст программиста. Сохраняй английские термины как есть: \
+API, REST, GraphQL, JSON, XML, YAML, HTML, CSS, JavaScript, TypeScript, Python, Rust, Go, Java, \
+Git, GitHub, GitLab, CI/CD, Docker, Kubernetes, k8s, AWS, GCP, Azure, \
+DevOps, SRE, backend, frontend, fullstack, dev, prod, staging, localhost, \
+deploy, deployment, rollback, release, hotfix, bugfix, feature, refactoring, \
+pull request, PR, merge, commit, push, branch, master, main, develop, \
+debug, debugging, debugger, breakpoint, stack trace, log, logging, \
+server, client, microservice, monolith, serverless, lambda, \
+database, DB, SQL, NoSQL, PostgreSQL, MySQL, MongoDB, Redis, Elasticsearch, \
+cache, caching, CDN, load balancer, proxy, reverse proxy, nginx, \
+HTTP, HTTPS, WebSocket, TCP, UDP, DNS, SSL, TLS, SSH, \
+framework, library, package, dependency, npm, yarn, pip, cargo, \
+IDE, VS Code, Vim, terminal, console, shell, bash, zsh, \
+variable, function, class, method, object, interface, type, generic, \
+async, await, promise, callback, event, handler, listener, \
+thread, process, concurrency, parallelism, mutex, lock, \
+memory, heap, stack, garbage collector, GC, allocation, \
+test, testing, unit test, integration test, e2e, TDD, mock, stub, \
+build, compile, runtime, binary, executable, artifact, \
+config, configuration, environment, env, .env, secrets, \
+error, exception, try, catch, throw, panic, Result, Option, \
+string, array, list, map, set, hash, queue, tree, graph, \
+loop, iterator, recursion, algorithm, complexity, O(n), \
+API endpoint, request, response, header, body, payload, \
+authentication, authorization, OAuth, JWT, token, session, cookie, \
+user, admin, role, permission, access control, RBAC, \
+file, directory, path, stream, buffer, reader, writer, \
+JSON.parse, JSON.stringify, fetch, axios, curl, wget, \
+regex, pattern, match, replace, split, join, \
+Linux, Unix, macOS, Windows, Ubuntu, Debian, Alpine, \
+container, image, volume, network, pod, node, cluster, \
+Terraform, Ansible, Helm, ArgoCD, Jenkins, GitHub Actions, \
+Prometheus, Grafana, Datadog, Sentry, New Relic, \
+Kafka, RabbitMQ, SQS, pub/sub, message queue, event bus, \
+S3, bucket, blob, storage, CDN, CloudFront, \
+VPC, subnet, firewall, security group, IAM, \
+CPU, GPU, RAM, SSD, IOPS, latency, throughput, bandwidth, \
+sprint, scrum, agile, kanban, backlog, story, epic, task, \
+Jira, Confluence, Slack, Notion, Linear, \
+npm install, yarn add, pip install, cargo add, \
+git clone, git pull, git push, git merge, git rebase, \
+docker build, docker run, docker-compose, kubectl, \
+SELECT, INSERT, UPDATE, DELETE, JOIN, WHERE, GROUP BY, ORDER BY, \
+PRIMARY KEY, FOREIGN KEY, INDEX, CONSTRAINT, TRANSACTION, \
+useState, useEffect, useContext, useMemo, useCallback, \
+component, props, state, render, virtual DOM, \
+middleware, router, controller, service, repository, \
+DTO, entity, model, schema, migration, seed, \
+singleton, factory, observer, strategy, decorator, \
+SOLID, DRY, KISS, YAGNI, clean code, code review, \
+linter, formatter, ESLint, Prettier, Clippy, \
+webpack, vite, esbuild, rollup, bundler, transpiler, \
+responsive, mobile-first, breakpoint, flexbox, grid, \
+margin, padding, border, shadow, animation, transition, \
+onClick, onChange, onSubmit, preventDefault, \
+localhost:3000, localhost:8080, port, host, domain, URL, URI, \
+staging, production, development, environment variable, \
+README, documentation, docs, changelog, license, \
+open source, MIT, Apache, GPL, npm, crates.io, PyPI";
+
+/// MIDI note frequencies for beep sounds
+const BEEP_START_FREQ: f32 = 880.0;  // A5 - higher pitch for start
+const BEEP_STOP_FREQ: f32 = 440.0;   // A4 - lower pitch for stop
+const BEEP_DURATION_MS: u64 = 100;
+
 /// Recording state
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum RecordingState {
@@ -229,7 +297,13 @@ fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32]) -> Result<Strin
     params.set_translate(false);
     params.set_no_context(true);
     params.set_single_segment(false);
-    params.set_language(None); // Auto-detect
+
+    // Auto-detect language but bias towards Russian + English code-switching
+    params.set_language(None);
+
+    // Set initial prompt with programming terminology
+    // This helps Whisper recognize tech terms and keep them in English
+    params.set_initial_prompt(PROGRAMMER_PROMPT);
 
     let mut state = ctx.create_state()
         .map_err(|e| format!("Failed to create state: {}", e))?;
@@ -290,10 +364,13 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                     if let Some(prev) = tap_state.0 {
                         if now.duration_since(prev) < Duration::from_millis(DOUBLE_TAP_TIMEOUT_MS) {
                             // Double-tap detected - start recording
-                            println!("[{}] Recording...", timestamp());
-
                             tap_state.0 = None;
                             tap_state.1 = Some(now);
+
+                            // Play start beep
+                            play_start_beep();
+
+                            println!("[{}] Recording...", timestamp());
 
                             // Start recording
                             let samples_for_stream = Arc::clone(&samples_clone);
@@ -314,6 +391,9 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                     println!("[{}] (double-tap to record)", timestamp());
                 }
                 RecordingState::Recording => {
+                    // Play stop beep
+                    play_stop_beep();
+
                     // Single tap while recording - stop and transcribe
                     println!("[{}] Transcribing...", timestamp());
 
@@ -491,4 +571,94 @@ fn timestamp() -> String {
     let mins = (secs % 3600) / 60;
     let secs = secs % 60;
     format!("{:02}:{:02}:{:02}", hours, mins, secs)
+}
+
+/// Play a beep sound at the specified frequency using Core Audio
+#[cfg(target_os = "macos")]
+fn play_beep(frequency: f32, duration_ms: u64) {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let host = cpal::default_host();
+    let device = match host.default_output_device() {
+        Some(d) => d,
+        None => return,
+    };
+
+    let config = match device.default_output_config() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let sample_rate = config.sample_rate().0 as f32;
+    let channels = config.channels() as usize;
+
+    let done = Arc::new(AtomicBool::new(false));
+    let done_clone = Arc::clone(&done);
+
+    let mut sample_clock = 0f32;
+    let mut samples_played = 0u64;
+    let total_samples = (sample_rate * duration_ms as f32 / 1000.0) as u64;
+
+    let stream = match device.build_output_stream(
+        &config.into(),
+        move |data: &mut [f32], _| {
+            for frame in data.chunks_mut(channels) {
+                if samples_played >= total_samples {
+                    for sample in frame.iter_mut() {
+                        *sample = 0.0;
+                    }
+                    done_clone.store(true, Ordering::Relaxed);
+                } else {
+                    // Generate sine wave with envelope
+                    let t = samples_played as f32 / total_samples as f32;
+                    // Quick attack, quick decay envelope
+                    let envelope = if t < 0.1 {
+                        t * 10.0
+                    } else if t > 0.7 {
+                        (1.0 - t) / 0.3
+                    } else {
+                        1.0
+                    };
+
+                    let value = (sample_clock * 2.0 * std::f32::consts::PI * frequency / sample_rate).sin()
+                        * 0.3 * envelope;
+
+                    for sample in frame.iter_mut() {
+                        *sample = value;
+                    }
+
+                    sample_clock += 1.0;
+                    samples_played += 1;
+                }
+            }
+        },
+        |err| eprintln!("Audio output error: {}", err),
+        None,
+    ) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let _ = stream.play();
+
+    // Wait for sound to finish
+    while !done.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // Small delay to ensure sound completes
+    std::thread::sleep(Duration::from_millis(20));
+}
+
+/// Play start recording beep (high pitch)
+#[cfg(target_os = "macos")]
+fn play_start_beep() {
+    play_beep(BEEP_START_FREQ, BEEP_DURATION_MS);
+}
+
+/// Play stop recording beep (low pitch)
+#[cfg(target_os = "macos")]
+fn play_stop_beep() {
+    play_beep(BEEP_STOP_FREQ, BEEP_DURATION_MS);
 }
