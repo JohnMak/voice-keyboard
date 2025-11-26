@@ -106,11 +106,127 @@ const BEEP_START_FREQ: f32 = 880.0;  // A5 - higher pitch for start
 const BEEP_STOP_FREQ: f32 = 440.0;   // A4 - lower pitch for stop
 const BEEP_DURATION_MS: u64 = 100;
 
+/// Streaming transcription settings
+/// Chunk size in seconds - process audio every N seconds while recording
+const STREAM_CHUNK_SECS: f32 = 3.0;
+/// Overlap between chunks in seconds - helps with word boundaries
+const STREAM_OVERLAP_SECS: f32 = 0.5;
+/// Sample rate for recording (48kHz is typical for macOS)
+const RECORDING_SAMPLE_RATE: u32 = 48000;
+
 /// Recording state
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum RecordingState {
     Idle,
     Recording,
+}
+
+/// Result from a streaming chunk transcription
+#[cfg(all(target_os = "macos", feature = "whisper"))]
+struct ChunkResult {
+    text: String,
+    chunk_index: usize,
+}
+
+/// Streaming transcription manager
+#[cfg(all(target_os = "macos", feature = "whisper"))]
+struct StreamingTranscriber {
+    /// Accumulated transcription results from completed chunks
+    results: Vec<String>,
+    /// Number of chunks that have been sent for processing
+    chunks_sent: usize,
+    /// Number of chunks that have completed processing
+    chunks_done: usize,
+    /// Samples per chunk at recording sample rate
+    samples_per_chunk: usize,
+    /// Overlap samples at recording sample rate
+    overlap_samples: usize,
+    /// Position up to which we've processed
+    processed_pos: usize,
+}
+
+#[cfg(all(target_os = "macos", feature = "whisper"))]
+impl StreamingTranscriber {
+    fn new() -> Self {
+        let samples_per_chunk = (STREAM_CHUNK_SECS * RECORDING_SAMPLE_RATE as f32) as usize;
+        let overlap_samples = (STREAM_OVERLAP_SECS * RECORDING_SAMPLE_RATE as f32) as usize;
+
+        Self {
+            results: Vec::new(),
+            chunks_sent: 0,
+            chunks_done: 0,
+            samples_per_chunk,
+            overlap_samples,
+            processed_pos: 0,
+        }
+    }
+
+    /// Check if there's enough audio for a new chunk
+    fn has_pending_chunk(&self, total_samples: usize) -> bool {
+        let next_chunk_end = self.processed_pos + self.samples_per_chunk;
+        total_samples >= next_chunk_end
+    }
+
+    /// Get the next chunk to process (with overlap from previous)
+    fn get_next_chunk(&mut self, all_samples: &[f32]) -> Option<(Vec<f32>, usize)> {
+        let chunk_end = self.processed_pos + self.samples_per_chunk;
+
+        if all_samples.len() < chunk_end {
+            return None;
+        }
+
+        // Include overlap from before if available
+        let chunk_start = if self.processed_pos > self.overlap_samples {
+            self.processed_pos - self.overlap_samples
+        } else {
+            0
+        };
+
+        let chunk: Vec<f32> = all_samples[chunk_start..chunk_end].to_vec();
+        let chunk_index = self.chunks_sent;
+
+        self.chunks_sent += 1;
+        self.processed_pos = chunk_end;
+
+        Some((chunk, chunk_index))
+    }
+
+    /// Get remaining audio that hasn't been fully processed
+    fn get_remaining(&self, all_samples: &[f32]) -> Vec<f32> {
+        if self.processed_pos > self.overlap_samples {
+            all_samples[(self.processed_pos - self.overlap_samples)..].to_vec()
+        } else {
+            all_samples.to_vec()
+        }
+    }
+
+    /// Record a completed chunk result
+    fn add_result(&mut self, result: ChunkResult) {
+        // Ensure results vector is large enough
+        while self.results.len() <= result.chunk_index {
+            self.results.push(String::new());
+        }
+        self.results[result.chunk_index] = result.text;
+        self.chunks_done += 1;
+    }
+
+    /// Check if all sent chunks are done
+    fn all_chunks_done(&self) -> bool {
+        self.chunks_done >= self.chunks_sent
+    }
+
+    /// Get the final combined transcription
+    fn get_final_text(&self) -> String {
+        self.results.join(" ").trim().to_string()
+    }
+
+    /// Reset for new recording
+    fn reset(&mut self) {
+        self.results.clear();
+        self.chunks_sent = 0;
+        self.chunks_done = 0;
+        self.processed_pos = 0;
+    }
 }
 
 fn print_usage() {
@@ -328,6 +444,8 @@ fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32]) -> Result<Strin
 #[cfg(all(target_os = "macos", feature = "whisper"))]
 fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
     use cpal::Stream;
+    use std::sync::mpsc;
+    use std::thread;
 
     // Wrap Whisper context in Arc for sharing
     let whisper = Arc::new(whisper_ctx);
@@ -338,11 +456,75 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
     let stream: Arc<Mutex<Option<Stream>>> = Arc::new(Mutex::new(None));
     let last_tap: Arc<Mutex<(Option<Instant>, Option<Instant>)>> = Arc::new(Mutex::new((None, None)));
 
+    // Streaming transcription state
+    let transcriber: Arc<Mutex<StreamingTranscriber>> = Arc::new(Mutex::new(StreamingTranscriber::new()));
+
+    // Channel for chunk results
+    let (result_tx, result_rx): (mpsc::Sender<ChunkResult>, mpsc::Receiver<ChunkResult>) = mpsc::channel();
+    let result_rx = Arc::new(Mutex::new(result_rx));
+
     let state_clone = Arc::clone(&state);
     let samples_clone = Arc::clone(&samples);
     let stream_clone = Arc::clone(&stream);
     let last_tap_clone = Arc::clone(&last_tap);
     let whisper_clone = Arc::clone(&whisper);
+    let transcriber_clone = Arc::clone(&transcriber);
+    let result_tx_clone = result_tx;
+    let result_rx_clone = Arc::clone(&result_rx);
+
+    // Spawn a timer thread to check for pending chunks during recording
+    let state_for_timer = Arc::clone(&state);
+    let samples_for_timer = Arc::clone(&samples);
+    let whisper_for_timer = Arc::clone(&whisper);
+    let transcriber_for_timer = Arc::clone(&transcriber);
+
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_millis(500)); // Check every 500ms
+
+            // Check if we're recording
+            let is_recording = {
+                let s = state_for_timer.lock().unwrap();
+                *s == RecordingState::Recording
+            };
+
+            if !is_recording {
+                continue;
+            }
+
+            // Check if there's a pending chunk
+            let chunk_data = {
+                let samples = samples_for_timer.lock().unwrap();
+                let mut trans = transcriber_for_timer.lock().unwrap();
+
+                if trans.has_pending_chunk(samples.len()) {
+                    trans.get_next_chunk(&samples)
+                } else {
+                    None
+                }
+            };
+
+            if let Some((chunk, chunk_index)) = chunk_data {
+                // Process chunk in this thread
+                let whisper = Arc::clone(&whisper_for_timer);
+                let tx = result_tx_clone.clone();
+
+                println!("[{}] Processing chunk {}...", timestamp(), chunk_index + 1);
+
+                // Resample and transcribe
+                let resampled = resample_48k_to_16k(&chunk);
+                match transcribe(&whisper, &resampled) {
+                    Ok(text) => {
+                        let _ = tx.send(ChunkResult { text, chunk_index });
+                    }
+                    Err(e) => {
+                        eprintln!("Chunk {} error: {}", chunk_index + 1, e);
+                        let _ = tx.send(ChunkResult { text: String::new(), chunk_index });
+                    }
+                }
+            }
+        }
+    });
 
     let callback = move |event: Event| {
         if let EventType::KeyRelease(Key::ControlLeft) = event.event_type {
@@ -367,10 +549,13 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                             tap_state.0 = None;
                             tap_state.1 = Some(now);
 
+                            // Reset transcriber for new recording
+                            transcriber_clone.lock().unwrap().reset();
+
                             // Play start beep
                             play_start_beep();
 
-                            println!("[{}] Recording...", timestamp());
+                            println!("[{}] Recording (streaming)...", timestamp());
 
                             // Start recording
                             let samples_for_stream = Arc::clone(&samples_clone);
@@ -394,9 +579,6 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                     // Play stop beep
                     play_stop_beep();
 
-                    // Single tap while recording - stop and transcribe
-                    println!("[{}] Transcribing...", timestamp());
-
                     tap_state.1 = Some(now);
 
                     // Stop stream
@@ -404,10 +586,11 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                         drop(s);
                     }
 
-                    // Get samples
-                    let recorded_samples: Vec<f32> = {
-                        let mut s = samples_clone.lock().unwrap();
-                        std::mem::take(&mut *s)
+                    // Get samples and remaining chunk
+                    let (remaining_samples, chunks_sent) = {
+                        let s = samples_clone.lock().unwrap();
+                        let trans = transcriber_clone.lock().unwrap();
+                        (trans.get_remaining(&s), trans.chunks_sent)
                     };
 
                     *rec_state = RecordingState::Idle;
@@ -417,33 +600,67 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                     drop(rec_state);
                     drop(tap_state);
 
-                    if recorded_samples.is_empty() {
-                        println!("[{}] No audio recorded", timestamp());
-                        return;
+                    // Collect any completed chunk results
+                    {
+                        let rx = result_rx_clone.lock().unwrap();
+                        while let Ok(result) = rx.try_recv() {
+                            transcriber_clone.lock().unwrap().add_result(result);
+                        }
                     }
 
-                    let duration_secs = recorded_samples.len() as f32 / 48000.0;
-                    println!("[{}] Recorded {:.1}s", timestamp(), duration_secs);
+                    println!("[{}] Finalizing ({} chunks pre-processed)...", timestamp(), chunks_sent);
 
-                    // Resample from 48kHz to 16kHz for Whisper
-                    let resampled = resample_48k_to_16k(&recorded_samples);
-
-                    // Transcribe
-                    match transcribe(&whisper_clone, &resampled) {
-                        Ok(text) => {
-                            if text.is_empty() {
-                                println!("[{}] (no speech detected)", timestamp());
-                            } else {
-                                println!("[{}] \"{}\"", timestamp(), text);
-
-                                // Paste text
-                                if let Err(e) = paste_text(&text) {
-                                    eprintln!("Failed to paste: {}", e);
+                    // Process remaining audio (last chunk)
+                    if !remaining_samples.is_empty() {
+                        let duration_secs = remaining_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
+                        if duration_secs > 0.3 { // Only process if more than 300ms
+                            let resampled = resample_48k_to_16k(&remaining_samples);
+                            match transcribe(&whisper_clone, &resampled) {
+                                Ok(text) => {
+                                    let mut trans = transcriber_clone.lock().unwrap();
+                                    trans.add_result(ChunkResult {
+                                        text,
+                                        chunk_index: trans.chunks_sent,
+                                    });
+                                    trans.chunks_sent += 1;
+                                }
+                                Err(e) => {
+                                    eprintln!("Final chunk error: {}", e);
                                 }
                             }
                         }
-                        Err(e) => {
-                            eprintln!("Transcription error: {}", e);
+                    }
+
+                    // Wait briefly for any remaining chunk processing
+                    let start_wait = Instant::now();
+                    while start_wait.elapsed() < Duration::from_millis(500) {
+                        {
+                            let rx = result_rx_clone.lock().unwrap();
+                            while let Ok(result) = rx.try_recv() {
+                                transcriber_clone.lock().unwrap().add_result(result);
+                            }
+                        }
+
+                        if transcriber_clone.lock().unwrap().all_chunks_done() {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(50));
+                    }
+
+                    // Get final text
+                    let final_text = transcriber_clone.lock().unwrap().get_final_text();
+
+                    // Clear samples for next recording
+                    samples_clone.lock().unwrap().clear();
+
+                    if final_text.is_empty() {
+                        println!("[{}] (no speech detected)", timestamp());
+                    } else {
+                        println!("[{}] \"{}\"", timestamp(), final_text);
+
+                        // Paste text
+                        if let Err(e) = paste_text(&final_text) {
+                            eprintln!("Failed to paste: {}", e);
                         }
                     }
                 }
@@ -452,6 +669,7 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
     };
 
     println!("[{}] Ready! Double-tap Control to record.", timestamp());
+    println!("Streaming mode: chunks processed every {:.0}s", STREAM_CHUNK_SECS);
 
     if let Err(e) = listen(callback) {
         eprintln!("Error: {:?}", e);
