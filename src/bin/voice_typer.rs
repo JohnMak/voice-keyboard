@@ -107,9 +107,11 @@ const BEEP_DURATION_MS: u64 = 100;
 
 /// Streaming transcription settings
 /// Chunk size in seconds - process audio every N seconds while recording
-const STREAM_CHUNK_SECS: f32 = 3.0;
-/// Overlap between chunks in seconds - helps with word boundaries
-const STREAM_OVERLAP_SECS: f32 = 0.5;
+/// 1 second is the minimum recommended for Whisper
+const STREAM_CHUNK_SECS: f32 = 2.0;
+/// No overlap to avoid word duplication between chunks
+/// (overlap requires LocalAgreement algorithm to handle properly)
+const STREAM_OVERLAP_SECS: f32 = 0.0;
 /// Sample rate for recording (48kHz is typical for macOS)
 const RECORDING_SAMPLE_RATE: u32 = 48000;
 
