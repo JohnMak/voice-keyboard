@@ -6,8 +6,6 @@
 //! Usage:
 //!   cargo run --bin voice-recorder
 
-use std::fs::File;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -47,7 +45,7 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn run_macos() {
-    use cpal::{SampleFormat, Stream};
+    use cpal::Stream;
 
     // Shared state
     let state: Arc<Mutex<RecordingState>> = Arc::new(Mutex::new(RecordingState::Idle));
@@ -223,13 +221,8 @@ fn start_recording(samples: Arc<Mutex<Vec<f32>>>) -> Result<cpal::Stream, String
 }
 
 fn save_and_paste_ogg(samples: &[f32]) -> Result<PathBuf, String> {
-    // Save to temp file
+    // Save to temp file as WAV (OGG encoding will be added later)
     let temp_dir = std::env::temp_dir();
-    let filename = format!("voice_{}.ogg", timestamp().replace(":", "-"));
-    let path = temp_dir.join(&filename);
-
-    // For now, save as WAV (OGG encoding is complex, will add later)
-    // Telegram should still accept WAV files
     let wav_path = temp_dir.join(format!("voice_{}.wav", timestamp().replace(":", "-")));
     save_wav(samples, &wav_path)?;
 
