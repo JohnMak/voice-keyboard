@@ -40,11 +40,21 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn run_macos() {
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let last_tap: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let last_tap_clone = Arc::clone(&last_tap);
 
+    // Flag to ignore events during text insertion
+    let inserting: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let inserting_clone = Arc::clone(&inserting);
+
     let callback = move |event: Event| {
+        // Ignore events while we're inserting text
+        if inserting_clone.load(Ordering::SeqCst) {
+            return;
+        }
+
         // Only react to KeyRelease of ControlLeft (double-tap detection on release)
         if let EventType::KeyRelease(Key::ControlLeft) = event.event_type {
             let mut last = last_tap_clone.lock().unwrap();
@@ -60,6 +70,9 @@ fn run_macos() {
                     // Clear the last tap to prevent triple-tap triggering again
                     *last = None;
 
+                    // Set inserting flag
+                    inserting_clone.store(true, Ordering::SeqCst);
+
                     // Small delay to ensure Control key is fully released
                     std::thread::sleep(Duration::from_millis(50));
 
@@ -69,11 +82,21 @@ fn run_macos() {
                     } else {
                         println!("[{}] Text inserted successfully!", chrono_lite());
                     }
+
+                    // Clear inserting flag after a delay
+                    std::thread::sleep(Duration::from_millis(200));
+                    inserting_clone.store(false, Ordering::SeqCst);
+                    return;
+                } else {
+                    // Too slow - this is a new first tap, not a second tap
+                    // Reset and start fresh
+                    *last = Some(now);
+                    println!("[{}] Control released (waiting for double-tap...)", chrono_lite());
                     return;
                 }
             }
 
-            // Record this tap
+            // First tap ever - record it
             *last = Some(now);
             println!("[{}] Control released (waiting for double-tap...)", chrono_lite());
         }
