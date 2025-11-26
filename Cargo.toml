@@ -14,10 +14,6 @@ whisper-rs = { version = "0.15", optional = true }
 # Audio - WAV file handling (cross-platform)
 hound = "3.5"
 
-# OGG Opus encoding
-ogg = "0.9"
-opus = "0.3"
-
 # Clipboard (cross-platform)
 arboard = "3"
 
