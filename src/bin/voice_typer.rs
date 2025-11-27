@@ -509,6 +509,34 @@ fn remove_trailing_punctuation(text: &str) -> String {
     trimmed.trim_end_matches(|c| c == '.' || c == '!' || c == '?' || c == '…').to_string()
 }
 
+/// Count how many characters to delete for continuation
+/// Returns count of trailing punctuation + space to delete
+#[cfg(feature = "whisper")]
+fn count_chars_to_delete(text: &str) -> usize {
+    let trimmed = text.trim_end();
+
+    // Check for various endings and count chars to delete
+    // Format is: "text<punctuation> " so we delete punctuation + space
+
+    // Check for "... " (3 dots + space = 4 chars)
+    if trimmed.ends_with("...") {
+        return 4; // "... "
+    }
+
+    // Check for "… " (unicode ellipsis + space = 2 chars, but … is 1 char in display, 3 bytes)
+    if trimmed.ends_with("…") {
+        return 2; // "… "
+    }
+
+    // Check for ".!?" followed by space (2 chars)
+    if trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?') {
+        return 2; // ". " or "! " or "? "
+    }
+
+    // Default: just delete the space
+    1
+}
+
 #[cfg(all(target_os = "macos", feature = "whisper"))]
 fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod) {
     use cpal::Stream;
@@ -618,12 +646,16 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod)
 
                             if is_continuation {
                                 println!("[{}] (continuation) \"{}\"", timestamp(), processed_text);
-                                // Delete previous ". " (2 chars: punctuation + space) and insert continuation
-                                if let Err(e) = delete_chars(2) {
+                                // Delete previous punctuation + space based on what was there
+                                let chars_to_delete = {
+                                    let ctx = last_phrase_for_vad.lock().unwrap();
+                                    count_chars_to_delete(&ctx)
+                                };
+                                if let Err(e) = delete_chars(chars_to_delete) {
                                     eprintln!("Failed to delete chars: {}", e);
                                 }
-                                // Insert continuation with trailing space
-                                let text_with_space = format!(" {}", processed_text);
+                                // Insert continuation with space before and after
+                                let text_with_space = format!(" {} ", processed_text);
                                 if let Err(e) = insert_text(&text_with_space, input_method_for_vad) {
                                     eprintln!("Failed to insert text: {}", e);
                                 }
@@ -743,12 +775,16 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod)
 
                                     if is_continuation {
                                         println!("[{}] (final continuation) \"{}\"", timestamp(), processed_text);
-                                        // Delete previous ". " and insert continuation
-                                        if let Err(e) = delete_chars(2) {
+                                        // Delete previous punctuation + space
+                                        let chars_to_delete = {
+                                            let ctx = last_phrase_clone.lock().unwrap();
+                                            count_chars_to_delete(&ctx)
+                                        };
+                                        if let Err(e) = delete_chars(chars_to_delete) {
                                             eprintln!("Failed to delete chars: {}", e);
                                         }
                                         // Insert continuation with space
-                                        let text_with_space = format!(" {}", processed_text);
+                                        let text_with_space = format!(" {} ", processed_text);
                                         if let Err(e) = insert_text(&text_with_space, input_method_for_callback) {
                                             eprintln!("Failed to insert text: {}", e);
                                         }
