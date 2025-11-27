@@ -223,6 +223,73 @@ enum InputMethod {
     Clipboard,
 }
 
+/// Hotkey for push-to-talk
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum HotkeyType {
+    Function,      // Fn/Globe key (macOS default)
+    ControlLeft,   // Left Ctrl
+    ControlRight,  // Right Ctrl
+    AltLeft,       // Left Alt/Option
+    AltRight,      // Right Alt/Option
+    ShiftLeft,     // Left Shift
+    ShiftRight,    // Right Shift
+    MetaLeft,      // Left Cmd/Win
+    MetaRight,     // Right Cmd/Win
+}
+
+#[cfg(target_os = "macos")]
+impl HotkeyType {
+    fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "fn" | "function" | "globe" => Some(HotkeyType::Function),
+            "ctrl" | "control" | "ctrlleft" | "controlleft" => Some(HotkeyType::ControlLeft),
+            "ctrlright" | "controlright" | "rctrl" => Some(HotkeyType::ControlRight),
+            "alt" | "altleft" | "option" | "optionleft" => Some(HotkeyType::AltLeft),
+            "altright" | "optionright" | "ralt" => Some(HotkeyType::AltRight),
+            "shift" | "shiftleft" => Some(HotkeyType::ShiftLeft),
+            "shiftright" | "rshift" => Some(HotkeyType::ShiftRight),
+            "cmd" | "meta" | "metaleft" | "win" | "super" => Some(HotkeyType::MetaLeft),
+            "cmdright" | "metaright" | "winright" => Some(HotkeyType::MetaRight),
+            _ => None,
+        }
+    }
+
+    fn to_rdev_key(&self) -> Key {
+        match self {
+            HotkeyType::Function => Key::Function,
+            HotkeyType::ControlLeft => Key::ControlLeft,
+            HotkeyType::ControlRight => Key::ControlRight,
+            HotkeyType::AltLeft => Key::Alt,
+            HotkeyType::AltRight => Key::AltGr,
+            HotkeyType::ShiftLeft => Key::ShiftLeft,
+            HotkeyType::ShiftRight => Key::ShiftRight,
+            HotkeyType::MetaLeft => Key::MetaLeft,
+            HotkeyType::MetaRight => Key::MetaRight,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            HotkeyType::Function => "Fn (Function/Globe)",
+            HotkeyType::ControlLeft => "Left Control",
+            HotkeyType::ControlRight => "Right Control",
+            HotkeyType::AltLeft => "Left Alt/Option",
+            HotkeyType::AltRight => "Right Alt/Option",
+            HotkeyType::ShiftLeft => "Left Shift",
+            HotkeyType::ShiftRight => "Right Shift",
+            HotkeyType::MetaLeft => "Left Cmd/Meta",
+            HotkeyType::MetaRight => "Right Cmd/Meta",
+        }
+    }
+
+    /// Default hotkey for current platform
+    fn default() -> Self {
+        // macOS: Fn key works well on MacBooks
+        HotkeyType::Function
+    }
+}
+
 fn print_usage() {
     println!("Usage: voice-typer [OPTIONS]");
     println!();
@@ -230,17 +297,40 @@ fn print_usage() {
     println!("  --model <MODEL>    Model name or path to .bin file");
     println!("                     Presets: tiny, base, small, medium, large-v3-turbo (or turbo)");
     println!("                     Default: base");
+    println!("  --key <KEY>        Push-to-talk hotkey (default: fn on macOS, ctrl on others)");
+    println!("                     Options: fn, ctrl, ctrlright, alt, altright, shift, cmd");
     println!("  --clipboard        Use clipboard+paste instead of keyboard input");
+    println!("  --keyboard         Use keyboard simulation (default)");
     println!("  --list-models      List available model presets");
+    println!("  --list-keys        List available hotkey options");
     println!("  --help, -h         Show this help");
     println!();
     println!("Examples:");
     println!("  voice-typer --model tiny");
-    println!("  voice-typer --model large-v3-turbo");
-    println!("  voice-typer --clipboard    # Use Cmd+V paste method");
+    println!("  voice-typer --model large-v3-turbo --key ctrl");
+    println!("  voice-typer --key ctrlright --clipboard");
     println!();
     println!("Environment:");
     println!("  MODEL_PATH         Override model path (lower priority than --model)");
+}
+
+#[cfg(target_os = "macos")]
+fn list_keys() {
+    println!("Available hotkey options:");
+    println!();
+    println!("  {:15} {}", "Key", "Description");
+    println!("  {:15} {}", "---", "-----------");
+    println!("  {:15} {} (macOS default)", "fn / function", "Fn/Globe key on MacBook keyboards");
+    println!("  {:15} {}", "ctrl", "Left Control key");
+    println!("  {:15} {}", "ctrlright", "Right Control key (recommended for external keyboards)");
+    println!("  {:15} {}", "alt", "Left Alt/Option key");
+    println!("  {:15} {}", "altright", "Right Alt/Option key");
+    println!("  {:15} {}", "shift", "Left Shift key");
+    println!("  {:15} {}", "shiftright", "Right Shift key");
+    println!("  {:15} {}", "cmd", "Left Cmd/Meta key");
+    println!();
+    println!("Note: On non-Apple keyboards, Fn is a hardware key and cannot be detected.");
+    println!("      Use 'ctrl', 'ctrlright', or 'altright' instead.");
 }
 
 fn list_models() {
@@ -268,6 +358,9 @@ fn main() {
     let mut model_arg: Option<String> = None;
     let mut input_method = InputMethod::Keyboard; // Default to keyboard
 
+    #[cfg(target_os = "macos")]
+    let mut hotkey = HotkeyType::default(); // Fn on macOS
+
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -277,6 +370,11 @@ fn main() {
             }
             "--list-models" => {
                 list_models();
+                return;
+            }
+            #[cfg(target_os = "macos")]
+            "--list-keys" => {
+                list_keys();
                 return;
             }
             "--clipboard" => {
@@ -297,6 +395,33 @@ fn main() {
             arg if arg.starts_with("--model=") => {
                 model_arg = Some(arg.trim_start_matches("--model=").to_string());
             }
+            #[cfg(target_os = "macos")]
+            "--key" => {
+                if i + 1 < args.len() {
+                    match HotkeyType::from_str(&args[i + 1]) {
+                        Some(key) => hotkey = key,
+                        None => {
+                            eprintln!("Error: unknown hotkey '{}'. Use --list-keys to see options.", args[i + 1]);
+                            std::process::exit(1);
+                        }
+                    }
+                    i += 1;
+                } else {
+                    eprintln!("Error: --key requires an argument");
+                    std::process::exit(1);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            arg if arg.starts_with("--key=") => {
+                let key_str = arg.trim_start_matches("--key=");
+                match HotkeyType::from_str(key_str) {
+                    Some(key) => hotkey = key,
+                    None => {
+                        eprintln!("Error: unknown hotkey '{}'. Use --list-keys to see options.", key_str);
+                        std::process::exit(1);
+                    }
+                }
+            }
             arg => {
                 eprintln!("Unknown argument: {}", arg);
                 eprintln!("Use --help for usage information");
@@ -311,9 +436,14 @@ fn main() {
         InputMethod::Clipboard => "clipboard + Cmd+V",
     };
 
+    #[cfg(target_os = "macos")]
+    let hotkey_str = hotkey.name();
+    #[cfg(not(target_os = "macos"))]
+    let hotkey_str = "Fn";
+
     println!("Voice Typer");
     println!("===========");
-    println!("Hold Fn key to record, release to transcribe");
+    println!("Hold {} to record, release to transcribe", hotkey_str);
     println!("Input method: {}", input_mode_str);
     println!("Press Ctrl+C to exit\n");
 
@@ -336,7 +466,7 @@ fn main() {
             Ok(ctx) => {
                 println!("Whisper model loaded!\n");
                 #[cfg(target_os = "macos")]
-                run_macos(ctx, input_method);
+                run_macos(ctx, input_method, hotkey);
             }
             Err(e) => {
                 eprintln!("Failed to load Whisper model: {}", e);
@@ -624,12 +754,15 @@ fn count_chars_to_delete(text: &str) -> usize {
 }
 
 #[cfg(all(target_os = "macos", feature = "whisper"))]
-fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod) {
+fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotkey: HotkeyType) {
     use cpal::Stream;
     use std::thread;
 
     // Wrap Whisper context in Arc for sharing
     let whisper = Arc::new(whisper_ctx);
+
+    // Get the rdev key for our hotkey
+    let target_key = hotkey.to_rdev_key();
 
     // Shared state
     let state: Arc<Mutex<RecordingState>> = Arc::new(Mutex::new(RecordingState::Idle));
@@ -784,8 +917,8 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod)
     let input_method_for_callback = input_method;
     let callback = move |event: Event| {
         match event.event_type {
-            // Fn key pressed - start recording
-            EventType::KeyPress(Key::Function) => {
+            // Hotkey pressed - start recording
+            EventType::KeyPress(key) if key == target_key => {
                 let mut rec_state = state_clone.lock().unwrap();
 
                 if *rec_state == RecordingState::Idle {
@@ -817,8 +950,8 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod)
                 }
             }
 
-            // Fn key released - stop and process remaining
-            EventType::KeyRelease(Key::Function) => {
+            // Hotkey released - stop and process remaining
+            EventType::KeyRelease(key) if key == target_key => {
                 let mut rec_state = state_clone.lock().unwrap();
 
                 if *rec_state == RecordingState::Recording {
@@ -920,7 +1053,7 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod)
         }
     };
 
-    println!("[{}] Ready! Hold Fn key to record, release to stop.", timestamp());
+    println!("[{}] Ready! Hold {} to record, release to stop.", timestamp(), hotkey.name());
     println!("VAD mode: phrases transcribed on {}ms silence", VAD_SILENCE_MS);
 
     if let Err(e) = listen(callback) {

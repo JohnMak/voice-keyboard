@@ -450,3 +450,337 @@ fn test_vad_short_pause_does_not_split() {
     let phrase2 = vad.detect_phrase(&audio);
     assert!(phrase2.is_none(), "Short pause should not create second phrase");
 }
+
+// ============== Continuation/Concatenation Tests ==============
+
+/// Process continuation marker ("..." prefix means continuation of previous phrase)
+fn process_continuation(text: &str) -> (String, bool) {
+    let trimmed = text.trim();
+
+    // Check for "..." prefix (continuation marker from Whisper)
+    if trimmed.starts_with("...") {
+        let rest = trimmed.trim_start_matches("...");
+        let rest = rest.trim_start_matches('.'); // Handle extra dots
+        let rest = rest.trim();
+        // Return without leading punctuation, marked as continuation
+        return (rest.to_string(), true);
+    }
+
+    // Check for "…" (unicode ellipsis)
+    if trimmed.starts_with("…") {
+        let rest = trimmed.trim_start_matches("…").trim();
+        return (rest.to_string(), true);
+    }
+
+    (trimmed.to_string(), false)
+}
+
+/// Remove trailing punctuation from text (for context merging)
+fn remove_trailing_punctuation(text: &str) -> String {
+    let trimmed = text.trim_end();
+
+    // Remove trailing ellipsis
+    if trimmed.ends_with("...") {
+        return trimmed.trim_end_matches('.').trim().to_string();
+    }
+    if trimmed.ends_with("…") {
+        return trimmed.trim_end_matches('…').trim().to_string();
+    }
+
+    // Remove single punctuation marks
+    if trimmed.ends_with('.') || trimmed.ends_with('!') ||
+       trimmed.ends_with('?') || trimmed.ends_with(',') {
+        let mut s = trimmed.to_string();
+        s.pop();
+        return s.trim().to_string();
+    }
+
+    trimmed.to_string()
+}
+
+/// Count characters to delete for continuation (punctuation + trailing space)
+fn count_chars_to_delete(text: &str) -> usize {
+    let trimmed = text.trim_end();
+
+    // "... " = 4 chars (3 dots + space)
+    if trimmed.ends_with("...") {
+        return 4;
+    }
+
+    // "… " = 2 chars (1 unicode ellipsis + space)
+    if trimmed.ends_with("…") {
+        return 2;
+    }
+
+    // ". " or "! " or "? " = 2 chars
+    if trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?') {
+        return 2;
+    }
+
+    // Default: just delete the trailing space
+    1
+}
+
+/// Extract last sentence from context for Whisper prompt
+fn extract_last_sentence(text: &str) -> String {
+    let trimmed = text.trim();
+
+    // Try to find sentence boundary
+    if let Some(pos) = trimmed.rfind(|c| c == '.' || c == '!' || c == '?') {
+        // If punctuation is at the end, look for previous sentence end
+        if pos == trimmed.len() - 1 || pos == trimmed.len() - 3 {
+            // Find previous sentence boundary
+            let before = &trimmed[..pos];
+            if let Some(prev_pos) = before.rfind(|c| c == '.' || c == '!' || c == '?') {
+                return trimmed[prev_pos + 1..].trim().to_string();
+            }
+        } else {
+            return trimmed[pos + 1..].trim().to_string();
+        }
+    }
+
+    // No sentence boundary, return last 100 chars or whole string
+    let len = trimmed.chars().count();
+    if len > 100 {
+        trimmed.chars().skip(len - 100).collect()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Known hallucination patterns (subtitle credits from Whisper training data)
+const HALLUCINATION_PATTERNS: &[&str] = &[
+    "DimaTorzok",
+    "Субтитры создавал",
+    "Субтитры сделал",
+    "Продолжение следует",
+    "Редактор субтитров",
+    "Amara.org",
+    "transcribed by",
+    "Subtitles by",
+];
+
+/// Exact match hallucinations (filler sounds)
+const HALLUCINATION_EXACT: &[&str] = &[
+    "Уэм", "Ум", "Эм", "Хм", "Ах", "Ох", "М-м", "...", "…",
+];
+
+/// Check if text is a Whisper hallucination
+fn is_hallucination(text: &str) -> bool {
+    let trimmed = text.trim();
+    let lower = trimmed.to_lowercase();
+
+    // Check exact matches
+    for pattern in HALLUCINATION_EXACT {
+        if trimmed == *pattern || trimmed.trim_end_matches('.') == *pattern {
+            return true;
+        }
+    }
+
+    // Check contained patterns
+    for pattern in HALLUCINATION_PATTERNS {
+        if trimmed.contains(pattern) || lower.contains(&pattern.to_lowercase()) {
+            return true;
+        }
+    }
+
+    false
+}
+
+#[test]
+fn test_process_continuation_with_dots() {
+    let (text, is_cont) = process_continuation("...и это продолжение");
+    assert!(is_cont, "Should detect continuation");
+    assert_eq!(text, "и это продолжение");
+}
+
+#[test]
+fn test_process_continuation_with_unicode_ellipsis() {
+    let (text, is_cont) = process_continuation("…и это продолжение");
+    assert!(is_cont, "Should detect continuation with unicode ellipsis");
+    assert_eq!(text, "и это продолжение");
+}
+
+#[test]
+fn test_process_continuation_no_marker() {
+    let (text, is_cont) = process_continuation("Это новое предложение.");
+    assert!(!is_cont, "Should not be continuation");
+    assert_eq!(text, "Это новое предложение.");
+}
+
+#[test]
+fn test_process_continuation_extra_dots() {
+    let (text, is_cont) = process_continuation("....текст");
+    assert!(is_cont, "Should handle extra dots");
+    assert_eq!(text, "текст");
+}
+
+#[test]
+fn test_remove_trailing_punctuation_period() {
+    assert_eq!(remove_trailing_punctuation("Привет."), "Привет");
+}
+
+#[test]
+fn test_remove_trailing_punctuation_exclamation() {
+    assert_eq!(remove_trailing_punctuation("Привет!"), "Привет");
+}
+
+#[test]
+fn test_remove_trailing_punctuation_question() {
+    assert_eq!(remove_trailing_punctuation("Привет?"), "Привет");
+}
+
+#[test]
+fn test_remove_trailing_punctuation_ellipsis() {
+    assert_eq!(remove_trailing_punctuation("Привет..."), "Привет");
+}
+
+#[test]
+fn test_remove_trailing_punctuation_unicode_ellipsis() {
+    assert_eq!(remove_trailing_punctuation("Привет…"), "Привет");
+}
+
+#[test]
+fn test_remove_trailing_punctuation_no_punctuation() {
+    assert_eq!(remove_trailing_punctuation("Привет"), "Привет");
+}
+
+#[test]
+fn test_count_chars_to_delete_period() {
+    // "text. " -> delete ". " = 2 chars
+    assert_eq!(count_chars_to_delete("Привет."), 2);
+}
+
+#[test]
+fn test_count_chars_to_delete_ellipsis() {
+    // "text... " -> delete "... " = 4 chars
+    assert_eq!(count_chars_to_delete("Привет..."), 4);
+}
+
+#[test]
+fn test_count_chars_to_delete_unicode_ellipsis() {
+    // "text… " -> delete "… " = 2 chars (unicode ellipsis is 1 char)
+    assert_eq!(count_chars_to_delete("Привет…"), 2);
+}
+
+#[test]
+fn test_count_chars_to_delete_no_punctuation() {
+    // "text " -> delete " " = 1 char
+    assert_eq!(count_chars_to_delete("Привет"), 1);
+}
+
+#[test]
+fn test_extract_last_sentence_simple() {
+    let result = extract_last_sentence("Первое. Второе.");
+    assert!(result.contains("Второе"), "Should extract last sentence");
+}
+
+#[test]
+fn test_extract_last_sentence_single() {
+    let result = extract_last_sentence("Одно предложение.");
+    assert_eq!(result, "Одно предложение.");
+}
+
+#[test]
+fn test_extract_last_sentence_long_text() {
+    let long_text = "A".repeat(200);
+    let result = extract_last_sentence(&long_text);
+    assert!(result.len() <= 100, "Should truncate to ~100 chars");
+}
+
+#[test]
+fn test_hallucination_exact_match() {
+    assert!(is_hallucination("Уэм"));
+    assert!(is_hallucination("Хм"));
+    assert!(is_hallucination("..."));
+    assert!(is_hallucination("…"));
+}
+
+#[test]
+fn test_hallucination_exact_with_period() {
+    assert!(is_hallucination("Хм."));
+    assert!(is_hallucination("Уэм."));
+}
+
+#[test]
+fn test_hallucination_pattern_match() {
+    assert!(is_hallucination("Субтитры создавал DimaTorzok"));
+    assert!(is_hallucination("Продолжение следует..."));
+    assert!(is_hallucination("Transcribed by someone"));
+}
+
+#[test]
+fn test_hallucination_case_insensitive() {
+    assert!(is_hallucination("DIMATORZOK"));
+    assert!(is_hallucination("dimatorzok"));
+    assert!(is_hallucination("DimaTorzok"));
+}
+
+#[test]
+fn test_not_hallucination() {
+    assert!(!is_hallucination("Привет, как дела?"));
+    assert!(!is_hallucination("Это обычный текст."));
+    assert!(!is_hallucination("Hello world!"));
+}
+
+#[test]
+fn test_concatenation_workflow() {
+    // Simulate a real conversation flow:
+    // 1. First phrase: "Привет, это тест."
+    // 2. Continuation: "...который проверяет"
+    // 3. Another phrase: "Новое предложение."
+
+    let mut context = String::new();
+
+    // First phrase
+    let phrase1 = "Привет, это тест.";
+    assert!(!is_hallucination(phrase1));
+    let (text1, is_cont1) = process_continuation(phrase1);
+    assert!(!is_cont1);
+    context = text1.clone();
+    assert_eq!(context, "Привет, это тест.");
+
+    // Continuation
+    let phrase2 = "...который проверяет";
+    assert!(!is_hallucination(phrase2));
+    let (text2, is_cont2) = process_continuation(phrase2);
+    assert!(is_cont2);
+    assert_eq!(text2, "который проверяет");
+
+    // Merge context
+    let chars_to_delete = count_chars_to_delete(&context);
+    assert_eq!(chars_to_delete, 2); // ". "
+    context = format!("{} {}", remove_trailing_punctuation(&context), text2);
+    assert_eq!(context, "Привет, это тест который проверяет");
+
+    // New sentence (not continuation)
+    let phrase3 = "Новое предложение.";
+    assert!(!is_hallucination(phrase3));
+    let (text3, is_cont3) = process_continuation(phrase3);
+    assert!(!is_cont3);
+    context = text3.clone();
+    assert_eq!(context, "Новое предложение.");
+}
+
+#[test]
+fn test_key_argument_parsing() {
+    // Test --key argument parsing
+    fn parse_key_arg(args: &[&str]) -> Option<String> {
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--key" && i + 1 < args.len() {
+                return Some(args[i + 1].to_string());
+            }
+            if args[i].starts_with("--key=") {
+                return Some(args[i].trim_start_matches("--key=").to_string());
+            }
+            i += 1;
+        }
+        None
+    }
+
+    assert_eq!(parse_key_arg(&["--key", "ctrl"]), Some("ctrl".to_string()));
+    assert_eq!(parse_key_arg(&["--key=fn"]), Some("fn".to_string()));
+    assert_eq!(parse_key_arg(&["--model", "tiny"]), None);
+    assert_eq!(parse_key_arg(&["--key", "ctrlright", "--model", "base"]), Some("ctrlright".to_string()));
+}
