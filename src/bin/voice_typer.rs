@@ -798,20 +798,22 @@ fn type_text(text: &str) -> Result<(), String> {
 
 /// Get the PID of the frontmost (focused) application using NSWorkspace
 #[cfg(target_os = "macos")]
-fn get_frontmost_app_pid() -> Option<libc::pid_t> {
-    use cocoa::appkit::NSWorkspace;
-    use cocoa::base::nil;
-    use cocoa::foundation::NSInteger;
+fn get_frontmost_app_pid() -> Option<i32> {
+    use objc::runtime::{Class, Object};
     use objc::{msg_send, sel, sel_impl};
 
     unsafe {
-        let workspace: cocoa::base::id = NSWorkspace::sharedWorkspace(nil);
-        let frontmost_app: cocoa::base::id = msg_send![workspace, frontmostApplication];
-        if frontmost_app == nil {
+        let workspace_class = Class::get("NSWorkspace")?;
+        let workspace: *mut Object = msg_send![workspace_class, sharedWorkspace];
+        if workspace.is_null() {
             return None;
         }
-        let pid: NSInteger = msg_send![frontmost_app, processIdentifier];
-        Some(pid as libc::pid_t)
+        let frontmost_app: *mut Object = msg_send![workspace, frontmostApplication];
+        if frontmost_app.is_null() {
+            return None;
+        }
+        let pid: i32 = msg_send![frontmost_app, processIdentifier];
+        Some(pid)
     }
 }
 
