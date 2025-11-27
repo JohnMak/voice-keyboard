@@ -56,8 +56,8 @@ const RECORDING_SAMPLE_RATE: u32 = 48000;
 /// VAD (Voice Activity Detection) settings
 /// Energy threshold for speech detection (0.0 - 1.0)
 /// Lower = more sensitive, higher = less sensitive
-/// 0.02 works well for typical microphones, increase if too sensitive
-const VAD_ENERGY_THRESHOLD: f32 = 0.02;
+/// 0.005 is quite sensitive, good for quiet voices
+const VAD_ENERGY_THRESHOLD: f32 = 0.005;
 /// Silence duration to consider end of phrase (in milliseconds)
 const VAD_SILENCE_MS: u64 = 350;
 /// Minimum speech duration to process (in milliseconds)
@@ -472,22 +472,37 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                 continue;
             }
 
-            // Check for completed phrases
-            let (phrase, sample_count, vad_state) = {
+            // Check for completed phrases and get energy level
+            let (phrase, sample_count, vad_state, max_energy) = {
                 let samples = samples_for_vad.lock().unwrap();
                 let mut vad = vad_for_thread.lock().unwrap();
+
+                // Calculate max energy in recent samples for debug
+                let recent_start = if samples.len() > RECORDING_SAMPLE_RATE as usize / 2 {
+                    samples.len() - RECORDING_SAMPLE_RATE as usize / 2
+                } else {
+                    0
+                };
+                let max_energy = if samples.len() > recent_start {
+                    samples[recent_start..].chunks(vad.window_samples)
+                        .map(|w| vad.calculate_energy(w))
+                        .fold(0.0f32, |a, b| a.max(b))
+                } else {
+                    0.0
+                };
+
                 let phrase = vad.detect_phrase(&samples);
                 let in_speech = vad.in_speech;
                 let silent_windows = vad.silent_windows;
-                (phrase, samples.len(), (in_speech, silent_windows))
+                (phrase, samples.len(), (in_speech, silent_windows), max_energy)
             };
 
             // Debug output every ~500ms
             if sample_count > last_sample_count + RECORDING_SAMPLE_RATE as usize / 2 {
                 let duration = sample_count as f32 / RECORDING_SAMPLE_RATE as f32;
                 let (in_speech, silent_windows) = vad_state;
-                println!("[VAD] {:.1}s recorded, in_speech={}, silent_windows={}",
-                    duration, in_speech, silent_windows);
+                println!("[VAD] {:.1}s, in_speech={}, silent={}, max_energy={:.4} (threshold={})",
+                    duration, in_speech, silent_windows, max_energy, VAD_ENERGY_THRESHOLD);
                 last_sample_count = sample_count;
             }
 
