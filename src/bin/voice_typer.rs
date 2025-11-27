@@ -40,9 +40,11 @@ const MODEL_PRESETS: &[(&str, &str)] = &[
 /// Initial prompt for Whisper to help with code-switching (Russian + English tech terms)
 /// This helps the model recognize programming terminology and keep anglicisms in English
 const PROGRAMMER_PROMPT: &str = "\
-Диктовка на русском языке программиста. Технические термины на английском: \
+Диктовка программиста на русском. Технические термины: \
 API, Git, Docker, pull request, commit, push, deploy, frontend, backend, \
-debug, server, database, config, test, build, merge, branch, release.";
+debug, server, database, config, test, build, merge, branch, release, \
+ввод, вывод, поле ввода, база данных, сервер, клиент, запрос, ответ, \
+сессия, токен, авторизация, аутентификация, endpoint, callback, webhook.";
 
 /// MIDI note frequencies for beep sounds
 const BEEP_START_FREQ: f32 = 880.0;  // A5 - higher pitch for start
@@ -64,6 +66,9 @@ const VAD_ENERGY_THRESHOLD: f32 = 0.001;
 /// Ratio of voice-band energy to total energy required for speech detection
 /// Higher = stricter voice detection, lower = more sensitive
 const VAD_VOICE_RATIO_THRESHOLD: f32 = 0.15;
+/// Number of consecutive speech windows required to reset silence counter
+/// This prevents random noise spikes from resetting the pause detection
+const VAD_SPEECH_CONFIRM_WINDOWS: usize = 2;
 
 /// Recording state
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -83,6 +88,8 @@ struct VadPhraseDetector {
     min_speech_windows: usize,
     /// Current count of consecutive silent windows
     pub silent_windows: usize,
+    /// Current count of consecutive speech windows (for confirmation)
+    speech_confirm_count: usize,
     /// Whether we're currently in speech
     pub in_speech: bool,
     /// Start position of current phrase
@@ -105,6 +112,7 @@ impl VadPhraseDetector {
             silence_windows_threshold,
             min_speech_windows,
             silent_windows: 0,
+            speech_confirm_count: 0,
             in_speech: false,
             phrase_start: 0,
             processed_pos: 0,
@@ -201,34 +209,45 @@ impl VadPhraseDetector {
             let is_speech = self.is_speech(window);
 
             if is_speech {
+                self.speech_confirm_count += 1;
+
                 if !self.in_speech {
                     // Speech started
                     self.in_speech = true;
                     self.phrase_start = window_start;
                 }
-                self.silent_windows = 0;
-            } else if self.in_speech {
-                // In speech but current window is silent
-                self.silent_windows += 1;
 
-                if self.silent_windows >= self.silence_windows_threshold {
-                    // End of phrase detected
-                    let phrase_end = window_start - (self.silent_windows - 1) * self.window_samples;
-                    let phrase_len = phrase_end.saturating_sub(self.phrase_start);
+                // Only reset silence counter after confirmed speech (multiple windows)
+                // This prevents random noise spikes from resetting pause detection
+                if self.speech_confirm_count >= VAD_SPEECH_CONFIRM_WINDOWS {
+                    self.silent_windows = 0;
+                }
+            } else {
+                self.speech_confirm_count = 0;
 
-                    // Check minimum length
-                    if phrase_len >= self.min_speech_windows * self.window_samples {
-                        let phrase = all_samples[self.phrase_start..phrase_end].to_vec();
-                        self.in_speech = false;
-                        self.silent_windows = 0;
-                        self.phrase_start = window_end; // Reset for next phrase
-                        self.processed_pos = window_end;
-                        return Some(phrase);
-                    } else {
-                        // Too short, ignore
-                        self.in_speech = false;
-                        self.silent_windows = 0;
-                        self.phrase_start = window_end; // Reset for next phrase
+                if self.in_speech {
+                    // In speech but current window is silent
+                    self.silent_windows += 1;
+
+                    if self.silent_windows >= self.silence_windows_threshold {
+                        // End of phrase detected
+                        let phrase_end = window_start - (self.silent_windows - 1) * self.window_samples;
+                        let phrase_len = phrase_end.saturating_sub(self.phrase_start);
+
+                        // Check minimum length
+                        if phrase_len >= self.min_speech_windows * self.window_samples {
+                            let phrase = all_samples[self.phrase_start..phrase_end].to_vec();
+                            self.in_speech = false;
+                            self.silent_windows = 0;
+                            self.phrase_start = window_end; // Reset for next phrase
+                            self.processed_pos = window_end;
+                            return Some(phrase);
+                        } else {
+                            // Too short, ignore
+                            self.in_speech = false;
+                            self.silent_windows = 0;
+                            self.phrase_start = window_end; // Reset for next phrase
+                        }
                     }
                 }
             }
@@ -260,6 +279,7 @@ impl VadPhraseDetector {
     /// Reset for new recording
     fn reset(&mut self) {
         self.silent_windows = 0;
+        self.speech_confirm_count = 0;
         self.in_speech = false;
         self.phrase_start = 0;
         self.processed_pos = 0;
