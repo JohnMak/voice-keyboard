@@ -798,6 +798,7 @@ fn type_text(text: &str) -> Result<(), String> {
 
 /// Get the PID of the frontmost (focused) application using NSWorkspace
 #[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)]
 fn get_frontmost_app_pid() -> Option<i32> {
     use objc::runtime::{Class, Object};
     use objc::{msg_send, sel, sel_impl};
