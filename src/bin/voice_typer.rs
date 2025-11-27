@@ -515,23 +515,36 @@ fn remove_trailing_punctuation(text: &str) -> String {
 /// Known Whisper hallucination phrases (from training data artifacts)
 /// These appear when Whisper processes silence or noise
 const HALLUCINATION_PATTERNS: &[&str] = &[
+    // Russian subtitle artifacts
     "DimaTorzok",
     "Семкин",
+    "Егорова",
     "Субтитры создавал",
+    "Субтитры сделал",
     "Редактор субтитров",
+    "Корректор",
     "Продолжение следует",
+    "продолжение следует",
     "ПОДПИШИСЬ НА КАНАЛ",
     "Подпишись на канал",
     "подпишись на канал",
+    "Спасибо за просмотр",
+    "спасибо за просмотр",
+    "Пока-пока",
+    "пока-пока",
+    // English subtitle artifacts
     "Amara.org",
     "amara.org",
     "transcribed by",
+    "Transcribed by",
     "subtitles by",
+    "Subtitles by",
     "Thanks for watching",
     "thanks for watching",
     "Thank you for watching",
-    "Спасибо за просмотр",
-    "спасибо за просмотр",
+    "thank you for watching",
+    "Please subscribe",
+    "please subscribe",
 ];
 
 /// Check if text is a Whisper hallucination (subtitle artifacts from training data)
