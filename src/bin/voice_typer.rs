@@ -39,11 +39,12 @@ const MODEL_PRESETS: &[(&str, &str)] = &[
 
 /// Initial prompt for Whisper to help with code-switching (Russian + English tech terms)
 /// This helps the model recognize programming terminology and keep anglicisms in English
-/// Kept short to avoid confusing the model
+/// Also instructs to use "..." prefix when continuing a sentence from context
 const PROGRAMMER_PROMPT: &str = "\
 Диктовка на русском языке программиста. Технические термины на английском: \
 API, Git, Docker, pull request, commit, push, deploy, frontend, backend, \
-debug, server, database, config, test, build, merge, branch, release.";
+debug, server, database, config, test, build, merge, branch, release. \
+Если фраза продолжает предыдущее предложение из контекста, начни с многоточия (...).";
 
 /// MIDI note frequencies for beep sounds
 const BEEP_START_FREQ: f32 = 880.0;  // A5 - higher pitch for start
@@ -406,7 +407,7 @@ fn load_whisper(model_path: &PathBuf) -> Result<whisper_rs::WhisperContext, Stri
 }
 
 #[cfg(feature = "whisper")]
-fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32]) -> Result<String, String> {
+fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32], context: Option<&str>) -> Result<String, String> {
     use whisper_rs::{FullParams, SamplingStrategy};
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
@@ -423,9 +424,17 @@ fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32]) -> Result<Strin
     // Force Russian language (user speaks Russian with English tech terms)
     params.set_language(Some("ru"));
 
-    // Set initial prompt with programming terminology
-    // This helps Whisper recognize tech terms and keep them in English
-    params.set_initial_prompt(PROGRAMMER_PROMPT);
+    // Build prompt with context from previous phrase
+    let prompt = if let Some(ctx_text) = context {
+        // Extract last sentence from context for continuity
+        let last_sentence = extract_last_sentence(ctx_text);
+        format!("{} {}", PROGRAMMER_PROMPT, last_sentence)
+    } else {
+        PROGRAMMER_PROMPT.to_string()
+    };
+
+    // Set initial prompt with programming terminology and context
+    params.set_initial_prompt(&prompt);
 
     let mut state = ctx.create_state()
         .map_err(|e| format!("Failed to create state: {}", e))?;
@@ -445,6 +454,59 @@ fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32]) -> Result<Strin
     }
 
     Ok(text.trim().to_string())
+}
+
+/// Extract last sentence from text for context
+/// Finds the last sentence-ending punctuation and returns text after it
+#[cfg(feature = "whisper")]
+fn extract_last_sentence(text: &str) -> &str {
+    // Find last sentence boundary (. ! ?)
+    let last_boundary = text.rfind(|c| c == '.' || c == '!' || c == '?');
+
+    match last_boundary {
+        Some(pos) if pos + 1 < text.len() => {
+            // Return text after the last sentence boundary
+            text[pos + 1..].trim()
+        }
+        _ => {
+            // No sentence boundary found, return whole text (limited)
+            let chars: Vec<char> = text.chars().collect();
+            if chars.len() > 100 {
+                // Return last 100 chars
+                let start = chars.len() - 100;
+                &text[text.char_indices().nth(start).map(|(i, _)| i).unwrap_or(0)..]
+            } else {
+                text
+            }
+        }
+    }
+}
+
+/// Process transcription result: handle continuation marker (...)
+/// Returns (processed_text, is_continuation)
+#[cfg(feature = "whisper")]
+fn process_continuation(text: &str) -> (String, bool) {
+    let trimmed = text.trim();
+
+    // Check if starts with continuation marker
+    if trimmed.starts_with("...") {
+        // Remove the marker and leading space
+        let processed = trimmed.trim_start_matches("...").trim_start();
+        (processed.to_string(), true)
+    } else if trimmed.starts_with("…") {
+        // Handle Unicode ellipsis
+        let processed = trimmed.trim_start_matches("…").trim_start();
+        (processed.to_string(), true)
+    } else {
+        (trimmed.to_string(), false)
+    }
+}
+
+/// Remove trailing punctuation from text (for continuation)
+#[cfg(feature = "whisper")]
+fn remove_trailing_punctuation(text: &str) -> String {
+    let trimmed = text.trim_end();
+    trimmed.trim_end_matches(|c| c == '.' || c == '!' || c == '?' || c == '…').to_string()
 }
 
 #[cfg(all(target_os = "macos", feature = "whisper"))]
@@ -470,6 +532,11 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod)
     let recording_start_clone = Arc::clone(&recording_start);
     let whisper_clone = Arc::clone(&whisper);
     let vad_clone = Arc::clone(&vad);
+
+    // Shared context for phrase continuation
+    let last_phrase: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let last_phrase_for_vad = Arc::clone(&last_phrase);
+    let last_phrase_clone = Arc::clone(&last_phrase);
 
     // Spawn VAD monitoring thread - detects pauses and transcribes phrases
     let state_for_vad = Arc::clone(&state);
@@ -535,16 +602,43 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod)
                 let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
                 println!("[{}] Phrase detected ({:.1}s), transcribing...", timestamp(), duration_secs);
 
-                // Resample and transcribe
+                // Get context from previous phrase
+                let context = {
+                    let ctx = last_phrase_for_vad.lock().unwrap();
+                    if ctx.is_empty() { None } else { Some(ctx.clone()) }
+                };
+
+                // Resample and transcribe with context
                 let resampled = resample_48k_to_16k(&phrase_samples);
-                match transcribe(&whisper_for_vad, &resampled) {
+                match transcribe(&whisper_for_vad, &resampled, context.as_deref()) {
                     Ok(text) => {
                         if !text.is_empty() {
-                            println!("[{}] \"{}\"", timestamp(), text);
-                            // Insert text with trailing space for concatenation
-                            let text_with_space = format!("{} ", text);
-                            if let Err(e) = insert_text(&text_with_space, input_method_for_vad) {
-                                eprintln!("Failed to insert text: {}", e);
+                            // Process continuation marker
+                            let (processed_text, is_continuation) = process_continuation(&text);
+
+                            if is_continuation {
+                                println!("[{}] (continuation) \"{}\"", timestamp(), processed_text);
+                                // Delete previous ". " (2 chars: punctuation + space) and insert continuation
+                                if let Err(e) = delete_chars(2) {
+                                    eprintln!("Failed to delete chars: {}", e);
+                                }
+                                // Insert continuation with trailing space
+                                let text_with_space = format!(" {}", processed_text);
+                                if let Err(e) = insert_text(&text_with_space, input_method_for_vad) {
+                                    eprintln!("Failed to insert text: {}", e);
+                                }
+                                // Append to context
+                                let mut ctx = last_phrase_for_vad.lock().unwrap();
+                                *ctx = format!("{} {}", remove_trailing_punctuation(&ctx), processed_text);
+                            } else {
+                                println!("[{}] \"{}\"", timestamp(), processed_text);
+                                // Insert text with trailing space for next phrase
+                                let text_with_space = format!("{} ", processed_text);
+                                if let Err(e) = insert_text(&text_with_space, input_method_for_vad) {
+                                    eprintln!("Failed to insert text: {}", e);
+                                }
+                                // Update context
+                                *last_phrase_for_vad.lock().unwrap() = processed_text;
                             }
                         }
                     }
@@ -634,15 +728,37 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod)
                         let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
                         println!("[{}] Final phrase ({:.1}s), transcribing...", timestamp(), duration_secs);
 
+                        // Get context from previous phrase
+                        let context = {
+                            let ctx = last_phrase_clone.lock().unwrap();
+                            if ctx.is_empty() { None } else { Some(ctx.clone()) }
+                        };
+
                         let resampled = resample_48k_to_16k(&phrase_samples);
-                        match transcribe(&whisper_clone, &resampled) {
+                        match transcribe(&whisper_clone, &resampled, context.as_deref()) {
                             Ok(text) => {
                                 if !text.is_empty() {
-                                    println!("[{}] \"{}\"", timestamp(), text);
-                                    // Insert text with trailing space for concatenation
-                                    let text_with_space = format!("{} ", text);
-                                    if let Err(e) = insert_text(&text_with_space, input_method_for_callback) {
-                                        eprintln!("Failed to insert text: {}", e);
+                                    // Process continuation marker
+                                    let (processed_text, is_continuation) = process_continuation(&text);
+
+                                    if is_continuation {
+                                        println!("[{}] (final continuation) \"{}\"", timestamp(), processed_text);
+                                        // Delete previous ". " and insert continuation
+                                        if let Err(e) = delete_chars(2) {
+                                            eprintln!("Failed to delete chars: {}", e);
+                                        }
+                                        // Insert continuation with space
+                                        let text_with_space = format!(" {}", processed_text);
+                                        if let Err(e) = insert_text(&text_with_space, input_method_for_callback) {
+                                            eprintln!("Failed to insert text: {}", e);
+                                        }
+                                    } else {
+                                        println!("[{}] \"{}\"", timestamp(), processed_text);
+                                        // Insert text with trailing space
+                                        let text_with_space = format!("{} ", processed_text);
+                                        if let Err(e) = insert_text(&text_with_space, input_method_for_callback) {
+                                            eprintln!("Failed to insert text: {}", e);
+                                        }
                                     }
                                 } else {
                                     println!("[{}] (no speech detected)", timestamp());
@@ -656,8 +772,9 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod)
                         println!("[{}] Done", timestamp());
                     }
 
-                    // Clear samples for next recording
+                    // Clear samples and context for next recording
                     samples_clone.lock().unwrap().clear();
+                    last_phrase_clone.lock().unwrap().clear();
                 }
             }
 
@@ -743,6 +860,43 @@ fn insert_text(text: &str, method: InputMethod) -> Result<(), String> {
         InputMethod::Keyboard => type_text(text),
         InputMethod::Clipboard => paste_text(text),
     }
+}
+
+/// Delete N characters by sending backspace keys
+#[cfg(target_os = "macos")]
+fn delete_chars(count: usize) -> Result<(), String> {
+    use core_graphics::event::CGEvent;
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    // Backspace key code on macOS
+    const BACKSPACE_KEY: u16 = 51;
+
+    let pid = get_frontmost_app_pid()
+        .ok_or("Failed to get frontmost application PID")?;
+
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| "Failed to create event source")?;
+
+    for _ in 0..count {
+        // Key down
+        let key_down = CGEvent::new_keyboard_event(source.clone(), BACKSPACE_KEY, true)
+            .map_err(|_| "Failed to create key down event")?;
+        key_down.post_to_pid(pid);
+
+        // Key up
+        let key_up = CGEvent::new_keyboard_event(source.clone(), BACKSPACE_KEY, false)
+            .map_err(|_| "Failed to create key up event")?;
+        key_up.post_to_pid(pid);
+
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn delete_chars(_count: usize) -> Result<(), String> {
+    Err("Delete not supported on this platform".to_string())
 }
 
 /// Type text using macOS CGEvent API for proper Unicode support
