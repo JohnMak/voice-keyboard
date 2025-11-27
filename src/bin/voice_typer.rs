@@ -56,8 +56,8 @@ const RECORDING_SAMPLE_RATE: u32 = 48000;
 /// VAD (Voice Activity Detection) settings
 /// Energy threshold for speech detection (0.0 - 1.0)
 /// Lower = more sensitive, higher = less sensitive
-/// 0.005 is quite sensitive, good for quiet voices
-const VAD_ENERGY_THRESHOLD: f32 = 0.005;
+/// 0.001 is very sensitive, good for normal speaking voice
+const VAD_ENERGY_THRESHOLD: f32 = 0.001;
 /// Silence duration to consider end of phrase (in milliseconds)
 const VAD_SILENCE_MS: u64 = 350;
 /// Minimum speech duration to process (in milliseconds)
@@ -711,19 +711,24 @@ fn start_recording(samples: Arc<Mutex<Vec<f32>>>) -> Result<cpal::Stream, String
 }
 
 fn paste_text(text: &str) -> Result<(), String> {
-    let mut clipboard = Clipboard::new()
-        .map_err(|e| format!("Clipboard error: {}", e))?;
+    // Save previous clipboard first
+    let previous = {
+        let mut clipboard = Clipboard::new()
+            .map_err(|e| format!("Clipboard error: {}", e))?;
+        clipboard.get_text().ok()
+    };
 
-    // Save previous clipboard
-    let previous = clipboard.get_text().ok();
+    // Set text to clipboard (create new instance to ensure clean state)
+    {
+        let mut clipboard = Clipboard::new()
+            .map_err(|e| format!("Clipboard error: {}", e))?;
+        clipboard.set_text(text.to_string())
+            .map_err(|e| format!("Failed to set clipboard: {}", e))?;
+    }
 
-    // Set text
-    clipboard.set_text(text.to_string())
-        .map_err(|e| format!("Failed to set clipboard: {}", e))?;
-
-    // Delay before paste - important for some apps like Telegram
-    // Gives time for clipboard to be ready and app to be focused
-    std::thread::sleep(Duration::from_millis(50));
+    // Longer delay to ensure clipboard is synced on macOS
+    // This is critical - without it, Cmd+V may paste old content or just 'v'
+    std::thread::sleep(Duration::from_millis(100));
 
     // Simulate Cmd+V
     #[cfg(target_os = "macos")]
@@ -733,25 +738,36 @@ fn paste_text(text: &str) -> Result<(), String> {
         let mut enigo = Enigo::new(&Settings::default())
             .map_err(|e| format!("Enigo error: {}", e))?;
 
-        // Add small delays between key events for reliability
+        // Press and hold Cmd
         enigo.key(EnigoKey::Meta, Direction::Press)
             .map_err(|e| format!("Key error: {}", e))?;
 
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(20));
 
-        enigo.key(EnigoKey::Unicode('v'), Direction::Click)
+        // Press and release V while Cmd is held
+        enigo.key(EnigoKey::Unicode('v'), Direction::Press)
             .map_err(|e| format!("Key error: {}", e))?;
 
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(20));
 
+        enigo.key(EnigoKey::Unicode('v'), Direction::Release)
+            .map_err(|e| format!("Key error: {}", e))?;
+
+        std::thread::sleep(Duration::from_millis(20));
+
+        // Release Cmd
         enigo.key(EnigoKey::Meta, Direction::Release)
             .map_err(|e| format!("Key error: {}", e))?;
     }
 
-    // Restore previous clipboard after paste completes
-    std::thread::sleep(Duration::from_millis(150));
+    // Wait for paste to complete before restoring clipboard
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Restore previous clipboard
     if let Some(prev) = previous {
-        let _ = clipboard.set_text(prev);
+        if let Ok(mut clipboard) = Clipboard::new() {
+            let _ = clipboard.set_text(prev);
+        }
     }
 
     Ok(())
