@@ -39,69 +39,11 @@ const MODEL_PRESETS: &[(&str, &str)] = &[
 
 /// Initial prompt for Whisper to help with code-switching (Russian + English tech terms)
 /// This helps the model recognize programming terminology and keep anglicisms in English
+/// Kept short to avoid confusing the model
 const PROGRAMMER_PROMPT: &str = "\
-Речь на русском языке с английскими техническими терминами. \
-Основной язык: русский. Английские слова — только технические термины программирования. \
-Примеры: «Нужно задеплоить на прод», «Сделай pull request», «Проверь логи в Docker». \
-Сохраняй английские термины как есть: \
-API, REST, GraphQL, JSON, XML, YAML, HTML, CSS, JavaScript, TypeScript, Python, Rust, Go, Java, \
-Git, GitHub, GitLab, CI/CD, Docker, Kubernetes, k8s, AWS, GCP, Azure, \
-DevOps, SRE, backend, frontend, fullstack, dev, prod, staging, localhost, \
-deploy, deployment, rollback, release, hotfix, bugfix, feature, refactoring, \
-pull request, PR, merge, commit, push, branch, master, main, develop, \
-debug, debugging, debugger, breakpoint, stack trace, log, logging, \
-server, client, microservice, monolith, serverless, lambda, \
-database, DB, SQL, NoSQL, PostgreSQL, MySQL, MongoDB, Redis, Elasticsearch, \
-cache, caching, CDN, load balancer, proxy, reverse proxy, nginx, \
-HTTP, HTTPS, WebSocket, TCP, UDP, DNS, SSL, TLS, SSH, \
-framework, library, package, dependency, npm, yarn, pip, cargo, \
-IDE, VS Code, Vim, terminal, console, shell, bash, zsh, \
-variable, function, class, method, object, interface, type, generic, \
-async, await, promise, callback, event, handler, listener, \
-thread, process, concurrency, parallelism, mutex, lock, \
-memory, heap, stack, garbage collector, GC, allocation, \
-test, testing, unit test, integration test, e2e, TDD, mock, stub, \
-build, compile, runtime, binary, executable, artifact, \
-config, configuration, environment, env, .env, secrets, \
-error, exception, try, catch, throw, panic, Result, Option, \
-string, array, list, map, set, hash, queue, tree, graph, \
-loop, iterator, recursion, algorithm, complexity, O(n), \
-API endpoint, request, response, header, body, payload, \
-authentication, authorization, OAuth, JWT, token, session, cookie, \
-user, admin, role, permission, access control, RBAC, \
-file, directory, path, stream, buffer, reader, writer, \
-JSON.parse, JSON.stringify, fetch, axios, curl, wget, \
-regex, pattern, match, replace, split, join, \
-Linux, Unix, macOS, Windows, Ubuntu, Debian, Alpine, \
-container, image, volume, network, pod, node, cluster, \
-Terraform, Ansible, Helm, ArgoCD, Jenkins, GitHub Actions, \
-Prometheus, Grafana, Datadog, Sentry, New Relic, \
-Kafka, RabbitMQ, SQS, pub/sub, message queue, event bus, \
-S3, bucket, blob, storage, CDN, CloudFront, \
-VPC, subnet, firewall, security group, IAM, \
-CPU, GPU, RAM, SSD, IOPS, latency, throughput, bandwidth, \
-sprint, scrum, agile, kanban, backlog, story, epic, task, \
-Jira, Confluence, Slack, Notion, Linear, \
-npm install, yarn add, pip install, cargo add, \
-git clone, git pull, git push, git merge, git rebase, \
-docker build, docker run, docker-compose, kubectl, \
-SELECT, INSERT, UPDATE, DELETE, JOIN, WHERE, GROUP BY, ORDER BY, \
-PRIMARY KEY, FOREIGN KEY, INDEX, CONSTRAINT, TRANSACTION, \
-useState, useEffect, useContext, useMemo, useCallback, \
-component, props, state, render, virtual DOM, \
-middleware, router, controller, service, repository, \
-DTO, entity, model, schema, migration, seed, \
-singleton, factory, observer, strategy, decorator, \
-SOLID, DRY, KISS, YAGNI, clean code, code review, \
-linter, formatter, ESLint, Prettier, Clippy, \
-webpack, vite, esbuild, rollup, bundler, transpiler, \
-responsive, mobile-first, breakpoint, flexbox, grid, \
-margin, padding, border, shadow, animation, transition, \
-onClick, onChange, onSubmit, preventDefault, \
-localhost:3000, localhost:8080, port, host, domain, URL, URI, \
-staging, production, development, environment variable, \
-README, documentation, docs, changelog, license, \
-open source, MIT, Apache, GPL, npm, crates.io, PyPI";
+Диктовка на русском языке программиста. Технические термины на английском: \
+API, Git, Docker, pull request, commit, push, deploy, frontend, backend, \
+debug, server, database, config, test, build, merge, branch, release.";
 
 /// MIDI note frequencies for beep sounds
 const BEEP_START_FREQ: f32 = 880.0;  // A5 - higher pitch for start
@@ -139,9 +81,9 @@ struct VadPhraseDetector {
     /// Minimum windows of speech to consider valid
     min_speech_windows: usize,
     /// Current count of consecutive silent windows
-    silent_windows: usize,
+    pub silent_windows: usize,
     /// Whether we're currently in speech
-    in_speech: bool,
+    pub in_speech: bool,
     /// Start position of current phrase
     phrase_start: usize,
     /// Position up to which we've processed
@@ -437,8 +379,8 @@ fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32]) -> Result<Strin
     params.set_no_context(true);
     params.set_single_segment(false);
 
-    // Auto-detect language but bias towards Russian + English code-switching
-    params.set_language(None);
+    // Force Russian language (user speaks Russian with English tech terms)
+    params.set_language(Some("ru"));
 
     // Set initial prompt with programming terminology
     // This helps Whisper recognize tech terms and keep them in English
@@ -495,6 +437,8 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
     let vad_for_thread = Arc::clone(&vad);
 
     thread::spawn(move || {
+        let mut last_sample_count = 0usize;
+
         loop {
             thread::sleep(Duration::from_millis(50)); // Check every 50ms for responsiveness
 
@@ -505,15 +449,30 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
             };
 
             if !is_recording {
+                last_sample_count = 0;
                 continue;
             }
 
             // Check for completed phrases
-            let phrase = {
+            let (phrase, sample_count, vad_state) = {
                 let samples = samples_for_vad.lock().unwrap();
                 let mut vad = vad_for_thread.lock().unwrap();
-                vad.detect_phrase(&samples)
+                let phrase = vad.detect_phrase(&samples);
+                let in_speech = vad.in_speech;
+                let silent_windows = vad.silent_windows;
+                (phrase, samples.len(), (in_speech, silent_windows))
             };
+
+            // Debug output every ~500ms
+            if sample_count > last_sample_count + RECORDING_SAMPLE_RATE as usize / 2 {
+                let duration = sample_count as f32 / RECORDING_SAMPLE_RATE as f32;
+                let (in_speech, silent_windows) = vad_state;
+                println!("[VAD] {:.1}s recorded, in_speech={}, silent_windows={}",
+                    duration, in_speech, silent_windows);
+                last_sample_count = sample_count;
+            }
+
+            let phrase = phrase;
 
             if let Some(phrase_samples) = phrase {
                 let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
