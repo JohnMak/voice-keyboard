@@ -742,23 +742,35 @@ fn insert_text(text: &str, method: InputMethod) -> Result<(), String> {
     }
 }
 
-/// Type text character by character using keyboard simulation
+/// Type text using macOS CGEvent API for proper Unicode support
 #[cfg(target_os = "macos")]
 fn type_text(text: &str) -> Result<(), String> {
-    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
-
-    let mut enigo = Enigo::new(&Settings::default())
-        .map_err(|e| format!("Enigo error: {}", e))?;
+    use core_graphics::event::{CGEvent, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
     // Small delay before typing
     std::thread::sleep(Duration::from_millis(50));
 
-    // Type each character individually
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| "Failed to create event source")?;
+
+    // Type each character using CGEvent with Unicode support
     for c in text.chars() {
-        enigo.key(Key::Unicode(c), Direction::Click)
-            .map_err(|e| format!("Failed to type '{}': {}", c, e))?;
-        // Small delay between characters for reliability
-        std::thread::sleep(Duration::from_millis(5));
+        let char_str = c.to_string();
+
+        // Create key down event
+        if let Ok(event) = CGEvent::new_keyboard_event(source.clone(), 0, true) {
+            event.set_string(&char_str);
+            event.post(CGEventTapLocation::HID);
+        }
+
+        // Create key up event
+        if let Ok(event) = CGEvent::new_keyboard_event(source.clone(), 0, false) {
+            event.post(CGEventTapLocation::HID);
+        }
+
+        // Small delay between characters
+        std::thread::sleep(Duration::from_millis(2));
     }
 
     Ok(())

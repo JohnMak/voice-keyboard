@@ -35,12 +35,13 @@ anyhow = "1"
 
 # macOS-only dependencies (require system frameworks, not available on Linux CI)
 [target.'cfg(target_os = "macos")'.dependencies]
-cpal = "0.15"       # Audio recording (uses CoreAudio)
-rdev = "0.5"        # Global hotkeys (uses IOKit)
-enigo = "0.2"       # Keyboard simulation (requires Accessibility)
-tray-icon = "0.19"  # System tray
-cocoa = "0.26"      # macOS clipboard for files
-objc = "0.2"        # Objective-C runtime
+cpal = "0.15"           # Audio recording (uses CoreAudio)
+rdev = "0.5"            # Global hotkeys (uses IOKit)
+enigo = "0.2"           # Keyboard simulation (requires Accessibility)
+tray-icon = "0.19"      # System tray
+cocoa = "0.26"          # macOS clipboard for files
+objc = "0.2"            # Objective-C runtime
+core-graphics = "0.24"  # CGEvent for Unicode keyboard input
 
 # Minimal binary - standalone, no whisper dependency
 [[bin]]
