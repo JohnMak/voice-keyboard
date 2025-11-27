@@ -1,6 +1,52 @@
 # Voice Keyboard
 
-Push-to-talk voice keyboard with local Whisper speech recognition. Hold a key to record, release to transcribe and type text into any application.
+Push-to-talk voice keyboard with local Whisper speech recognition.
+
+## How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│   1. HOLD the hotkey    2. SPEAK         3. RELEASE the key    │
+│                                                                 │
+│      ┌─────┐               🎤                  ┌─────┐          │
+│      │ Fn  │  ──────►  "Hello world"  ──────►  │ Fn  │          │
+│      └─────┘                                   └─────┘          │
+│       Press                                    Release          │
+│                                                   │             │
+│                                                   ▼             │
+│                                           ┌─────────────┐       │
+│                                           │ Hello world │       │
+│                                           └─────────────┘       │
+│                                           Text appears in       │
+│                                           your active app       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Voice Keyboard** uses a push-to-talk interface:
+1. **Press and hold** the hotkey to start recording
+2. **Speak** — your voice is recorded locally
+3. **Release** the key — speech is transcribed using Whisper AI and text is typed into the active application
+
+All processing happens **locally on your device** — no data is sent to the cloud.
+
+### Hotkey by Platform
+
+| Platform | Default Hotkey | Notes |
+|----------|---------------|-------|
+| **macOS** | `Fn` (Globe key) | Works on MacBook keyboards. The Fn key sends a special event that macOS can detect. |
+| **macOS** | `F13` | Alternative for external keyboards without Fn key. |
+| **Linux** | `F13` or `Right Ctrl` | The Fn key on most keyboards is hardware-only and invisible to the OS. Use F13 (if available) or configure another key. |
+| **Windows** | `F13` or `Right Ctrl` | Same as Linux — Fn is usually not detectable. |
+
+> **Important:** On most non-Apple keyboards, the **Fn key is a hardware modifier** that the operating system cannot see. It modifies other keys (like F1-F12) before they reach the OS. For Linux and Windows, use a different key like F13, Right Ctrl, or configure your preferred key in settings.
+
+### Smart Features
+
+- **Voice Activity Detection (VAD)**: Automatically detects pauses in your speech (~350ms) and transcribes incrementally. You can speak in sentences with natural pauses.
+- **Context Continuation**: If you pause mid-sentence, the next phrase continues smoothly without breaking the sentence.
+- **Hallucination Filter**: Filters out common Whisper artifacts (like subtitle credits that appear in training data).
 
 ## Features
 
@@ -122,11 +168,17 @@ Invoke-WebRequest -Uri "https://huggingface.co/ggerganov/whisper.cpp/resolve/mai
 ./target/release/voice-typer --clipboard
 ```
 
-**Usage:**
-1. Press and hold **Fn** key (configurable)
-2. Speak
-3. Release key — text appears in active field
-4. Pauses in speech (~350ms) trigger incremental transcription
+**Basic Usage:**
+1. Run the voice-typer
+2. Click on any text field (browser, editor, chat, etc.)
+3. **Press and hold** the hotkey (Fn on Mac, see table above)
+4. Speak clearly
+5. **Release** the key — your speech appears as text!
+
+**Pro tips:**
+- You can pause naturally while speaking — VAD will transcribe each phrase separately
+- Long pauses (~350ms) trigger incremental transcription while you're still holding the key
+- Works best with the large-v3-turbo model for accuracy
 
 ### Voice Recorder
 
@@ -157,7 +209,7 @@ Config file location:
   "model_path": "~/.local/share/voice-keyboard/models/ggml-large-v3-turbo.bin",
   "language": "ru",
   "hotkey": {
-    "trigger_key": "Fn",
+    "trigger_key": "Function",
     "push_to_talk": true,
     "modifiers": []
   },
@@ -171,8 +223,25 @@ Config file location:
 |--------|--------|-------------|
 | `language` | `"auto"`, `"en"`, `"ru"`, etc. | Recognition language ([full list](https://github.com/openai/whisper#available-models-and-languages)) |
 | `injection_method` | `"keyboard"`, `"clipboard"` | How to input text |
-| `trigger_key` | `"Fn"`, `"F13"`, `"Space"` | Push-to-talk key |
-| `modifiers` | `["cmd"]`, `["ctrl", "shift"]` | Key modifiers |
+| `trigger_key` | See table below | Push-to-talk key |
+| `modifiers` | `["ControlLeft"]`, `["Alt", "Shift"]` | Optional key modifiers |
+
+### Available Hotkeys
+
+| Key Name | Description | Platform Notes |
+|----------|-------------|----------------|
+| `Function` | Fn/Globe key | **macOS only** — hardware Fn on other platforms is not detectable |
+| `F13` | F13 key | Available on extended keyboards, some keyboards have it above F12 |
+| `ControlRight` | Right Ctrl | Good choice for Linux/Windows |
+| `AltRight` | Right Alt | Alternative option |
+| `CapsLock` | Caps Lock | Can be remapped |
+| `Space` | Space (with modifiers) | Use with modifiers like `["ControlLeft"]` |
+
+**Recommended by platform:**
+- **macOS (MacBook)**: `Function` (built-in Fn key)
+- **macOS (external keyboard)**: `F13` or `ControlRight`
+- **Linux**: `ControlRight` or `F13`
+- **Windows**: `ControlRight` or `F13`
 
 ## Models
 
