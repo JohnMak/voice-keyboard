@@ -61,9 +61,6 @@ const VAD_MIN_SPEECH_MS: u64 = 500;
 const VAD_WINDOW_MS: u64 = 30;
 /// Minimum energy threshold for speech
 const VAD_ENERGY_THRESHOLD: f32 = 0.001;
-/// Voice frequency band: 85-255 Hz captures fundamental frequency of most voices
-const VAD_VOICE_FREQ_LOW: f32 = 85.0;
-const VAD_VOICE_FREQ_HIGH: f32 = 255.0;
 /// Ratio of voice-band energy to total energy required for speech detection
 /// Higher = stricter voice detection, lower = more sensitive
 const VAD_VOICE_RATIO_THRESHOLD: f32 = 0.15;
@@ -131,12 +128,11 @@ impl VadPhraseDetector {
         let w = 2.0 * std::f32::consts::PI * k as f32 / n as f32;
         let coeff = 2.0 * w.cos();
 
-        let mut s0 = 0.0f32;
         let mut s1 = 0.0f32;
         let mut s2 = 0.0f32;
 
         for &sample in samples {
-            s0 = sample + coeff * s1 - s2;
+            let s0 = sample + coeff * s1 - s2;
             s2 = s1;
             s1 = s0;
         }
