@@ -762,6 +762,54 @@ fn test_concatenation_workflow() {
     assert_eq!(context, "Новое предложение.");
 }
 
+/// Capitalize first letter of text
+fn capitalize_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
+#[test]
+fn test_capitalize_first_lowercase() {
+    assert_eq!(capitalize_first("привет"), "Привет");
+    assert_eq!(capitalize_first("hello"), "Hello");
+}
+
+#[test]
+fn test_capitalize_first_already_upper() {
+    assert_eq!(capitalize_first("Привет"), "Привет");
+    assert_eq!(capitalize_first("Hello"), "Hello");
+}
+
+#[test]
+fn test_capitalize_first_empty() {
+    assert_eq!(capitalize_first(""), "");
+}
+
+#[test]
+fn test_capitalize_first_single_char() {
+    assert_eq!(capitalize_first("a"), "A");
+    assert_eq!(capitalize_first("я"), "Я");
+}
+
+#[test]
+fn test_first_phrase_capitalization() {
+    // Simulate first phrase scenario (no context)
+    let context: Option<String> = None;
+    let processed_text = "это первое предложение.";
+
+    let is_first_phrase = context.is_none();
+    let final_text = if is_first_phrase {
+        capitalize_first(processed_text)
+    } else {
+        processed_text.to_string()
+    };
+
+    assert_eq!(final_text, "Это первое предложение.");
+}
+
 #[test]
 fn test_key_argument_parsing() {
     // Test --key argument parsing

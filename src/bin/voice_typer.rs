@@ -725,6 +725,16 @@ fn is_hallucination(text: &str) -> bool {
     false
 }
 
+/// Capitalize first letter of text (for first phrase when no context)
+#[cfg(feature = "whisper")]
+fn capitalize_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
 /// Count how many characters to delete for continuation
 /// Returns count of trailing punctuation + space to delete
 #[cfg(feature = "whisper")]
@@ -869,12 +879,22 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
                             // Process continuation marker
                             let (processed_text, is_continuation) = process_continuation(&text);
 
-                            if is_continuation {
+                            // Check if this is the first phrase (no context)
+                            let is_first_phrase = context.is_none();
+
+                            if is_continuation && !is_first_phrase {
                                 // Delete previous punctuation + space based on what was there
-                                let chars_to_delete = {
+                                let (chars_to_delete, deleted_chars) = {
                                     let ctx = last_phrase_for_vad.lock().unwrap();
-                                    count_chars_to_delete(&ctx)
+                                    let count = count_chars_to_delete(&ctx);
+                                    // Get the chars that will be deleted for logging
+                                    let deleted: String = ctx.chars().rev().take(count).collect::<String>().chars().rev().collect();
+                                    (count, deleted)
                                 };
+
+                                // Log the deletion
+                                println!("[{}] <{} (deleting \"{}\")", timestamp(), chars_to_delete, deleted_chars);
+
                                 if let Err(e) = delete_chars(chars_to_delete) {
                                     eprintln!("Failed to delete chars: {}", e);
                                 }
@@ -887,17 +907,26 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
                                 }
                                 // Append to context
                                 let mut ctx = last_phrase_for_vad.lock().unwrap();
-                                *ctx = format!("{} {}", remove_trailing_punctuation(&ctx), processed_text);
+                                let old_ctx = ctx.clone();
+                                *ctx = format!("{} {}", remove_trailing_punctuation(&old_ctx), processed_text);
+                                println!("[{}] ctx: \"{}\" -> \"{}\"", timestamp(), old_ctx, *ctx);
                             } else {
+                                // First phrase or not a continuation - capitalize first letter
+                                let final_text = if is_first_phrase {
+                                    capitalize_first(&processed_text)
+                                } else {
+                                    processed_text.clone()
+                                };
+
                                 // Insert text with trailing space for next phrase
-                                let text_with_space = format!("{} ", processed_text);
+                                let text_with_space = format!("{} ", final_text);
                                 if let Err(e) = insert_text(&text_with_space, input_method_for_vad) {
                                     eprintln!("Failed to insert text: {}", e);
                                 } else {
-                                    println!("[{}] \"{}\"", timestamp(), processed_text);
+                                    println!("[{}] \"{}\"", timestamp(), final_text);
                                 }
                                 // Update context
-                                *last_phrase_for_vad.lock().unwrap() = processed_text;
+                                *last_phrase_for_vad.lock().unwrap() = final_text;
                             }
                         }
                     }
@@ -1003,12 +1032,20 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
                                     // Process continuation marker
                                     let (processed_text, is_continuation) = process_continuation(&text);
 
-                                    if is_continuation {
+                                    // Check if this is the first phrase (no context)
+                                    let is_first_phrase = context.is_none();
+
+                                    if is_continuation && !is_first_phrase {
                                         // Delete previous punctuation + space
-                                        let chars_to_delete = {
+                                        let (chars_to_delete, deleted_chars) = {
                                             let ctx = last_phrase_clone.lock().unwrap();
-                                            count_chars_to_delete(&ctx)
+                                            let count = count_chars_to_delete(&ctx);
+                                            let deleted: String = ctx.chars().rev().take(count).collect::<String>().chars().rev().collect();
+                                            (count, deleted)
                                         };
+
+                                        println!("[{}] <{} (deleting \"{}\")", timestamp(), chars_to_delete, deleted_chars);
+
                                         if let Err(e) = delete_chars(chars_to_delete) {
                                             eprintln!("Failed to delete chars: {}", e);
                                         }
@@ -1020,12 +1057,19 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
                                             println!("[{}] +\"{}\"", timestamp(), processed_text);
                                         }
                                     } else {
+                                        // First phrase or not a continuation - capitalize first letter
+                                        let final_text = if is_first_phrase {
+                                            capitalize_first(&processed_text)
+                                        } else {
+                                            processed_text.clone()
+                                        };
+
                                         // Insert text with trailing space
-                                        let text_with_space = format!("{} ", processed_text);
+                                        let text_with_space = format!("{} ", final_text);
                                         if let Err(e) = insert_text(&text_with_space, input_method_for_callback) {
                                             eprintln!("Failed to insert text: {}", e);
                                         } else {
-                                            println!("[{}] \"{}\"", timestamp(), processed_text);
+                                            println!("[{}] \"{}\"", timestamp(), final_text);
                                         }
                                     }
                                 } else {
