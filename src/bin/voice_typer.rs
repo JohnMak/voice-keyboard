@@ -8,6 +8,7 @@
 //!   cargo run --bin voice-typer --features whisper -- --model /path/to/model.bin
 
 use std::env;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -425,14 +426,88 @@ fn list_models() {
     println!("    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin");
 }
 
+/// Configuration loaded from config file
+struct Config {
+    model: Option<String>,
+    hotkey: Option<String>,
+    input_method: Option<String>,
+}
+
+impl Config {
+    fn new() -> Self {
+        Self {
+            model: None,
+            hotkey: None,
+            input_method: None,
+        }
+    }
+}
+
+/// Load configuration from ~/.config/voice-keyboard/config.toml
+fn load_config() -> Config {
+    let mut config = Config::new();
+
+    // Try HOME-based path (works on all Unix systems)
+    let config_path = env::var("HOME").ok().map(|h| {
+        PathBuf::from(h).join(".config").join("voice-keyboard").join("config.toml")
+    });
+
+    let config_path = match config_path {
+        Some(p) => p,
+        None => return config,
+    };
+
+    if !config_path.exists() {
+        return config;
+    }
+
+    let content = match fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => return config,
+    };
+
+    // Simple TOML parsing (just key = "value" lines)
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() || line.starts_with('[') {
+            continue;
+        }
+
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim();
+            let value = value.trim().trim_matches('"');
+
+            match key {
+                "model" => config.model = Some(value.to_string()),
+                "hotkey" => config.hotkey = Some(value.to_string()),
+                "method" => config.input_method = Some(value.to_string()),
+                _ => {}
+            }
+        }
+    }
+
+    config
+}
+
 fn main() {
-    // Parse command line arguments
+    // Load config file first
+    let config = load_config();
+
+    // Parse command line arguments (override config)
     let args: Vec<String> = env::args().collect();
-    let mut model_arg: Option<String> = None;
-    let mut input_method = InputMethod::Keyboard; // Default to keyboard
+    let mut model_arg: Option<String> = config.model.clone();
+
+    // Set defaults from config or use built-in defaults
+    let mut input_method = match config.input_method.as_deref() {
+        Some("clipboard") => InputMethod::Clipboard,
+        _ => InputMethod::Keyboard,
+    };
 
     #[cfg(target_os = "macos")]
-    let mut hotkey = HotkeyType::default(); // Fn on macOS
+    let mut hotkey = config.hotkey
+        .as_ref()
+        .and_then(|h| HotkeyType::from_str(h))
+        .unwrap_or_else(HotkeyType::default);
 
     let mut i = 1;
     while i < args.len() {
