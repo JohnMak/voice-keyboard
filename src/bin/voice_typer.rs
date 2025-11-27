@@ -56,13 +56,17 @@ const RECORDING_SAMPLE_RATE: u32 = 48000;
 /// VAD (Voice Activity Detection) settings
 /// Energy threshold for speech detection (0.0 - 1.0)
 /// Lower = more sensitive, higher = less sensitive
-const VAD_ENERGY_THRESHOLD: f32 = 0.01;
+/// 0.02 works well for typical microphones, increase if too sensitive
+const VAD_ENERGY_THRESHOLD: f32 = 0.02;
 /// Silence duration to consider end of phrase (in milliseconds)
-const VAD_SILENCE_MS: u64 = 300;
+const VAD_SILENCE_MS: u64 = 350;
 /// Minimum speech duration to process (in milliseconds)
-const VAD_MIN_SPEECH_MS: u64 = 200;
+/// Increased to avoid false triggers from clicks/noise
+const VAD_MIN_SPEECH_MS: u64 = 500;
 /// Window size for energy calculation (in milliseconds)
-const VAD_WINDOW_MS: u64 = 20;
+const VAD_WINDOW_MS: u64 = 30;
+/// Skip initial audio to avoid beep detection (in milliseconds)
+const VAD_SKIP_INITIAL_MS: u64 = 200;
 
 /// Recording state
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -80,6 +84,8 @@ struct VadPhraseDetector {
     silence_windows_threshold: usize,
     /// Minimum windows of speech to consider valid
     min_speech_windows: usize,
+    /// Samples to skip at beginning (avoid beep)
+    skip_initial_samples: usize,
     /// Current count of consecutive silent windows
     pub silent_windows: usize,
     /// Whether we're currently in speech
@@ -96,11 +102,13 @@ impl VadPhraseDetector {
         let window_samples = (VAD_WINDOW_MS as f32 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize;
         let silence_windows_threshold = (VAD_SILENCE_MS / VAD_WINDOW_MS) as usize;
         let min_speech_windows = (VAD_MIN_SPEECH_MS / VAD_WINDOW_MS) as usize;
+        let skip_initial_samples = (VAD_SKIP_INITIAL_MS as f32 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize;
 
         Self {
             window_samples,
             silence_windows_threshold,
             min_speech_windows,
+            skip_initial_samples,
             silent_windows: 0,
             in_speech: false,
             phrase_start: 0,
@@ -119,8 +127,19 @@ impl VadPhraseDetector {
 
     /// Check for completed phrases and return them
     fn detect_phrase(&mut self, all_samples: &[f32]) -> Option<Vec<f32>> {
+        // Skip initial samples (avoid beep detection)
+        if all_samples.len() < self.skip_initial_samples {
+            return None;
+        }
+
         // Process new windows
         while self.processed_pos + self.window_samples <= all_samples.len() {
+            // Skip initial samples
+            if self.processed_pos < self.skip_initial_samples {
+                self.processed_pos = self.skip_initial_samples;
+                continue;
+            }
+
             let window_start = self.processed_pos;
             let window_end = window_start + self.window_samples;
             let window = &all_samples[window_start..window_end];
