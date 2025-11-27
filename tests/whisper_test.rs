@@ -182,6 +182,367 @@ mod tests {
 
         println!("Silence test passed!");
     }
+
+    /// Transcribe with Russian language
+    fn transcribe_russian(ctx: &WhisperContext, samples: &[f32]) -> String {
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_translate(false);
+        params.set_no_context(true);
+        params.set_language(Some("ru")); // Force Russian
+
+        let mut state = ctx.create_state().expect("Failed to create state");
+        state.full(params, samples).expect("Transcription failed");
+
+        let num_segments = state.full_n_segments();
+
+        let mut text = String::new();
+        for i in 0..num_segments {
+            if let Some(segment) = state.get_segment(i) {
+                if let Ok(segment_text) = segment.to_str_lossy() {
+                    text.push_str(&segment_text);
+                }
+            }
+        }
+
+        text.trim().to_string()
+    }
+
+    #[test]
+    fn test_russian_transcription_10s() {
+        let model_path = get_model_path();
+
+        if !model_path.exists() {
+            eprintln!("Skipping test: model not found");
+            return;
+        }
+
+        let test_wav = PathBuf::from("test_data/russian_speech_10s.wav");
+        if !test_wav.exists() {
+            eprintln!("Skipping test: test file not found at {}", test_wav.display());
+            return;
+        }
+
+        println!("Loading model...");
+        let params = WhisperContextParameters::default();
+        let ctx = WhisperContext::new_with_params(model_path.to_str().unwrap(), params)
+            .expect("Failed to load model");
+
+        println!("Loading Russian audio...");
+        let samples = load_wav(test_wav.to_str().unwrap());
+        println!("Loaded {} samples ({:.1}s at 16kHz)", samples.len(), samples.len() as f32 / 16000.0);
+
+        println!("Transcribing Russian...");
+        let result = transcribe_russian(&ctx, &samples);
+        println!("Russian result: \"{}\"", result);
+
+        // Should produce some text (LibriVox audiobook)
+        assert!(
+            result.len() > 10,
+            "Expected Russian transcription to contain text, got: '{}'",
+            result
+        );
+
+        println!("Russian 10s test passed!");
+    }
+
+    #[test]
+    fn test_russian_transcription_30s() {
+        let model_path = get_model_path();
+
+        if !model_path.exists() {
+            eprintln!("Skipping test: model not found");
+            return;
+        }
+
+        let test_wav = PathBuf::from("test_data/russian_speech_30s.wav");
+        if !test_wav.exists() {
+            eprintln!("Skipping test: test file not found at {}", test_wav.display());
+            return;
+        }
+
+        println!("Loading model...");
+        let params = WhisperContextParameters::default();
+        let ctx = WhisperContext::new_with_params(model_path.to_str().unwrap(), params)
+            .expect("Failed to load model");
+
+        println!("Loading Russian audio (30s)...");
+        let samples = load_wav(test_wav.to_str().unwrap());
+        println!("Loaded {} samples ({:.1}s at 16kHz)", samples.len(), samples.len() as f32 / 16000.0);
+
+        println!("Transcribing Russian...");
+        let start = std::time::Instant::now();
+        let result = transcribe_russian(&ctx, &samples);
+        let elapsed = start.elapsed();
+        println!("Russian result (30s): \"{}\"", result);
+        println!("Transcription took: {:?}", elapsed);
+
+        // Should produce text
+        assert!(
+            result.len() > 20,
+            "Expected Russian transcription to contain text, got: '{}'",
+            result
+        );
+
+        println!("Russian 30s test passed!");
+    }
+
+    /// VAD phrase detector for testing (same as vad_test.rs)
+    struct VadPhraseDetector {
+        window_samples: usize,
+        silence_windows_threshold: usize,
+        min_speech_windows: usize,
+        silent_windows: usize,
+        in_speech: bool,
+        phrase_start: usize,
+        processed_pos: usize,
+    }
+
+    const SAMPLE_RATE: u32 = 16000;
+    const VAD_ENERGY_THRESHOLD: f32 = 0.01;
+    const VAD_SILENCE_MS: u64 = 300;
+    const VAD_MIN_SPEECH_MS: u64 = 200;
+    const VAD_WINDOW_MS: u64 = 20;
+
+    impl VadPhraseDetector {
+        fn new() -> Self {
+            let window_samples = (VAD_WINDOW_MS as f32 * SAMPLE_RATE as f32 / 1000.0) as usize;
+            let silence_windows_threshold = (VAD_SILENCE_MS / VAD_WINDOW_MS) as usize;
+            let min_speech_windows = (VAD_MIN_SPEECH_MS / VAD_WINDOW_MS) as usize;
+
+            Self {
+                window_samples,
+                silence_windows_threshold,
+                min_speech_windows,
+                silent_windows: 0,
+                in_speech: false,
+                phrase_start: 0,
+                processed_pos: 0,
+            }
+        }
+
+        fn calculate_energy(&self, samples: &[f32]) -> f32 {
+            if samples.is_empty() {
+                return 0.0;
+            }
+            let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+            (sum_sq / samples.len() as f32).sqrt()
+        }
+
+        fn detect_phrase(&mut self, all_samples: &[f32]) -> Option<Vec<f32>> {
+            while self.processed_pos + self.window_samples <= all_samples.len() {
+                let window_start = self.processed_pos;
+                let window_end = window_start + self.window_samples;
+                let window = &all_samples[window_start..window_end];
+
+                let energy = self.calculate_energy(window);
+                let is_speech = energy >= VAD_ENERGY_THRESHOLD;
+
+                if is_speech {
+                    if !self.in_speech {
+                        self.in_speech = true;
+                        self.phrase_start = window_start;
+                    }
+                    self.silent_windows = 0;
+                } else if self.in_speech {
+                    self.silent_windows += 1;
+
+                    if self.silent_windows >= self.silence_windows_threshold {
+                        let phrase_end = window_start - (self.silent_windows - 1) * self.window_samples;
+                        let phrase_len = phrase_end.saturating_sub(self.phrase_start);
+
+                        if phrase_len >= self.min_speech_windows * self.window_samples {
+                            let phrase = all_samples[self.phrase_start..phrase_end].to_vec();
+                            self.in_speech = false;
+                            self.silent_windows = 0;
+                            self.phrase_start = window_end;
+                            self.processed_pos = window_end;
+                            return Some(phrase);
+                        } else {
+                            self.in_speech = false;
+                            self.silent_windows = 0;
+                            self.phrase_start = window_end;
+                        }
+                    }
+                }
+
+                self.processed_pos = window_end;
+            }
+
+            None
+        }
+
+        fn get_remaining(&self, all_samples: &[f32]) -> Option<Vec<f32>> {
+            if self.in_speech && all_samples.len() > self.phrase_start {
+                let phrase_len = all_samples.len() - self.phrase_start;
+                if phrase_len >= self.min_speech_windows * self.window_samples {
+                    return Some(all_samples[self.phrase_start..].to_vec());
+                }
+            }
+            if !self.in_speech && self.processed_pos < all_samples.len() {
+                let remaining_len = all_samples.len() - self.processed_pos;
+                if remaining_len >= self.min_speech_windows * self.window_samples {
+                    return Some(all_samples[self.processed_pos..].to_vec());
+                }
+            }
+            None
+        }
+    }
+
+    #[test]
+    fn test_russian_vad_phrase_detection() {
+        let model_path = get_model_path();
+
+        if !model_path.exists() {
+            eprintln!("Skipping test: model not found");
+            return;
+        }
+
+        let test_wav = PathBuf::from("test_data/russian_speech_30s.wav");
+        if !test_wav.exists() {
+            eprintln!("Skipping test: test file not found at {}", test_wav.display());
+            return;
+        }
+
+        println!("Loading model...");
+        let params = WhisperContextParameters::default();
+        let ctx = WhisperContext::new_with_params(model_path.to_str().unwrap(), params)
+            .expect("Failed to load model");
+
+        println!("Loading Russian audio (30s)...");
+        let samples = load_wav(test_wav.to_str().unwrap());
+        println!("Loaded {} samples ({:.1}s at 16kHz)", samples.len(), samples.len() as f32 / 16000.0);
+
+        // Use VAD to detect phrases
+        let mut vad = VadPhraseDetector::new();
+        let mut phrases = Vec::new();
+
+        loop {
+            match vad.detect_phrase(&samples) {
+                Some(phrase) => phrases.push(phrase),
+                None => break,
+            }
+        }
+
+        if let Some(remaining) = vad.get_remaining(&samples) {
+            phrases.push(remaining);
+        }
+
+        println!("VAD detected {} phrases", phrases.len());
+
+        // Transcribe each phrase
+        let mut full_text = String::new();
+        for (i, phrase) in phrases.iter().enumerate() {
+            let duration = phrase.len() as f32 / SAMPLE_RATE as f32;
+            println!("Phrase {}: {:.1}s ({} samples)", i + 1, duration, phrase.len());
+
+            let text = transcribe_russian(&ctx, phrase);
+            println!("  Text: \"{}\"", text);
+
+            if !text.is_empty() {
+                if !full_text.is_empty() {
+                    full_text.push(' ');
+                }
+                full_text.push_str(&text);
+            }
+        }
+
+        println!("\nFull transcription from VAD phrases:");
+        println!("\"{}\"", full_text);
+
+        // Verify we got meaningful output
+        assert!(
+            full_text.len() > 20,
+            "Expected meaningful transcription from VAD phrases, got: '{}'",
+            full_text
+        );
+
+        println!("\nRussian VAD phrase detection test passed!");
+    }
+
+    #[test]
+    fn test_russian_60s_with_vad() {
+        let model_path = get_model_path();
+
+        if !model_path.exists() {
+            eprintln!("Skipping test: model not found");
+            return;
+        }
+
+        let test_wav = PathBuf::from("test_data/russian_speech_60s.wav");
+        if !test_wav.exists() {
+            eprintln!("Skipping test: test file not found at {}", test_wav.display());
+            return;
+        }
+
+        println!("Loading model...");
+        let params = WhisperContextParameters::default();
+        let ctx = WhisperContext::new_with_params(model_path.to_str().unwrap(), params)
+            .expect("Failed to load model");
+
+        println!("Loading Russian audio (60s)...");
+        let samples = load_wav(test_wav.to_str().unwrap());
+        println!("Loaded {} samples ({:.1}s at 16kHz)", samples.len(), samples.len() as f32 / 16000.0);
+
+        // Use VAD to detect phrases
+        let mut vad = VadPhraseDetector::new();
+        let mut phrases = Vec::new();
+
+        let vad_start = std::time::Instant::now();
+        loop {
+            match vad.detect_phrase(&samples) {
+                Some(phrase) => phrases.push(phrase),
+                None => break,
+            }
+        }
+        if let Some(remaining) = vad.get_remaining(&samples) {
+            phrases.push(remaining);
+        }
+        let total_vad_time = vad_start.elapsed();
+
+        println!("VAD detected {} phrases in {:?}", phrases.len(), total_vad_time);
+
+        // Transcribe each phrase and measure time
+        let mut full_text = String::new();
+        let mut total_transcribe_time = std::time::Duration::ZERO;
+
+        for (i, phrase) in phrases.iter().enumerate() {
+            let duration = phrase.len() as f32 / SAMPLE_RATE as f32;
+
+            let start = std::time::Instant::now();
+            let text = transcribe_russian(&ctx, phrase);
+            let elapsed = start.elapsed();
+            total_transcribe_time += elapsed;
+
+            println!("Phrase {}: {:.1}s -> {:?} -> \"{}\"", i + 1, duration, elapsed, text);
+
+            if !text.is_empty() {
+                if !full_text.is_empty() {
+                    full_text.push(' ');
+                }
+                full_text.push_str(&text);
+            }
+        }
+
+        println!("\n=== Summary ===");
+        println!("Audio duration: 60s");
+        println!("Phrases detected: {}", phrases.len());
+        println!("VAD processing time: {:?}", total_vad_time);
+        println!("Total transcription time: {:?}", total_transcribe_time);
+        println!("Full text ({} chars): \"{}\"", full_text.len(), full_text);
+
+        assert!(
+            full_text.len() > 50,
+            "Expected meaningful transcription from 60s audio, got: '{}'",
+            full_text
+        );
+
+        println!("\nRussian 60s VAD test passed!");
+    }
 }
 
 #[cfg(not(feature = "whisper"))]

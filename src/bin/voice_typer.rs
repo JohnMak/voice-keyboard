@@ -40,7 +40,10 @@ const MODEL_PRESETS: &[(&str, &str)] = &[
 /// Initial prompt for Whisper to help with code-switching (Russian + English tech terms)
 /// This helps the model recognize programming terminology and keep anglicisms in English
 const PROGRAMMER_PROMPT: &str = "\
-Технический текст программиста. Сохраняй английские термины как есть: \
+Речь на русском языке с английскими техническими терминами. \
+Основной язык: русский. Английские слова — только технические термины программирования. \
+Примеры: «Нужно задеплоить на прод», «Сделай pull request», «Проверь логи в Docker». \
+Сохраняй английские термины как есть: \
 API, REST, GraphQL, JSON, XML, YAML, HTML, CSS, JavaScript, TypeScript, Python, Rust, Go, Java, \
 Git, GitHub, GitLab, CI/CD, Docker, Kubernetes, k8s, AWS, GCP, Azure, \
 DevOps, SRE, backend, frontend, fullstack, dev, prod, staging, localhost, \

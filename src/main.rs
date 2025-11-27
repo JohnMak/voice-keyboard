@@ -9,12 +9,13 @@ use anyhow::Result;
 use std::path::PathBuf;
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
+#[cfg(feature = "whisper")]
+use voice_keyboard::transcribe::Transcriber;
 use voice_keyboard::{
     audio::AudioRecorder,
     config::Config,
     hotkey::{HotkeyAction, HotkeyConfig, HotkeyListener},
     inject::TextInjector,
-    transcribe::Transcriber,
 };
 
 #[tokio::main]
@@ -81,6 +82,7 @@ PERMISSIONS (macOS):
     );
 }
 
+#[cfg(feature = "whisper")]
 async fn transcribe_file(file: &str) -> Result<()> {
     let path = PathBuf::from(file);
 
@@ -110,6 +112,14 @@ async fn transcribe_file(file: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(feature = "whisper"))]
+async fn transcribe_file(_file: &str) -> Result<()> {
+    eprintln!("Error: --transcribe requires the 'whisper' feature.");
+    eprintln!("Build with: cargo build --features whisper");
+    std::process::exit(1);
+}
+
+#[cfg(feature = "whisper")]
 async fn run_app() -> Result<()> {
     info!("Starting Voice Keyboard");
 
@@ -205,4 +215,11 @@ async fn run_app() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(not(feature = "whisper"))]
+async fn run_app() -> Result<()> {
+    eprintln!("Error: Voice Keyboard requires the 'whisper' feature.");
+    eprintln!("Build with: cargo build --features whisper");
+    std::process::exit(1);
 }
