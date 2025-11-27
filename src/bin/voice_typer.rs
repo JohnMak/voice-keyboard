@@ -213,6 +213,15 @@ impl VadPhraseDetector {
     }
 }
 
+/// Text input method
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum InputMethod {
+    /// Simulate keyboard typing (default, more reliable)
+    Keyboard,
+    /// Use clipboard + Cmd+V (fallback)
+    Clipboard,
+}
+
 fn print_usage() {
     println!("Usage: voice-typer [OPTIONS]");
     println!();
@@ -220,13 +229,14 @@ fn print_usage() {
     println!("  --model <MODEL>    Model name or path to .bin file");
     println!("                     Presets: tiny, base, small, medium, large-v3-turbo (or turbo)");
     println!("                     Default: base");
+    println!("  --clipboard        Use clipboard+paste instead of keyboard input");
     println!("  --list-models      List available model presets");
     println!("  --help, -h         Show this help");
     println!();
     println!("Examples:");
     println!("  voice-typer --model tiny");
     println!("  voice-typer --model large-v3-turbo");
-    println!("  voice-typer --model ~/models/ggml-custom.bin");
+    println!("  voice-typer --clipboard    # Use Cmd+V paste method");
     println!();
     println!("Environment:");
     println!("  MODEL_PATH         Override model path (lower priority than --model)");
@@ -255,6 +265,7 @@ fn main() {
     // Parse command line arguments
     let args: Vec<String> = env::args().collect();
     let mut model_arg: Option<String> = None;
+    let mut input_method = InputMethod::Keyboard; // Default to keyboard
 
     let mut i = 1;
     while i < args.len() {
@@ -266,6 +277,12 @@ fn main() {
             "--list-models" => {
                 list_models();
                 return;
+            }
+            "--clipboard" => {
+                input_method = InputMethod::Clipboard;
+            }
+            "--keyboard" => {
+                input_method = InputMethod::Keyboard;
             }
             "--model" => {
                 if i + 1 < args.len() {
@@ -288,10 +305,15 @@ fn main() {
         i += 1;
     }
 
+    let input_mode_str = match input_method {
+        InputMethod::Keyboard => "keyboard simulation",
+        InputMethod::Clipboard => "clipboard + Cmd+V",
+    };
+
     println!("Voice Typer");
     println!("===========");
-    println!("Double-tap Left Control to START recording");
-    println!("Single tap Left Control to STOP, transcribe, and paste text");
+    println!("Hold Fn key to record, release to transcribe");
+    println!("Input method: {}", input_mode_str);
     println!("Press Ctrl+C to exit\n");
 
     // Check for Whisper model
@@ -313,7 +335,7 @@ fn main() {
             Ok(ctx) => {
                 println!("Whisper model loaded!\n");
                 #[cfg(target_os = "macos")]
-                run_macos(ctx);
+                run_macos(ctx, input_method);
             }
             Err(e) => {
                 eprintln!("Failed to load Whisper model: {}", e);
@@ -426,7 +448,7 @@ fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32]) -> Result<Strin
 }
 
 #[cfg(all(target_os = "macos", feature = "whisper"))]
-fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
+fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod) {
     use cpal::Stream;
     use std::thread;
 
@@ -454,6 +476,7 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
     let samples_for_vad = Arc::clone(&samples);
     let whisper_for_vad = Arc::clone(&whisper);
     let vad_for_thread = Arc::clone(&vad);
+    let input_method_for_vad = input_method;
 
     thread::spawn(move || {
         let mut last_sample_count = 0usize;
@@ -518,9 +541,9 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                     Ok(text) => {
                         if !text.is_empty() {
                             println!("[{}] \"{}\"", timestamp(), text);
-                            // Paste immediately
-                            if let Err(e) = paste_text(&text) {
-                                eprintln!("Failed to paste: {}", e);
+                            // Insert text using selected method
+                            if let Err(e) = insert_text(&text, input_method_for_vad) {
+                                eprintln!("Failed to insert text: {}", e);
                             }
                         }
                     }
@@ -532,6 +555,7 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
         }
     });
 
+    let input_method_for_callback = input_method;
     let callback = move |event: Event| {
         match event.event_type {
             // Fn key pressed - start recording
@@ -614,8 +638,8 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext) {
                             Ok(text) => {
                                 if !text.is_empty() {
                                     println!("[{}] \"{}\"", timestamp(), text);
-                                    if let Err(e) = paste_text(&text) {
-                                        eprintln!("Failed to paste: {}", e);
+                                    if let Err(e) = insert_text(&text, input_method_for_callback) {
+                                        eprintln!("Failed to insert text: {}", e);
                                     }
                                 } else {
                                     println!("[{}] (no speech detected)", timestamp());
@@ -708,6 +732,34 @@ fn start_recording(samples: Arc<Mutex<Vec<f32>>>) -> Result<cpal::Stream, String
     stream.play().map_err(|e| format!("Failed to start stream: {}", e))?;
 
     Ok(stream)
+}
+
+/// Insert text using the selected method
+fn insert_text(text: &str, method: InputMethod) -> Result<(), String> {
+    match method {
+        InputMethod::Keyboard => type_text(text),
+        InputMethod::Clipboard => paste_text(text),
+    }
+}
+
+/// Type text character by character using keyboard simulation
+#[cfg(target_os = "macos")]
+fn type_text(text: &str) -> Result<(), String> {
+    use enigo::{Enigo, Keyboard, Settings};
+
+    let mut enigo = Enigo::new(&Settings::default())
+        .map_err(|e| format!("Enigo error: {}", e))?;
+
+    // Type the text
+    enigo.text(text)
+        .map_err(|e| format!("Failed to type text: {}", e))?;
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn type_text(_text: &str) -> Result<(), String> {
+    Err("Keyboard typing not supported on this platform".to_string())
 }
 
 fn paste_text(text: &str) -> Result<(), String> {
