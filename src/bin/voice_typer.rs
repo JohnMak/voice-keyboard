@@ -745,14 +745,21 @@ fn insert_text(text: &str, method: InputMethod) -> Result<(), String> {
 /// Type text character by character using keyboard simulation
 #[cfg(target_os = "macos")]
 fn type_text(text: &str) -> Result<(), String> {
-    use enigo::{Enigo, Keyboard, Settings};
+    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 
     let mut enigo = Enigo::new(&Settings::default())
         .map_err(|e| format!("Enigo error: {}", e))?;
 
-    // Type the text
-    enigo.text(text)
-        .map_err(|e| format!("Failed to type text: {}", e))?;
+    // Small delay before typing
+    std::thread::sleep(Duration::from_millis(50));
+
+    // Type each character individually
+    for c in text.chars() {
+        enigo.key(Key::Unicode(c), Direction::Click)
+            .map_err(|e| format!("Failed to type '{}': {}", c, e))?;
+        // Small delay between characters for reliability
+        std::thread::sleep(Duration::from_millis(5));
+    }
 
     Ok(())
 }
