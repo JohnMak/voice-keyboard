@@ -541,8 +541,9 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod)
                     Ok(text) => {
                         if !text.is_empty() {
                             println!("[{}] \"{}\"", timestamp(), text);
-                            // Insert text using selected method
-                            if let Err(e) = insert_text(&text, input_method_for_vad) {
+                            // Insert text with trailing space for concatenation
+                            let text_with_space = format!("{} ", text);
+                            if let Err(e) = insert_text(&text_with_space, input_method_for_vad) {
                                 eprintln!("Failed to insert text: {}", e);
                             }
                         }
@@ -638,7 +639,9 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod)
                             Ok(text) => {
                                 if !text.is_empty() {
                                     println!("[{}] \"{}\"", timestamp(), text);
-                                    if let Err(e) = insert_text(&text, input_method_for_callback) {
+                                    // Insert text with trailing space for concatenation
+                                    let text_with_space = format!("{} ", text);
+                                    if let Err(e) = insert_text(&text_with_space, input_method_for_callback) {
                                         eprintln!("Failed to insert text: {}", e);
                                     }
                                 } else {
