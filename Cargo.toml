@@ -41,7 +41,7 @@ enigo = "0.2"           # Keyboard simulation (requires Accessibility)
 tray-icon = "0.19"      # System tray
 cocoa = "0.26"          # macOS clipboard for files
 objc = "0.2"            # Objective-C runtime
-core-graphics = "0.24"  # CGEvent for Unicode keyboard input
+core-graphics = { version = "0.24", features = ["elcapitan"] }  # CGEvent with post_to_pid
 
 # Minimal binary - standalone, no whisper dependency
 [[bin]]

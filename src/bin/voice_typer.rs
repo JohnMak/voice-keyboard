@@ -747,16 +747,20 @@ fn insert_text(text: &str, method: InputMethod) -> Result<(), String> {
 ///
 /// Key insight: CGEventKeyboardSetUnicodeString has a 20-character limit per event.
 /// We must chunk the text and send multiple events with small delays.
+/// Uses post_to_pid to send directly to the focused application.
 #[cfg(target_os = "macos")]
 fn type_text(text: &str) -> Result<(), String> {
-    use core_graphics::event::{CGEvent, CGEventTapLocation};
+    use core_graphics::event::CGEvent;
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    // Get PID of frontmost application
+    let pid = get_frontmost_app_pid()
+        .ok_or("Failed to get frontmost application PID")?;
 
     // Small delay before typing to let focus settle
     std::thread::sleep(Duration::from_millis(50));
 
     // Create event source - use HIDSystemState for keyboard events
-    // This is what works according to Apple docs and community examples
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| "Failed to create event source")?;
 
@@ -775,13 +779,13 @@ fn type_text(text: &str) -> Result<(), String> {
         // Set the Unicode string for this chunk
         key_down.set_string_from_utf16_unchecked(chunk);
 
-        // Post key down event to HID event tap (system-wide)
-        key_down.post(CGEventTapLocation::HID);
+        // Post key down event directly to the frontmost app's PID
+        key_down.post_to_pid(pid);
 
         // Create and post key up event
         let key_up = CGEvent::new_keyboard_event(source.clone(), 0, false)
             .map_err(|_| "Failed to create key up event")?;
-        key_up.post(CGEventTapLocation::HID);
+        key_up.post_to_pid(pid);
 
         // Small delay between chunks (4ms as recommended)
         if utf16.len() > CHUNK_SIZE {
@@ -790,6 +794,25 @@ fn type_text(text: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Get the PID of the frontmost (focused) application using NSWorkspace
+#[cfg(target_os = "macos")]
+fn get_frontmost_app_pid() -> Option<libc::pid_t> {
+    use cocoa::appkit::NSWorkspace;
+    use cocoa::base::nil;
+    use cocoa::foundation::NSInteger;
+    use objc::{msg_send, sel, sel_impl};
+
+    unsafe {
+        let workspace: cocoa::base::id = NSWorkspace::sharedWorkspace(nil);
+        let frontmost_app: cocoa::base::id = msg_send![workspace, frontmostApplication];
+        if frontmost_app == nil {
+            return None;
+        }
+        let pid: NSInteger = msg_send![frontmost_app, processIdentifier];
+        Some(pid as libc::pid_t)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
