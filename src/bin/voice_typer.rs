@@ -743,34 +743,50 @@ fn insert_text(text: &str, method: InputMethod) -> Result<(), String> {
 }
 
 /// Type text using macOS CGEvent API for proper Unicode support
+/// Based on: https://isamert.net/2022/08/12/typing-unicode-characters-programmatically-on-linux-and-macos.html
+///
+/// Key insight: CGEventKeyboardSetUnicodeString has a 20-character limit per event.
+/// We must chunk the text and send multiple events with small delays.
 #[cfg(target_os = "macos")]
 fn type_text(text: &str) -> Result<(), String> {
     use core_graphics::event::{CGEvent, CGEventTapLocation};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
-    // Small delay before typing
+    // Small delay before typing to let focus settle
     std::thread::sleep(Duration::from_millis(50));
 
+    // Create event source - use HIDSystemState for keyboard events
+    // This is what works according to Apple docs and community examples
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| "Failed to create event source")?;
 
-    // Type each character using CGEvent with Unicode support
-    for c in text.chars() {
-        let char_str = c.to_string();
+    // Convert text to UTF-16 (required by CGEventKeyboardSetUnicodeString)
+    let utf16: Vec<u16> = text.encode_utf16().collect();
 
-        // Create key down event
-        if let Ok(event) = CGEvent::new_keyboard_event(source.clone(), 0, true) {
-            event.set_string(&char_str);
-            event.post(CGEventTapLocation::HID);
+    // CGEventKeyboardSetUnicodeString has undocumented 20-character limit
+    // Must chunk text and post multiple events
+    const CHUNK_SIZE: usize = 20;
+
+    for chunk in utf16.chunks(CHUNK_SIZE) {
+        // Create key down event with virtual key 0 (placeholder)
+        let key_down = CGEvent::new_keyboard_event(source.clone(), 0, true)
+            .map_err(|_| "Failed to create key down event")?;
+
+        // Set the Unicode string for this chunk
+        key_down.set_string_from_utf16_unchecked(chunk);
+
+        // Post key down event to HID event tap (system-wide)
+        key_down.post(CGEventTapLocation::HID);
+
+        // Create and post key up event
+        let key_up = CGEvent::new_keyboard_event(source.clone(), 0, false)
+            .map_err(|_| "Failed to create key up event")?;
+        key_up.post(CGEventTapLocation::HID);
+
+        // Small delay between chunks (4ms as recommended)
+        if utf16.len() > CHUNK_SIZE {
+            std::thread::sleep(Duration::from_millis(4));
         }
-
-        // Create key up event
-        if let Ok(event) = CGEvent::new_keyboard_event(source.clone(), 0, false) {
-            event.post(CGEventTapLocation::HID);
-        }
-
-        // Small delay between characters
-        std::thread::sleep(Duration::from_millis(2));
     }
 
     Ok(())
