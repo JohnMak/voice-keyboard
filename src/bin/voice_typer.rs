@@ -547,15 +547,51 @@ const HALLUCINATION_PATTERNS: &[&str] = &[
     "please subscribe",
 ];
 
+/// Patterns that indicate hallucination when they ARE the entire text (not just contained)
+/// These are filler sounds that Whisper hallucinates on silence
+const HALLUCINATION_EXACT: &[&str] = &[
+    "У|м",
+    "У|эм",
+    "Уэм",
+    "у|м",
+    "Ум",
+    "ум",
+    "Эм",
+    "эм",
+    "Хм",
+    "хм",
+    "Ах",
+    "ах",
+    "Ох",
+    "ох",
+    "М-м",
+    "м-м",
+    "А-а",
+    "а-а",
+    "...",
+    "…",
+];
+
 /// Check if text is a Whisper hallucination (subtitle artifacts from training data)
 #[cfg(feature = "whisper")]
 fn is_hallucination(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    for pattern in HALLUCINATION_PATTERNS {
-        if text.contains(pattern) || lower.contains(&pattern.to_lowercase()) {
+    let trimmed = text.trim();
+    let lower = trimmed.to_lowercase();
+
+    // Check for exact matches (filler sounds like "Уэм", "Хм", etc.)
+    for pattern in HALLUCINATION_EXACT {
+        if trimmed == *pattern || trimmed.trim_end_matches('.') == *pattern {
             return true;
         }
     }
+
+    // Check for contained patterns (subtitle credits)
+    for pattern in HALLUCINATION_PATTERNS {
+        if trimmed.contains(pattern) || lower.contains(&pattern.to_lowercase()) {
+            return true;
+        }
+    }
+
     false
 }
 
