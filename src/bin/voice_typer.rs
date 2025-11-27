@@ -39,12 +39,10 @@ const MODEL_PRESETS: &[(&str, &str)] = &[
 
 /// Initial prompt for Whisper to help with code-switching (Russian + English tech terms)
 /// This helps the model recognize programming terminology and keep anglicisms in English
-/// Also instructs to use "..." prefix when continuing a sentence from context
 const PROGRAMMER_PROMPT: &str = "\
 Диктовка на русском языке программиста. Технические термины на английском: \
 API, Git, Docker, pull request, commit, push, deploy, frontend, backend, \
-debug, server, database, config, test, build, merge, branch, release. \
-Если фраза продолжает предыдущее предложение из контекста, начни с многоточия (...).";
+debug, server, database, config, test, build, merge, branch, release.";
 
 /// MIDI note frequencies for beep sounds
 const BEEP_START_FREQ: f32 = 880.0;  // A5 - higher pitch for start
@@ -55,10 +53,13 @@ const BEEP_DURATION_MS: u64 = 100;
 const RECORDING_SAMPLE_RATE: u32 = 48000;
 
 /// VAD (Voice Activity Detection) settings
-/// Energy threshold for speech detection (0.0 - 1.0)
-/// Lower = more sensitive, higher = less sensitive
-/// 0.001 is very sensitive, good for normal speaking voice
-const VAD_ENERGY_THRESHOLD: f32 = 0.001;
+/// Minimum energy threshold (floor) - used in very quiet environments
+const VAD_ENERGY_THRESHOLD_MIN: f32 = 0.001;
+/// Multiplier for adaptive threshold: threshold = noise_floor * multiplier
+/// Higher = less sensitive to noise, but may miss quiet speech
+const VAD_ADAPTIVE_MULTIPLIER: f32 = 2.5;
+/// Duration to measure noise floor at start of recording (in milliseconds)
+const VAD_CALIBRATION_MS: u64 = 150;
 /// Silence duration to consider end of phrase (in milliseconds)
 const VAD_SILENCE_MS: u64 = 350;
 /// Minimum speech duration to process (in milliseconds)
@@ -76,7 +77,7 @@ enum RecordingState {
     Recording,
 }
 
-/// VAD-based phrase detector
+/// VAD-based phrase detector with adaptive threshold
 #[cfg(all(target_os = "macos", feature = "whisper"))]
 struct VadPhraseDetector {
     /// Samples per VAD window
@@ -87,6 +88,8 @@ struct VadPhraseDetector {
     min_speech_windows: usize,
     /// Samples to skip at beginning (avoid beep)
     skip_initial_samples: usize,
+    /// Samples needed for calibration
+    calibration_samples: usize,
     /// Current count of consecutive silent windows
     pub silent_windows: usize,
     /// Whether we're currently in speech
@@ -95,6 +98,10 @@ struct VadPhraseDetector {
     phrase_start: usize,
     /// Position up to which we've processed
     processed_pos: usize,
+    /// Adaptive energy threshold (calibrated per recording)
+    energy_threshold: f32,
+    /// Whether calibration is complete
+    calibrated: bool,
 }
 
 #[cfg(all(target_os = "macos", feature = "whisper"))]
@@ -104,16 +111,20 @@ impl VadPhraseDetector {
         let silence_windows_threshold = (VAD_SILENCE_MS / VAD_WINDOW_MS) as usize;
         let min_speech_windows = (VAD_MIN_SPEECH_MS / VAD_WINDOW_MS) as usize;
         let skip_initial_samples = (VAD_SKIP_INITIAL_MS as f32 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize;
+        let calibration_samples = (VAD_CALIBRATION_MS as f32 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize;
 
         Self {
             window_samples,
             silence_windows_threshold,
             min_speech_windows,
             skip_initial_samples,
+            calibration_samples,
             silent_windows: 0,
             in_speech: false,
             phrase_start: 0,
             processed_pos: 0,
+            energy_threshold: VAD_ENERGY_THRESHOLD_MIN,
+            calibrated: false,
         }
     }
 
@@ -126,6 +137,42 @@ impl VadPhraseDetector {
         (sum_sq / samples.len() as f32).sqrt()
     }
 
+    /// Calibrate noise floor from initial samples (after beep)
+    fn calibrate(&mut self, all_samples: &[f32]) {
+        // Calibration window starts after skip_initial_samples (beep)
+        // and runs for calibration_samples
+        let cal_start = self.skip_initial_samples;
+        let cal_end = cal_start + self.calibration_samples;
+
+        if all_samples.len() < cal_end {
+            return; // Not enough samples yet
+        }
+
+        // Calculate average energy over calibration period
+        let cal_samples = &all_samples[cal_start..cal_end];
+        let mut total_energy = 0.0;
+        let mut window_count = 0;
+
+        let mut pos = 0;
+        while pos + self.window_samples <= cal_samples.len() {
+            let window = &cal_samples[pos..pos + self.window_samples];
+            total_energy += self.calculate_energy(window);
+            window_count += 1;
+            pos += self.window_samples;
+        }
+
+        if window_count > 0 {
+            let noise_floor = total_energy / window_count as f32;
+            // Set threshold as multiplier of noise floor, but not below minimum
+            self.energy_threshold = (noise_floor * VAD_ADAPTIVE_MULTIPLIER).max(VAD_ENERGY_THRESHOLD_MIN);
+            println!("[VAD] Calibrated: noise={:.6}, threshold={:.6}", noise_floor, self.energy_threshold);
+        }
+
+        self.calibrated = true;
+        // Start processing after calibration
+        self.processed_pos = cal_end;
+    }
+
     /// Check for completed phrases and return them
     fn detect_phrase(&mut self, all_samples: &[f32]) -> Option<Vec<f32>> {
         // Skip initial samples (avoid beep detection)
@@ -133,20 +180,22 @@ impl VadPhraseDetector {
             return None;
         }
 
+        // Calibrate if not done yet
+        if !self.calibrated {
+            self.calibrate(all_samples);
+            if !self.calibrated {
+                return None; // Still waiting for calibration samples
+            }
+        }
+
         // Process new windows
         while self.processed_pos + self.window_samples <= all_samples.len() {
-            // Skip initial samples
-            if self.processed_pos < self.skip_initial_samples {
-                self.processed_pos = self.skip_initial_samples;
-                continue;
-            }
-
             let window_start = self.processed_pos;
             let window_end = window_start + self.window_samples;
             let window = &all_samples[window_start..window_end];
 
             let energy = self.calculate_energy(window);
-            let is_speech = energy >= VAD_ENERGY_THRESHOLD;
+            let is_speech = energy >= self.energy_threshold;
 
             if is_speech {
                 if !self.in_speech {
@@ -211,6 +260,8 @@ impl VadPhraseDetector {
         self.in_speech = false;
         self.phrase_start = 0;
         self.processed_pos = 0;
+        self.energy_threshold = VAD_ENERGY_THRESHOLD_MIN;
+        self.calibrated = false;
     }
 }
 
@@ -529,6 +580,10 @@ fn get_model_path(model_arg: Option<String>) -> PathBuf {
 fn load_whisper(model_path: &PathBuf) -> Result<whisper_rs::WhisperContext, String> {
     use whisper_rs::WhisperContextParameters;
 
+    // Suppress ggml/whisper.cpp internal logs (redirects to logging hooks which are not enabled)
+    // This silences the "ggml: not supported" Metal messages
+    whisper_rs::install_logging_hooks();
+
     let params = WhisperContextParameters::default();
     whisper_rs::WhisperContext::new_with_params(
         model_path.to_str().unwrap(),
@@ -558,11 +613,8 @@ fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32], context: Option
     let prompt = if let Some(ctx_text) = context {
         // Extract last sentence from context for continuity
         let last_sentence = extract_last_sentence(ctx_text);
-        let full_prompt = format!("{} {}", PROGRAMMER_PROMPT, last_sentence);
-        println!("[DEBUG] Prompt with context: \"{}\"", full_prompt);
-        full_prompt
+        format!("{} {}", PROGRAMMER_PROMPT, last_sentence)
     } else {
-        println!("[DEBUG] Prompt without context");
         PROGRAMMER_PROMPT.to_string()
     };
 
@@ -621,7 +673,7 @@ fn extract_last_sentence(text: &str) -> &str {
 fn process_continuation(text: &str) -> (String, bool) {
     let trimmed = text.trim();
 
-    // Check if starts with continuation marker
+    // Check if starts with continuation marker (legacy, Whisper rarely does this)
     if trimmed.starts_with("...") {
         // Remove the marker and leading space
         let processed = trimmed.trim_start_matches("...").trim_start();
@@ -633,6 +685,85 @@ fn process_continuation(text: &str) -> (String, bool) {
     } else {
         (trimmed.to_string(), false)
     }
+}
+
+/// Russian conjunctions and words that typically continue a sentence
+const CONTINUATION_WORDS_RU: &[&str] = &[
+    // Conjunctions
+    "и", "а", "но", "или", "либо", "да", "же", "то", "что", "чтобы",
+    "потому", "поэтому", "однако", "зато", "притом", "причём", "причем",
+    "когда", "если", "хотя", "пока", "чем", "как", "где", "куда",
+    "который", "которая", "которое", "которые", "которого", "которой",
+    // Particles and connectors
+    "ведь", "вот", "даже", "именно", "только", "лишь", "просто",
+    "также", "тоже", "ещё", "еще", "уже",
+    // Prepositions that rarely start sentences
+    "с", "в", "на", "к", "по", "за", "из", "от", "до", "для", "без", "при", "над", "под",
+];
+
+/// English conjunctions and words that typically continue a sentence
+const CONTINUATION_WORDS_EN: &[&str] = &[
+    // Conjunctions
+    "and", "but", "or", "nor", "yet", "so", "for",
+    "because", "although", "though", "while", "when", "where",
+    "if", "unless", "until", "since", "as", "than",
+    "which", "who", "whom", "whose", "that",
+    // Connectors
+    "however", "therefore", "moreover", "furthermore", "otherwise",
+    "also", "too", "either", "neither", "both",
+    // Prepositions that rarely start sentences
+    "with", "from", "to", "in", "on", "at", "by", "of",
+];
+
+/// Detect if phrase should be a continuation based on its content
+/// Returns true if the phrase likely continues the previous sentence
+#[cfg(feature = "whisper")]
+fn should_continue(text: &str, prev_context: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Get first character and first word
+    let first_char = trimmed.chars().next().unwrap();
+    let first_word: String = trimmed
+        .split(|c: char| c.is_whitespace() || c == ',' || c == '.')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+
+    // 1. Check if previous context ends WITHOUT sentence-ending punctuation
+    let prev_trimmed = prev_context.trim();
+    let prev_ends_sentence = prev_trimmed.ends_with('.')
+        || prev_trimmed.ends_with('!')
+        || prev_trimmed.ends_with('?')
+        || prev_trimmed.ends_with('…')
+        || prev_trimmed.ends_with("...");
+
+    // If previous phrase didn't end with sentence punctuation, this is likely a continuation
+    if !prev_ends_sentence && !prev_trimmed.is_empty() {
+        return true;
+    }
+
+    // 2. Check if starts with lowercase letter (strong indicator of continuation)
+    if first_char.is_alphabetic() && first_char.is_lowercase() {
+        return true;
+    }
+
+    // 3. Check if starts with a continuation word
+    if CONTINUATION_WORDS_RU.contains(&first_word.as_str())
+        || CONTINUATION_WORDS_EN.contains(&first_word.as_str())
+    {
+        return true;
+    }
+
+    // 4. Check for Russian lowercase (Cyrillic)
+    // In Russian, lowercase letters are in range: а-я (U+0430 - U+044F)
+    if first_char >= '\u{0430}' && first_char <= '\u{044F}' {
+        return true;
+    }
+
+    false
 }
 
 /// Remove trailing punctuation from text (for continuation)
@@ -876,13 +1007,20 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
                         }
 
                         if !text.is_empty() {
-                            // Process continuation marker
-                            let (processed_text, is_continuation) = process_continuation(&text);
+                            // Process continuation marker (legacy check for "...")
+                            let (processed_text, marker_continuation) = process_continuation(&text);
 
                             // Check if this is the first phrase (no context)
                             let is_first_phrase = context.is_none();
 
-                            if is_continuation && !is_first_phrase {
+                            // Smart continuation detection: check if this phrase should continue the previous one
+                            let is_continuation = if is_first_phrase {
+                                false
+                            } else {
+                                marker_continuation || should_continue(&processed_text, context.as_deref().unwrap_or(""))
+                            };
+
+                            if is_continuation {
                                 // Delete previous punctuation + space based on what was there
                                 let (chars_to_delete, deleted_chars) = {
                                     let ctx = last_phrase_for_vad.lock().unwrap();
@@ -1029,13 +1167,20 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
                                 if is_hallucination(&text) {
                                     println!("[{}] (filtered: hallucination)", timestamp());
                                 } else if !text.is_empty() {
-                                    // Process continuation marker
-                                    let (processed_text, is_continuation) = process_continuation(&text);
+                                    // Process continuation marker (legacy check for "...")
+                                    let (processed_text, marker_continuation) = process_continuation(&text);
 
                                     // Check if this is the first phrase (no context)
                                     let is_first_phrase = context.is_none();
 
-                                    if is_continuation && !is_first_phrase {
+                                    // Smart continuation detection
+                                    let is_continuation = if is_first_phrase {
+                                        false
+                                    } else {
+                                        marker_continuation || should_continue(&processed_text, context.as_deref().unwrap_or(""))
+                                    };
+
+                                    if is_continuation {
                                         // Delete previous punctuation + space
                                         let (chars_to_delete, deleted_chars) = {
                                             let ctx = last_phrase_clone.lock().unwrap();
@@ -1427,7 +1572,7 @@ fn play_beep_blocking(frequency: f32, duration_ms: u64) {
                     };
 
                     let value = (sample_clock * 2.0 * std::f32::consts::PI * frequency / sample_rate).sin()
-                        * 0.3 * envelope;
+                        * 0.1 * envelope;
 
                     for sample in frame.iter_mut() {
                         *sample = value;
