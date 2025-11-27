@@ -951,7 +951,7 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
             }
 
             // Check for completed phrases and get energy level
-            let (phrase, sample_count, vad_state, max_energy) = {
+            let (phrase, sample_count, vad_state, max_energy, threshold) = {
                 let samples = samples_for_vad.lock().unwrap();
                 let mut vad = vad_for_thread.lock().unwrap();
 
@@ -972,15 +972,16 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
                 let phrase = vad.detect_phrase(&samples);
                 let in_speech = vad.in_speech;
                 let silent_windows = vad.silent_windows;
-                (phrase, samples.len(), (in_speech, silent_windows), max_energy)
+                let threshold = vad.energy_threshold;
+                (phrase, samples.len(), (in_speech, silent_windows), max_energy, threshold)
             };
 
             // Debug output every ~500ms
             if sample_count > last_sample_count + RECORDING_SAMPLE_RATE as usize / 2 {
                 let duration = sample_count as f32 / RECORDING_SAMPLE_RATE as f32;
                 let (in_speech, silent_windows) = vad_state;
-                println!("[VAD] {:.1}s, in_speech={}, silent={}, max_energy={:.4} (threshold={})",
-                    duration, in_speech, silent_windows, max_energy, VAD_ENERGY_THRESHOLD);
+                println!("[VAD] {:.1}s, in_speech={}, silent={}, max_energy={:.4} (threshold={:.4})",
+                    duration, in_speech, silent_windows, max_energy, threshold);
                 last_sample_count = sample_count;
             }
 

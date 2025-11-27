@@ -832,3 +832,203 @@ fn test_key_argument_parsing() {
     assert_eq!(parse_key_arg(&["--model", "tiny"]), None);
     assert_eq!(parse_key_arg(&["--key", "ctrlright", "--model", "base"]), Some("ctrlright".to_string()));
 }
+
+// ============== Smart Continuation Detection Tests ==============
+
+/// Russian conjunctions and words that typically continue a sentence
+const CONTINUATION_WORDS_RU: &[&str] = &[
+    // Conjunctions
+    "и", "а", "но", "или", "либо", "да", "же", "то", "что", "чтобы",
+    "потому", "поэтому", "однако", "зато", "притом", "причём", "причем",
+    "когда", "если", "хотя", "пока", "чем", "как", "где", "куда",
+    "который", "которая", "которое", "которые", "которого", "которой",
+    // Particles and connectors
+    "ведь", "вот", "даже", "именно", "только", "лишь", "просто",
+    "также", "тоже", "ещё", "еще", "уже",
+    // Prepositions that rarely start sentences
+    "с", "в", "на", "к", "по", "за", "из", "от", "до", "для", "без", "при", "над", "под",
+];
+
+/// English conjunctions and words that typically continue a sentence
+const CONTINUATION_WORDS_EN: &[&str] = &[
+    // Conjunctions
+    "and", "but", "or", "nor", "yet", "so", "for",
+    "because", "although", "though", "while", "when", "where",
+    "if", "unless", "until", "since", "as", "than",
+    "which", "who", "whom", "whose", "that",
+    // Connectors
+    "however", "therefore", "moreover", "furthermore", "otherwise",
+    "also", "too", "either", "neither", "both",
+    // Prepositions that rarely start sentences
+    "with", "from", "to", "in", "on", "at", "by", "of",
+];
+
+/// Detect if phrase should be a continuation based on its content
+fn should_continue(text: &str, prev_context: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Get first character and first word
+    let first_char = trimmed.chars().next().unwrap();
+    let first_word: String = trimmed
+        .split(|c: char| c.is_whitespace() || c == ',' || c == '.')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+
+    // 1. Check if previous context ends WITHOUT sentence-ending punctuation
+    let prev_trimmed = prev_context.trim();
+    let prev_ends_sentence = prev_trimmed.ends_with('.')
+        || prev_trimmed.ends_with('!')
+        || prev_trimmed.ends_with('?')
+        || prev_trimmed.ends_with('…')
+        || prev_trimmed.ends_with("...");
+
+    // If previous phrase didn't end with sentence punctuation, this is likely a continuation
+    if !prev_ends_sentence && !prev_trimmed.is_empty() {
+        return true;
+    }
+
+    // 2. Check if starts with lowercase letter (strong indicator of continuation)
+    if first_char.is_alphabetic() && first_char.is_lowercase() {
+        return true;
+    }
+
+    // 3. Check if starts with a continuation word
+    if CONTINUATION_WORDS_RU.contains(&first_word.as_str())
+        || CONTINUATION_WORDS_EN.contains(&first_word.as_str())
+    {
+        return true;
+    }
+
+    // 4. Check for Russian lowercase (Cyrillic)
+    // In Russian, lowercase letters are in range: а-я (U+0430 - U+044F)
+    if first_char >= '\u{0430}' && first_char <= '\u{044F}' {
+        return true;
+    }
+
+    false
+}
+
+#[test]
+fn test_should_continue_prev_no_punctuation() {
+    // Previous phrase has no ending punctuation - should continue
+    assert!(should_continue("текст продолжения", "Начало предложения"));
+    assert!(should_continue("Новый текст", "без точки"));
+}
+
+#[test]
+fn test_should_continue_lowercase_russian() {
+    // Starts with lowercase Russian letter - should continue
+    assert!(should_continue("который нужен", "Предложение."));
+    assert!(should_continue("потому что важно", "Предыдущее."));
+    assert!(should_continue("и это тоже", "Текст."));
+}
+
+#[test]
+fn test_should_continue_lowercase_english() {
+    // Starts with lowercase English letter - should continue
+    assert!(should_continue("and also this", "Previous."));
+    assert!(should_continue("which is important", "Text."));
+}
+
+#[test]
+fn test_should_continue_conjunction_russian() {
+    // Starts with conjunction - even if capitalized by Whisper
+    // Note: Whisper sometimes capitalizes first word
+    assert!(should_continue("но это не так", "Предложение."));
+    assert!(should_continue("чтобы лучше было", "Текст."));
+    assert!(should_continue("если нужно", "Предыдущее."));
+}
+
+#[test]
+fn test_should_continue_conjunction_english() {
+    assert!(should_continue("but this is different", "Previous."));
+    assert!(should_continue("because it matters", "Text."));
+    assert!(should_continue("however important", "Sentence."));
+}
+
+#[test]
+fn test_should_not_continue_new_sentence() {
+    // Starts with capital letter and not a continuation word - new sentence
+    assert!(!should_continue("Новое предложение.", "Предыдущее."));
+    assert!(!should_continue("New sentence.", "Previous."));
+    assert!(!should_continue("Привет!", "Текст."));
+}
+
+#[test]
+fn test_should_continue_empty() {
+    // Empty text should not continue
+    assert!(!should_continue("", "Предыдущее."));
+    assert!(!should_continue("   ", "Предыдущее."));
+}
+
+#[test]
+fn test_should_continue_first_phrase() {
+    // First phrase (empty context) - context check doesn't apply
+    // but lowercase/conjunction checks still do
+    assert!(should_continue("и это продолжение", ""));
+    assert!(!should_continue("Первое предложение.", ""));
+}
+
+#[test]
+fn test_should_continue_realistic_scenario() {
+    // Simulate the user's test case:
+    // "Проверка. Я этот текст. паузами. чтобы лучше было понять. что конкатенация работает не совсем так. как хотелось бы."
+
+    // "паузами." after "Я этот текст." - lowercase, should continue
+    assert!(should_continue("паузами.", "Я этот текст."));
+
+    // "чтобы лучше было" after "паузами." - conjunction, should continue
+    assert!(should_continue("чтобы лучше было", "паузами."));
+
+    // "понять." after "чтобы лучше было" - no punctuation in prev, should continue
+    assert!(should_continue("понять.", "чтобы лучше было"));
+
+    // "что конкатенация работает" after "понять." - conjunction, should continue
+    assert!(should_continue("что конкатенация работает", "понять."));
+
+    // "не совсем так." after "что конкатенация работает" - no punctuation in prev, should continue
+    assert!(should_continue("не совсем так.", "что конкатенация работает"));
+
+    // "как хотелось бы." after "не совсем так." - conjunction "как", should continue
+    assert!(should_continue("как хотелось бы.", "не совсем так."));
+}
+
+#[test]
+fn test_smart_continuation_workflow() {
+    // Simulate full workflow with smart continuation detection
+    let mut context = String::new();
+
+    // Phrase 1: "Проверка." - first phrase, capitalize
+    let phrase1 = "проверка.";
+    let is_first = context.is_empty();
+    let should_cont1 = !is_first && should_continue(phrase1, &context);
+    assert!(!should_cont1, "First phrase should not continue");
+    context = capitalize_first(phrase1);
+    assert_eq!(context, "Проверка.");
+
+    // Phrase 2: "я этот текст." - lowercase, should continue
+    let phrase2 = "я этот текст.";
+    let should_cont2 = should_continue(phrase2, &context);
+    assert!(should_cont2, "Lowercase start should continue");
+    // Merge: remove punctuation from prev, add space, add new
+    context = format!("{} {}", remove_trailing_punctuation(&context), phrase2);
+    assert_eq!(context, "Проверка я этот текст.");
+
+    // Phrase 3: "с паузами." - preposition "с", should continue
+    let phrase3 = "с паузами.";
+    let should_cont3 = should_continue(phrase3, &context);
+    assert!(should_cont3, "Preposition 'с' should continue");
+    context = format!("{} {}", remove_trailing_punctuation(&context), phrase3);
+    assert_eq!(context, "Проверка я этот текст с паузами.");
+
+    // Phrase 4: "Новое предложение." - capital letter, new sentence
+    let phrase4 = "Новое предложение.";
+    let should_cont4 = should_continue(phrase4, &context);
+    assert!(!should_cont4, "Capital letter should start new sentence");
+    context = phrase4.to_string();
+    assert_eq!(context, "Новое предложение.");
+}
