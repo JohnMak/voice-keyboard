@@ -855,29 +855,21 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
                     if ctx.is_empty() { None } else { Some(ctx.clone()) }
                 };
 
-                // Debug: show context
-                println!("[DEBUG] Context for transcription: {:?}", context);
-
                 // Resample and transcribe with context
                 let resampled = resample_48k_to_16k(&phrase_samples);
                 match transcribe(&whisper_for_vad, &resampled, context.as_deref()) {
                     Ok(text) => {
-                        // Debug: show raw transcription result
-                        println!("[DEBUG] Raw transcription: \"{}\"", text);
-
                         // Filter out hallucinations (subtitle artifacts from Whisper training data)
                         if is_hallucination(&text) {
-                            println!("[{}] (hallucination filtered: \"{}\")", timestamp(), text);
+                            println!("[{}] (filtered: hallucination)", timestamp());
                             continue;
                         }
 
                         if !text.is_empty() {
                             // Process continuation marker
                             let (processed_text, is_continuation) = process_continuation(&text);
-                            println!("[DEBUG] After process_continuation: text=\"{}\", is_continuation={}", processed_text, is_continuation);
 
                             if is_continuation {
-                                println!("[{}] (continuation) \"{}\"", timestamp(), processed_text);
                                 // Delete previous punctuation + space based on what was there
                                 let chars_to_delete = {
                                     let ctx = last_phrase_for_vad.lock().unwrap();
@@ -890,16 +882,19 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
                                 let text_with_space = format!(" {} ", processed_text);
                                 if let Err(e) = insert_text(&text_with_space, input_method_for_vad) {
                                     eprintln!("Failed to insert text: {}", e);
+                                } else {
+                                    println!("[{}] +\"{}\"", timestamp(), processed_text);
                                 }
                                 // Append to context
                                 let mut ctx = last_phrase_for_vad.lock().unwrap();
                                 *ctx = format!("{} {}", remove_trailing_punctuation(&ctx), processed_text);
                             } else {
-                                println!("[{}] \"{}\"", timestamp(), processed_text);
                                 // Insert text with trailing space for next phrase
                                 let text_with_space = format!("{} ", processed_text);
                                 if let Err(e) = insert_text(&text_with_space, input_method_for_vad) {
                                     eprintln!("Failed to insert text: {}", e);
+                                } else {
+                                    println!("[{}] \"{}\"", timestamp(), processed_text);
                                 }
                                 // Update context
                                 *last_phrase_for_vad.lock().unwrap() = processed_text;
@@ -1003,13 +998,12 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
                             Ok(text) => {
                                 // Filter out hallucinations
                                 if is_hallucination(&text) {
-                                    println!("[{}] (hallucination filtered: \"{}\")", timestamp(), text);
+                                    println!("[{}] (filtered: hallucination)", timestamp());
                                 } else if !text.is_empty() {
                                     // Process continuation marker
                                     let (processed_text, is_continuation) = process_continuation(&text);
 
                                     if is_continuation {
-                                        println!("[{}] (final continuation) \"{}\"", timestamp(), processed_text);
                                         // Delete previous punctuation + space
                                         let chars_to_delete = {
                                             let ctx = last_phrase_clone.lock().unwrap();
@@ -1022,13 +1016,16 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
                                         let text_with_space = format!(" {} ", processed_text);
                                         if let Err(e) = insert_text(&text_with_space, input_method_for_callback) {
                                             eprintln!("Failed to insert text: {}", e);
+                                        } else {
+                                            println!("[{}] +\"{}\"", timestamp(), processed_text);
                                         }
                                     } else {
-                                        println!("[{}] \"{}\"", timestamp(), processed_text);
                                         // Insert text with trailing space
                                         let text_with_space = format!("{} ", processed_text);
                                         if let Err(e) = insert_text(&text_with_space, input_method_for_callback) {
                                             eprintln!("Failed to insert text: {}", e);
+                                        } else {
+                                            println!("[{}] \"{}\"", timestamp(), processed_text);
                                         }
                                     }
                                 } else {
