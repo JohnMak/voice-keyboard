@@ -512,6 +512,40 @@ fn remove_trailing_punctuation(text: &str) -> String {
     trimmed.trim_end_matches(|c| c == '.' || c == '!' || c == '?' || c == '…').to_string()
 }
 
+/// Known Whisper hallucination phrases (from training data artifacts)
+/// These appear when Whisper processes silence or noise
+const HALLUCINATION_PATTERNS: &[&str] = &[
+    "DimaTorzok",
+    "Семкин",
+    "Субтитры создавал",
+    "Редактор субтитров",
+    "Продолжение следует",
+    "ПОДПИШИСЬ НА КАНАЛ",
+    "Подпишись на канал",
+    "подпишись на канал",
+    "Amara.org",
+    "amara.org",
+    "transcribed by",
+    "subtitles by",
+    "Thanks for watching",
+    "thanks for watching",
+    "Thank you for watching",
+    "Спасибо за просмотр",
+    "спасибо за просмотр",
+];
+
+/// Check if text is a Whisper hallucination (subtitle artifacts from training data)
+#[cfg(feature = "whisper")]
+fn is_hallucination(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    for pattern in HALLUCINATION_PATTERNS {
+        if text.contains(pattern) || lower.contains(&pattern.to_lowercase()) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Count how many characters to delete for continuation
 /// Returns count of trailing punctuation + space to delete
 #[cfg(feature = "whisper")]
@@ -649,6 +683,12 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod)
                         // Debug: show raw transcription result
                         println!("[DEBUG] Raw transcription: \"{}\"", text);
 
+                        // Filter out hallucinations (subtitle artifacts from Whisper training data)
+                        if is_hallucination(&text) {
+                            println!("[{}] (hallucination filtered: \"{}\")", timestamp(), text);
+                            continue;
+                        }
+
                         if !text.is_empty() {
                             // Process continuation marker
                             let (processed_text, is_continuation) = process_continuation(&text);
@@ -779,7 +819,10 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod)
                         let resampled = resample_48k_to_16k(&phrase_samples);
                         match transcribe(&whisper_clone, &resampled, context.as_deref()) {
                             Ok(text) => {
-                                if !text.is_empty() {
+                                // Filter out hallucinations
+                                if is_hallucination(&text) {
+                                    println!("[{}] (hallucination filtered: \"{}\")", timestamp(), text);
+                                } else if !text.is_empty() {
                                     // Process continuation marker
                                     let (processed_text, is_continuation) = process_continuation(&text);
 
