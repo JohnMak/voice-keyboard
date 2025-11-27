@@ -99,6 +99,10 @@ struct VadPhraseDetector {
     processed_pos: usize,
     /// Current voice ratio (for debugging)
     pub voice_ratio: f32,
+    /// Count of windows with actual voice in current phrase
+    voice_windows_count: usize,
+    /// Total windows in current phrase
+    phrase_windows_count: usize,
 }
 
 #[cfg(all(target_os = "macos", feature = "whisper"))]
@@ -118,6 +122,8 @@ impl VadPhraseDetector {
             phrase_start: 0,
             processed_pos: 0,
             voice_ratio: 0.0,
+            voice_windows_count: 0,
+            phrase_windows_count: 0,
         }
     }
 
@@ -208,14 +214,21 @@ impl VadPhraseDetector {
             let window = &all_samples[window_start..window_end];
 
             let is_speech = self.is_speech(window);
+            let has_voice = self.voice_ratio >= VAD_VOICE_RATIO_THRESHOLD;
 
             if is_speech {
                 self.speech_confirm_count += 1;
+                self.phrase_windows_count += 1;
+                if has_voice {
+                    self.voice_windows_count += 1;
+                }
 
                 if !self.in_speech {
                     // Speech started
                     self.in_speech = true;
                     self.phrase_start = window_start;
+                    self.voice_windows_count = if has_voice { 1 } else { 0 };
+                    self.phrase_windows_count = 1;
                 }
 
                 // Only reset silence counter after confirmed speech (multiple windows)
@@ -235,18 +248,33 @@ impl VadPhraseDetector {
                         let phrase_end = window_start - (self.silent_windows - 1) * self.window_samples;
                         let phrase_len = phrase_end.saturating_sub(self.phrase_start);
 
-                        // Check minimum length
-                        if phrase_len >= self.min_speech_windows * self.window_samples {
+                        // Check minimum length AND that phrase has enough actual voice
+                        // Require at least 30% of windows to have voice frequencies
+                        let voice_ratio = if self.phrase_windows_count > 0 {
+                            self.voice_windows_count as f32 / self.phrase_windows_count as f32
+                        } else {
+                            0.0
+                        };
+                        let has_enough_voice = voice_ratio >= 0.3;
+
+                        if phrase_len >= self.min_speech_windows * self.window_samples && has_enough_voice {
                             let phrase = all_samples[self.phrase_start..phrase_end].to_vec();
                             self.in_speech = false;
                             self.silent_windows = 0;
+                            self.voice_windows_count = 0;
+                            self.phrase_windows_count = 0;
                             self.phrase_start = window_end; // Reset for next phrase
                             self.processed_pos = window_end;
                             return Some(phrase);
                         } else {
-                            // Too short, ignore
+                            // Too short or too much noise, ignore
+                            if !has_enough_voice && phrase_len >= self.min_speech_windows * self.window_samples {
+                                println!("[VAD] Discarding noise-only phrase ({:.0}% voice)", voice_ratio * 100.0);
+                            }
                             self.in_speech = false;
                             self.silent_windows = 0;
+                            self.voice_windows_count = 0;
+                            self.phrase_windows_count = 0;
                             self.phrase_start = window_end; // Reset for next phrase
                         }
                     }
@@ -260,18 +288,25 @@ impl VadPhraseDetector {
     }
 
     /// Get any remaining speech when recording stops
+    /// This is more permissive than detect_phrase - we want to capture
+    /// any remaining audio when the user releases the key
     fn get_remaining(&self, all_samples: &[f32]) -> Option<Vec<f32>> {
+        // Minimum samples for final phrase (shorter than normal - ~200ms)
+        let min_final_samples = self.window_samples * 6;
+
         if self.in_speech && all_samples.len() > self.phrase_start {
             let phrase_len = all_samples.len() - self.phrase_start;
-            if phrase_len >= self.min_speech_windows * self.window_samples {
+            if phrase_len >= min_final_samples {
                 return Some(all_samples[self.phrase_start..].to_vec());
             }
         }
         // Also check if there's unprocessed audio at the end
-        if !self.in_speech && self.processed_pos < all_samples.len() {
-            let remaining_len = all_samples.len() - self.processed_pos;
-            if remaining_len >= self.min_speech_windows * self.window_samples {
-                return Some(all_samples[self.processed_pos..].to_vec());
+        // Use phrase_start as the reference point - it's where the last phrase ended
+        let start_pos = if self.in_speech { self.phrase_start } else { self.processed_pos };
+        if start_pos < all_samples.len() {
+            let remaining_len = all_samples.len() - start_pos;
+            if remaining_len >= min_final_samples {
+                return Some(all_samples[start_pos..].to_vec());
             }
         }
         None
@@ -285,6 +320,8 @@ impl VadPhraseDetector {
         self.phrase_start = 0;
         self.processed_pos = 0;
         self.voice_ratio = 0.0;
+        self.voice_windows_count = 0;
+        self.phrase_windows_count = 0;
     }
 }
 
