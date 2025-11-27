@@ -53,22 +53,20 @@ const BEEP_DURATION_MS: u64 = 100;
 const RECORDING_SAMPLE_RATE: u32 = 48000;
 
 /// VAD (Voice Activity Detection) settings
-/// Minimum energy threshold (floor) - used in very quiet environments
-const VAD_ENERGY_THRESHOLD_MIN: f32 = 0.001;
-/// Multiplier for adaptive threshold: threshold = noise_floor * multiplier
-/// Higher = less sensitive to noise, but may miss quiet speech
-const VAD_ADAPTIVE_MULTIPLIER: f32 = 2.5;
-/// Duration to measure noise floor at start of recording (in milliseconds)
-const VAD_CALIBRATION_MS: u64 = 150;
 /// Silence duration to consider end of phrase (in milliseconds)
 const VAD_SILENCE_MS: u64 = 350;
 /// Minimum speech duration to process (in milliseconds)
-/// Increased to avoid false triggers from clicks/noise
 const VAD_MIN_SPEECH_MS: u64 = 500;
 /// Window size for energy calculation (in milliseconds)
 const VAD_WINDOW_MS: u64 = 30;
-/// Skip initial audio to avoid beep detection (in milliseconds)
-const VAD_SKIP_INITIAL_MS: u64 = 200;
+/// Minimum energy threshold for speech
+const VAD_ENERGY_THRESHOLD: f32 = 0.001;
+/// Voice frequency band: 85-255 Hz captures fundamental frequency of most voices
+const VAD_VOICE_FREQ_LOW: f32 = 85.0;
+const VAD_VOICE_FREQ_HIGH: f32 = 255.0;
+/// Ratio of voice-band energy to total energy required for speech detection
+/// Higher = stricter voice detection, lower = more sensitive
+const VAD_VOICE_RATIO_THRESHOLD: f32 = 0.15;
 
 /// Recording state
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -77,7 +75,7 @@ enum RecordingState {
     Recording,
 }
 
-/// VAD-based phrase detector with adaptive threshold
+/// VAD-based phrase detector with spectral voice detection
 #[cfg(all(target_os = "macos", feature = "whisper"))]
 struct VadPhraseDetector {
     /// Samples per VAD window
@@ -86,10 +84,6 @@ struct VadPhraseDetector {
     silence_windows_threshold: usize,
     /// Minimum windows of speech to consider valid
     min_speech_windows: usize,
-    /// Samples to skip at beginning (avoid beep)
-    skip_initial_samples: usize,
-    /// Samples needed for calibration
-    calibration_samples: usize,
     /// Current count of consecutive silent windows
     pub silent_windows: usize,
     /// Whether we're currently in speech
@@ -98,10 +92,8 @@ struct VadPhraseDetector {
     phrase_start: usize,
     /// Position up to which we've processed
     processed_pos: usize,
-    /// Adaptive energy threshold (calibrated per recording)
-    energy_threshold: f32,
-    /// Whether calibration is complete
-    calibrated: bool,
+    /// Current voice ratio (for debugging)
+    pub voice_ratio: f32,
 }
 
 #[cfg(all(target_os = "macos", feature = "whisper"))]
@@ -110,21 +102,16 @@ impl VadPhraseDetector {
         let window_samples = (VAD_WINDOW_MS as f32 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize;
         let silence_windows_threshold = (VAD_SILENCE_MS / VAD_WINDOW_MS) as usize;
         let min_speech_windows = (VAD_MIN_SPEECH_MS / VAD_WINDOW_MS) as usize;
-        let skip_initial_samples = (VAD_SKIP_INITIAL_MS as f32 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize;
-        let calibration_samples = (VAD_CALIBRATION_MS as f32 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize;
 
         Self {
             window_samples,
             silence_windows_threshold,
             min_speech_windows,
-            skip_initial_samples,
-            calibration_samples,
             silent_windows: 0,
             in_speech: false,
             phrase_start: 0,
             processed_pos: 0,
-            energy_threshold: VAD_ENERGY_THRESHOLD_MIN,
-            calibrated: false,
+            voice_ratio: 0.0,
         }
     }
 
@@ -137,65 +124,85 @@ impl VadPhraseDetector {
         (sum_sq / samples.len() as f32).sqrt()
     }
 
-    /// Calibrate noise floor from initial samples (after beep)
-    fn calibrate(&mut self, all_samples: &[f32]) {
-        // Calibration window starts after skip_initial_samples (beep)
-        // and runs for calibration_samples
-        let cal_start = self.skip_initial_samples;
-        let cal_end = cal_start + self.calibration_samples;
+    /// Simple Goertzel algorithm to calculate energy at a specific frequency
+    fn goertzel_energy(&self, samples: &[f32], target_freq: f32, sample_rate: f32) -> f32 {
+        let n = samples.len();
+        let k = (0.5 + (n as f32 * target_freq / sample_rate)) as usize;
+        let w = 2.0 * std::f32::consts::PI * k as f32 / n as f32;
+        let coeff = 2.0 * w.cos();
 
-        if all_samples.len() < cal_end {
-            return; // Not enough samples yet
+        let mut s0 = 0.0f32;
+        let mut s1 = 0.0f32;
+        let mut s2 = 0.0f32;
+
+        for &sample in samples {
+            s0 = sample + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
         }
 
-        // Calculate average energy over calibration period
-        let cal_samples = &all_samples[cal_start..cal_end];
-        let mut total_energy = 0.0;
-        let mut window_count = 0;
+        // Return power (magnitude squared)
+        s1 * s1 + s2 * s2 - coeff * s1 * s2
+    }
 
-        let mut pos = 0;
-        while pos + self.window_samples <= cal_samples.len() {
-            let window = &cal_samples[pos..pos + self.window_samples];
-            total_energy += self.calculate_energy(window);
-            window_count += 1;
-            pos += self.window_samples;
+    /// Calculate voice-band energy ratio using Goertzel algorithm
+    /// Returns ratio of energy in voice frequencies (85-255 Hz) to total energy
+    fn calculate_voice_ratio(&self, samples: &[f32]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
         }
 
-        if window_count > 0 {
-            let noise_floor = total_energy / window_count as f32;
-            // Set threshold as multiplier of noise floor, but not below minimum
-            self.energy_threshold = (noise_floor * VAD_ADAPTIVE_MULTIPLIER).max(VAD_ENERGY_THRESHOLD_MIN);
-            println!("[VAD] Calibrated: noise={:.6}, threshold={:.6}", noise_floor, self.energy_threshold);
+        let sample_rate = RECORDING_SAMPLE_RATE as f32;
+
+        // Calculate energy in voice frequency band (check several frequencies)
+        let mut voice_energy = 0.0f32;
+        let voice_freqs = [100.0, 150.0, 200.0, 250.0]; // Key voice frequencies
+        for &freq in &voice_freqs {
+            voice_energy += self.goertzel_energy(samples, freq, sample_rate);
+        }
+        voice_energy /= voice_freqs.len() as f32;
+
+        // Calculate energy outside voice band (noise frequencies)
+        let mut noise_energy = 0.0f32;
+        let noise_freqs = [50.0, 400.0, 600.0, 1000.0]; // Frequencies typically dominated by noise
+        for &freq in &noise_freqs {
+            noise_energy += self.goertzel_energy(samples, freq, sample_rate);
+        }
+        noise_energy /= noise_freqs.len() as f32;
+
+        // Ratio of voice energy to total
+        let total = voice_energy + noise_energy;
+        if total > 0.0 {
+            voice_energy / total
+        } else {
+            0.0
+        }
+    }
+
+    /// Detect if window contains speech using both energy and spectral analysis
+    fn is_speech(&mut self, samples: &[f32]) -> bool {
+        let energy = self.calculate_energy(samples);
+
+        // First check: minimum energy threshold
+        if energy < VAD_ENERGY_THRESHOLD {
+            self.voice_ratio = 0.0;
+            return false;
         }
 
-        self.calibrated = true;
-        // Start processing after calibration
-        self.processed_pos = cal_end;
+        // Second check: voice frequency ratio
+        self.voice_ratio = self.calculate_voice_ratio(samples);
+        self.voice_ratio >= VAD_VOICE_RATIO_THRESHOLD
     }
 
     /// Check for completed phrases and return them
     fn detect_phrase(&mut self, all_samples: &[f32]) -> Option<Vec<f32>> {
-        // Skip initial samples (avoid beep detection)
-        if all_samples.len() < self.skip_initial_samples {
-            return None;
-        }
-
-        // Calibrate if not done yet
-        if !self.calibrated {
-            self.calibrate(all_samples);
-            if !self.calibrated {
-                return None; // Still waiting for calibration samples
-            }
-        }
-
-        // Process new windows
+        // Process new windows (no skip - start immediately)
         while self.processed_pos + self.window_samples <= all_samples.len() {
             let window_start = self.processed_pos;
             let window_end = window_start + self.window_samples;
             let window = &all_samples[window_start..window_end];
 
-            let energy = self.calculate_energy(window);
-            let is_speech = energy >= self.energy_threshold;
+            let is_speech = self.is_speech(window);
 
             if is_speech {
                 if !self.in_speech {
@@ -260,8 +267,7 @@ impl VadPhraseDetector {
         self.in_speech = false;
         self.phrase_start = 0;
         self.processed_pos = 0;
-        self.energy_threshold = VAD_ENERGY_THRESHOLD_MIN;
-        self.calibrated = false;
+        self.voice_ratio = 0.0;
     }
 }
 
@@ -951,7 +957,7 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
             }
 
             // Check for completed phrases and get energy level
-            let (phrase, sample_count, vad_state, max_energy, threshold) = {
+            let (phrase, sample_count, vad_state, max_energy, voice_ratio) = {
                 let samples = samples_for_vad.lock().unwrap();
                 let mut vad = vad_for_thread.lock().unwrap();
 
@@ -972,16 +978,16 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
                 let phrase = vad.detect_phrase(&samples);
                 let in_speech = vad.in_speech;
                 let silent_windows = vad.silent_windows;
-                let threshold = vad.energy_threshold;
-                (phrase, samples.len(), (in_speech, silent_windows), max_energy, threshold)
+                let voice_ratio = vad.voice_ratio;
+                (phrase, samples.len(), (in_speech, silent_windows), max_energy, voice_ratio)
             };
 
             // Debug output every ~500ms
             if sample_count > last_sample_count + RECORDING_SAMPLE_RATE as usize / 2 {
                 let duration = sample_count as f32 / RECORDING_SAMPLE_RATE as f32;
                 let (in_speech, silent_windows) = vad_state;
-                println!("[VAD] {:.1}s, in_speech={}, silent={}, max_energy={:.4} (threshold={:.4})",
-                    duration, in_speech, silent_windows, max_energy, threshold);
+                println!("[VAD] {:.1}s, in_speech={}, silent={}, energy={:.4}, voice_ratio={:.2}",
+                    duration, in_speech, silent_windows, max_energy, voice_ratio);
                 last_sample_count = sample_count;
             }
 
