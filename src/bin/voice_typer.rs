@@ -1105,6 +1105,17 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
                         }
 
                         if !text.is_empty() {
+                            // Check if we're still recording before inserting text
+                            // (recording might have stopped during transcription)
+                            let still_recording = {
+                                let s = state_for_vad.lock().unwrap();
+                                *s == RecordingState::Recording
+                            };
+                            if !still_recording {
+                                println!("[{}] Recording stopped, discarding transcription", timestamp());
+                                continue;
+                            }
+
                             // Process continuation marker (legacy check for "...")
                             let (processed_text, marker_continuation) = process_continuation(&text);
 
@@ -1327,9 +1338,10 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
                         println!("[{}] Done", timestamp());
                     }
 
-                    // Clear samples and context for next recording
+                    // Clear samples, context, and reset VAD for next recording
                     samples_clone.lock().unwrap().clear();
                     last_phrase_clone.lock().unwrap().clear();
+                    vad_clone.lock().unwrap().reset();
                 }
             }
 
