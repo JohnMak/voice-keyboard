@@ -428,8 +428,11 @@ fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32], context: Option
     let prompt = if let Some(ctx_text) = context {
         // Extract last sentence from context for continuity
         let last_sentence = extract_last_sentence(ctx_text);
-        format!("{} {}", PROGRAMMER_PROMPT, last_sentence)
+        let full_prompt = format!("{} {}", PROGRAMMER_PROMPT, last_sentence);
+        println!("[DEBUG] Prompt with context: \"{}\"", full_prompt);
+        full_prompt
     } else {
+        println!("[DEBUG] Prompt without context");
         PROGRAMMER_PROMPT.to_string()
     };
 
@@ -636,13 +639,20 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod)
                     if ctx.is_empty() { None } else { Some(ctx.clone()) }
                 };
 
+                // Debug: show context
+                println!("[DEBUG] Context for transcription: {:?}", context);
+
                 // Resample and transcribe with context
                 let resampled = resample_48k_to_16k(&phrase_samples);
                 match transcribe(&whisper_for_vad, &resampled, context.as_deref()) {
                     Ok(text) => {
+                        // Debug: show raw transcription result
+                        println!("[DEBUG] Raw transcription: \"{}\"", text);
+
                         if !text.is_empty() {
                             // Process continuation marker
                             let (processed_text, is_continuation) = process_continuation(&text);
+                            println!("[DEBUG] After process_continuation: text=\"{}\", is_continuation={}", processed_text, is_continuation);
 
                             if is_continuation {
                                 println!("[{}] (continuation) \"{}\"", timestamp(), processed_text);
