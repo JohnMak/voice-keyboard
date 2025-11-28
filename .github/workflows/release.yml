@@ -205,6 +205,23 @@ jobs:
             cp installer/macos/icon.icns "$APP_NAME.app/Contents/Resources/"
           fi
 
+      - name: Ad-hoc sign the app bundle
+        run: |
+          # Remove any existing signatures
+          codesign --remove-signature "Voice Typer.app" || true
+
+          # Ad-hoc sign the binary
+          codesign --force --deep --sign - "Voice Typer.app/Contents/MacOS/voice-typer"
+
+          # Ad-hoc sign the app bundle
+          codesign --force --deep --sign - "Voice Typer.app"
+
+          # Verify signature
+          codesign --verify --verbose "Voice Typer.app"
+
+          # Remove quarantine attribute (won't persist in DMG but good practice)
+          xattr -cr "Voice Typer.app"
+
       - name: Create DMG
         run: |
           hdiutil create -volname "Voice Typer" -srcfolder "Voice Typer.app" -ov -format UDZO voice-typer-macos-${{ matrix.arch }}.dmg
@@ -285,11 +302,21 @@ jobs:
             - **Apple Silicon (M1/M2/M3):** Download `voice-typer-macos-arm64.dmg`
             - **Intel:** Download `voice-typer-macos-x64.dmg`
 
+            ⚠️ **Important:** The app is not notarized by Apple. After opening the DMG:
+            1. Drag "Voice Typer" to Applications
+            2. **First launch:** Right-click → "Open" → "Open" (this bypasses Gatekeeper once)
+
+            Or via Terminal:
+            ```bash
+            xattr -cr /Applications/Voice\ Typer.app
+            ```
+
             ### Windows
             - Download `voice-typer-windows-x64.zip` and extract
+            - Windows SmartScreen may warn about unknown publisher — click "More info" → "Run anyway"
 
             ### Linux
-            - **Debian/Ubuntu/Astra:** `sudo dpkg -i voice-typer_*.deb`
+            - **Debian/Ubuntu/Astra:** `sudo dpkg -i voice-keyboard_*.deb`
             - **Other:** Download `voice-typer-linux-x64.tar.gz` and extract
 
             ## Quick Start
