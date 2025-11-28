@@ -163,6 +163,8 @@ struct VadPhraseDetector {
     pub voice_ratio: f32,
     voice_windows_count: usize,
     phrase_windows_count: usize,
+    /// Position where last transcribed phrase ended (to avoid double transcription)
+    last_transcribed_end: usize,
 }
 
 #[cfg(feature = "whisper")]
@@ -184,6 +186,7 @@ impl VadPhraseDetector {
             voice_ratio: 0.0,
             voice_windows_count: 0,
             phrase_windows_count: 0,
+            last_transcribed_end: 0,
         }
     }
 
@@ -303,6 +306,7 @@ impl VadPhraseDetector {
                             self.silent_windows = 0;
                             self.voice_windows_count = 0;
                             self.phrase_windows_count = 0;
+                            self.last_transcribed_end = phrase_end;  // Mark as transcribed
                             self.phrase_start = window_end;
                             self.processed_pos = window_end;
                             return Some(phrase);
@@ -328,7 +332,16 @@ impl VadPhraseDetector {
 
     fn get_remaining(&self, all_samples: &[f32]) -> Option<Vec<f32>> {
         let min_final_samples = self.window_samples * 6;
-        let start_pos = if self.in_speech { self.phrase_start } else { self.processed_pos };
+
+        // Start from the position after the last transcribed phrase
+        // This prevents double transcription when VAD and key release happen simultaneously
+        let start_pos = if self.in_speech {
+            self.phrase_start
+        } else {
+            // Use the maximum of processed_pos and last_transcribed_end
+            // to avoid re-transcribing already processed audio
+            self.processed_pos.max(self.last_transcribed_end)
+        };
 
         if start_pos >= all_samples.len() {
             return None;
@@ -382,6 +395,7 @@ impl VadPhraseDetector {
         self.voice_ratio = 0.0;
         self.voice_windows_count = 0;
         self.phrase_windows_count = 0;
+        self.last_transcribed_end = 0;
     }
 }
 

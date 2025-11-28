@@ -30,3 +30,4 @@ test-assets/*.wav
 .env
 .env.local
 src-tauri/target/
+.env
