@@ -292,26 +292,100 @@ impl VadPhraseDetector {
     /// Get any remaining speech when recording stops
     /// This is more permissive than detect_phrase - we want to capture
     /// any remaining audio when the user releases the key
+    /// BUT we validate that the audio actually contains voice to avoid hallucinations
     fn get_remaining(&self, all_samples: &[f32]) -> Option<Vec<f32>> {
         // Minimum samples for final phrase (shorter than normal - ~200ms)
         let min_final_samples = self.window_samples * 6;
 
-        if self.in_speech && all_samples.len() > self.phrase_start {
-            let phrase_len = all_samples.len() - self.phrase_start;
-            if phrase_len >= min_final_samples {
-                return Some(all_samples[self.phrase_start..].to_vec());
-            }
-        }
-        // Also check if there's unprocessed audio at the end
-        // Use phrase_start as the reference point - it's where the last phrase ended
         let start_pos = if self.in_speech { self.phrase_start } else { self.processed_pos };
-        if start_pos < all_samples.len() {
-            let remaining_len = all_samples.len() - start_pos;
-            if remaining_len >= min_final_samples {
-                return Some(all_samples[start_pos..].to_vec());
+
+        if start_pos >= all_samples.len() {
+            return None;
+        }
+
+        let remaining = &all_samples[start_pos..];
+        let remaining_len = remaining.len();
+
+        if remaining_len < min_final_samples {
+            return None;
+        }
+
+        // Validate that remaining audio actually contains voice
+        // Count windows with voice-band energy to filter out noise/silence
+        let mut voice_windows = 0;
+        let mut total_windows = 0;
+
+        for chunk in remaining.chunks(self.window_samples) {
+            if chunk.len() < self.window_samples {
+                break;
+            }
+            total_windows += 1;
+
+            // Check if this window has voice-band energy
+            let voice_ratio = self.calculate_voice_ratio_static(chunk);
+            let energy = Self::calculate_energy_static(chunk);
+
+            if energy >= VAD_ENERGY_THRESHOLD && voice_ratio >= VAD_VOICE_RATIO_THRESHOLD {
+                voice_windows += 1;
             }
         }
-        None
+
+        // Require at least 30% of windows to have actual voice
+        // This prevents hallucinations on silence/noise at the end
+        let voice_percent = if total_windows > 0 {
+            voice_windows as f32 / total_windows as f32
+        } else {
+            0.0
+        };
+
+        if voice_percent < 0.3 {
+            println!("[VAD] Discarding final segment: only {:.0}% voice ({} of {} windows)",
+                voice_percent * 100.0, voice_windows, total_windows);
+            return None;
+        }
+
+        Some(remaining.to_vec())
+    }
+
+    /// Static version of calculate_energy for use in get_remaining
+    fn calculate_energy_static(samples: &[f32]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+        (sum_sq / samples.len() as f32).sqrt()
+    }
+
+    /// Static version of calculate_voice_ratio for use in get_remaining
+    fn calculate_voice_ratio_static(&self, samples: &[f32]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+
+        let sample_rate = RECORDING_SAMPLE_RATE as f32;
+
+        // Calculate energy in voice frequency band
+        let mut voice_energy = 0.0f32;
+        let voice_freqs = [100.0, 150.0, 200.0, 250.0];
+        for &freq in &voice_freqs {
+            voice_energy += self.goertzel_energy(samples, freq, sample_rate);
+        }
+        voice_energy /= voice_freqs.len() as f32;
+
+        // Calculate energy outside voice band (noise frequencies)
+        let mut noise_energy = 0.0f32;
+        let noise_freqs = [50.0, 400.0, 600.0, 1000.0];
+        for &freq in &noise_freqs {
+            noise_energy += self.goertzel_energy(samples, freq, sample_rate);
+        }
+        noise_energy /= noise_freqs.len() as f32;
+
+        let total = voice_energy + noise_energy;
+        if total > 0.0 {
+            voice_energy / total
+        } else {
+            0.0
+        }
     }
 
     /// Reset for new recording
@@ -889,6 +963,13 @@ const HALLUCINATION_PATTERNS: &[&str] = &[
     "спасибо за просмотр",
     "Пока-пока",
     "пока-пока",
+    // Common hallucinated phrases on silence/noise
+    "Время – это",
+    "время – это",
+    "Время — это",
+    "время — это",
+    "Это не",
+    "это не",
     // English subtitle artifacts
     "Amara.org",
     "amara.org",
@@ -947,6 +1028,41 @@ fn is_hallucination(text: &str) -> bool {
         if trimmed.contains(pattern) || lower.contains(&pattern.to_lowercase()) {
             return true;
         }
+    }
+
+    false
+}
+
+/// Check if transcription is likely a hallucination based on audio duration
+/// Whisper hallucinations often produce long text from very short audio
+/// Returns true if the text-to-audio ratio is suspiciously high
+#[cfg(feature = "whisper")]
+fn is_duration_hallucination(text: &str, audio_duration_secs: f32) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Count characters (approximate measure of speech length)
+    let char_count = trimmed.chars().count();
+
+    // Typical speech rate: ~15 chars/second for Russian
+    // Allow some margin: 25 chars/second is fast but possible
+    // But 40+ chars/second is impossible - definitely hallucination
+    let chars_per_second = char_count as f32 / audio_duration_secs;
+
+    // If audio is very short (<0.5s) and text is substantial, it's likely hallucination
+    if audio_duration_secs < 0.5 && char_count > 10 {
+        println!("[FILTER] Hallucination detected: {:.1}s audio -> {} chars ({:.0} chars/s)",
+            audio_duration_secs, char_count, chars_per_second);
+        return true;
+    }
+
+    // If speaking rate is impossibly fast (>35 chars/second), it's hallucination
+    if chars_per_second > 35.0 {
+        println!("[FILTER] Hallucination detected: {:.0} chars/s is impossibly fast",
+            chars_per_second);
+        return true;
     }
 
     false
@@ -1100,6 +1216,11 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
                         // Filter out hallucinations (subtitle artifacts from Whisper training data)
                         if is_hallucination(&text) {
                             println!("[{}] (filtered: hallucination)", timestamp());
+                            continue;
+                        }
+
+                        // Filter out duration-based hallucinations (too much text for audio length)
+                        if is_duration_hallucination(&text, duration_secs) {
                             continue;
                         }
 
@@ -1267,6 +1388,8 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
                                 // Filter out hallucinations
                                 if is_hallucination(&text) {
                                     println!("[{}] (filtered: hallucination)", timestamp());
+                                } else if is_duration_hallucination(&text, duration_secs) {
+                                    // Duration-based hallucination already logged
                                 } else if !text.is_empty() {
                                     // Process continuation marker (legacy check for "...")
                                     let (processed_text, marker_continuation) = process_continuation(&text);
