@@ -36,7 +36,7 @@ anyhow = "1"
 # Cross-platform audio and input
 cpal = "0.15"           # Audio recording (CoreAudio/ALSA/WASAPI)
 rdev = "0.5"            # Global hotkeys
-enigo = "0.2"           # Keyboard simulation
+enigo = "0.6"           # Keyboard simulation
 
 # macOS-only dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
