@@ -40,12 +40,14 @@ const MODEL_PRESETS: &[(&str, &str)] = &[
 
 /// Initial prompt for Whisper to help with code-switching (Russian + English tech terms)
 /// This helps the model recognize programming terminology and keep anglicisms in English
+/// Also instructs to use "..." prefix when continuing a sentence from context
 const PROGRAMMER_PROMPT: &str = "\
 Диктовка программиста на русском. Технические термины: \
 API, Git, Docker, pull request, commit, push, deploy, frontend, backend, \
 debug, server, database, config, test, build, merge, branch, release, \
 ввод, вывод, поле ввода, база данных, сервер, клиент, запрос, ответ, \
-сессия, токен, авторизация, аутентификация, endpoint, callback, webhook.";
+сессия, токен, авторизация, аутентификация, endpoint, callback, webhook. \
+Если фраза продолжает предыдущее предложение из контекста, начни с многоточия (...).";
 
 /// MIDI note frequencies for beep sounds
 const BEEP_START_FREQ: f32 = 880.0;  // A5 - higher pitch for start
@@ -850,53 +852,13 @@ const CONTINUATION_WORDS_EN: &[&str] = &[
 ];
 
 /// Detect if phrase should be a continuation based on its content
-/// Returns true if the phrase likely continues the previous sentence
+/// NOTE: Currently disabled - only explicit "..." marker from Whisper triggers continuation.
+/// This function is kept for potential future use but always returns false.
 #[cfg(feature = "whisper")]
-fn should_continue(text: &str, prev_context: &str) -> bool {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    // Get first character and first word
-    let first_char = trimmed.chars().next().unwrap();
-    let first_word: String = trimmed
-        .split(|c: char| c.is_whitespace() || c == ',' || c == '.')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
-
-    // 1. Check if previous context ends WITHOUT sentence-ending punctuation
-    let prev_trimmed = prev_context.trim();
-    let prev_ends_sentence = prev_trimmed.ends_with('.')
-        || prev_trimmed.ends_with('!')
-        || prev_trimmed.ends_with('?')
-        || prev_trimmed.ends_with('…')
-        || prev_trimmed.ends_with("...");
-
-    // If previous phrase didn't end with sentence punctuation, this is likely a continuation
-    if !prev_ends_sentence && !prev_trimmed.is_empty() {
-        return true;
-    }
-
-    // 2. Check if starts with lowercase letter (strong indicator of continuation)
-    if first_char.is_alphabetic() && first_char.is_lowercase() {
-        return true;
-    }
-
-    // 3. Check if starts with a continuation word
-    if CONTINUATION_WORDS_RU.contains(&first_word.as_str())
-        || CONTINUATION_WORDS_EN.contains(&first_word.as_str())
-    {
-        return true;
-    }
-
-    // 4. Check for Russian lowercase (Cyrillic)
-    // In Russian, lowercase letters are in range: а-я (U+0430 - U+044F)
-    if first_char >= '\u{0430}' && first_char <= '\u{044F}' {
-        return true;
-    }
-
+#[allow(dead_code)]
+fn should_continue(_text: &str, _prev_context: &str) -> bool {
+    // Disabled: Auto-detection was too aggressive and caused issues.
+    // Continuation now only happens when Whisper explicitly returns "..." at the start.
     false
 }
 
@@ -1142,16 +1104,9 @@ fn run_macos(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod,
                         }
 
                         if !text.is_empty() {
-                            // Check if we're still recording before inserting text
-                            // (recording might have stopped during transcription)
-                            let still_recording = {
-                                let s = state_for_vad.lock().unwrap();
-                                *s == RecordingState::Recording
-                            };
-                            if !still_recording {
-                                println!("[{}] Recording stopped, discarding transcription", timestamp());
-                                continue;
-                            }
+                            // Note: We no longer discard transcriptions when recording stops.
+                            // The user expects to see the text even if they released the key
+                            // while Whisper was processing.
 
                             // Process continuation marker (legacy check for "...")
                             let (processed_text, marker_continuation) = process_continuation(&text);
