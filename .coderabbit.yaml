@@ -1,0 +1,86 @@
+# CodeRabbit Configuration
+# https://docs.coderabbit.ai/
+
+language: ru  # Ревью на русском языке
+
+reviews:
+  # Автоматический ревью для всех PR
+  auto_review:
+    enabled: true
+    # Игнорировать драфт PR
+    ignore_drafts: true
+    # Ревьюить изменения в этих файлах
+    path_filters:
+      - "**/*.rs"
+      - "**/*.js"
+      - "**/*.ts"
+      - "**/*.html"
+      - "**/*.css"
+      - "**/*.toml"
+      - "**/*.yml"
+      - "**/*.yaml"
+    # Игнорировать эти файлы
+    path_filters_exclude:
+      - "**/*.lock"
+      - "**/target/**"
+      - "**/node_modules/**"
+      - "**/*.min.js"
+      - "**/*.min.css"
+
+  # Профиль ревью
+  profile: assertive  # chill, default, assertive
+
+  # Фокус ревью
+  review_focus:
+    - security        # Безопасность
+    - performance     # Производительность
+    - error_handling  # Обработка ошибок
+    - best_practices  # Лучшие практики
+    - readability     # Читаемость кода
+
+  # Авто-ревью коммитов (не только PR)
+  auto_review_commits: false
+
+# Настройки чата
+chat:
+  # Разрешить команды в комментариях PR
+  enabled: true
+
+# Суммаризация изменений
+summarize:
+  enabled: true
+  # Детальное описание изменений
+  walkthrough: true
+
+# Тон комментариев
+tone: professional
+
+# Дополнительные инструкции для ревьюера
+instructions: |
+  Это проект Voice Keyboard - приложение для голосового ввода текста с использованием Whisper AI.
+
+  Особенности проекта:
+  - Rust для бэкенда и CLI
+  - Кросс-платформенность (macOS, Windows, Linux)
+  - Whisper для распознавания речи (локально, без интернета)
+  - VAD (Voice Activity Detection) для детекции фраз
+  - Tauri для GUI (в разработке)
+
+  При ревью обращай внимание на:
+  1. Thread safety - много кода использует Arc<Mutex<>>
+  2. Cross-platform совместимость - cfg(target_os) условия
+  3. Обработка ошибок в audio/Whisper коде
+  4. Производительность VAD детектора (работает в реальном времени)
+  5. Утечки памяти в аудио буферах
+
+  Код должен работать на:
+  - macOS (ARM64 и x64)
+  - Windows (x64)
+  - Linux (x64, включая Astra Linux)
+
+# Интеграции
+integrations:
+  # Линковка с Issues
+  github:
+    issues:
+      enabled: true
