@@ -43,7 +43,7 @@ enigo = "0.2"           # Keyboard simulation
 tray-icon = "0.19"      # System tray
 cocoa = "0.26"          # macOS clipboard for files
 objc = "0.2"            # Objective-C runtime
-core-graphics = { version = "0.24", features = ["elcapitan"] }  # CGEvent with post_to_pid
+core-graphics = { version = "0.25", features = ["elcapitan"] }  # CGEvent with post_to_pid
 
 # Minimal binary - standalone, no whisper dependency
 [[bin]]
