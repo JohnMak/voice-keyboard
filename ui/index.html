@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Keyboard</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app">
+        <!-- Header with tabs -->
+        <header class="header">
+            <h1>Voice Keyboard</h1>
+            <nav class="tabs">
+                <button class="tab active" data-tab="log">Log</button>
+                <button class="tab" data-tab="settings">Settings</button>
+            </nav>
+        </header>
+
+        <!-- Log Tab -->
+        <section id="log-tab" class="tab-content active">
+            <div class="status-bar">
+                <span class="status-indicator idle"></span>
+                <span class="status-text">Ready</span>
+                <span class="hotkey-hint">Hold <kbd>Fn</kbd> to record</span>
+            </div>
+
+            <div class="log-container">
+                <div id="transcription-log" class="transcription-log">
+                    <p class="placeholder">Transcriptions will appear here...</p>
+                </div>
+            </div>
+
+            <div class="log-actions">
+                <button id="clear-log" class="btn btn-secondary">Clear Log</button>
+                <button id="report-issue" class="btn btn-danger">
+                    <span class="icon">⚠️</span>
+                    Report Issue
+                </button>
+            </div>
+        </section>
+
+        <!-- Settings Tab -->
+        <section id="settings-tab" class="tab-content">
+            <div class="settings-group">
+                <h2>Model</h2>
+                <div id="models-list" class="models-list">
+                    <!-- Models loaded dynamically -->
+                </div>
+            </div>
+
+            <div class="settings-group">
+                <h2>Language</h2>
+                <select id="language-select" class="select">
+                    <!-- Languages loaded dynamically -->
+                </select>
+            </div>
+
+            <div class="settings-group">
+                <h2>Hotkey</h2>
+                <select id="hotkey-select" class="select">
+                    <option value="fn">Fn (Function/Globe)</option>
+                    <option value="ctrl">Left Control</option>
+                    <option value="ctrlright">Right Control</option>
+                    <option value="alt">Left Alt/Option</option>
+                    <option value="altright">Right Alt/Option</option>
+                    <option value="shift">Left Shift</option>
+                    <option value="cmd">Left Cmd/Meta</option>
+                </select>
+            </div>
+
+            <div class="settings-group">
+                <h2>Input Method</h2>
+                <select id="input-method-select" class="select">
+                    <option value="keyboard">Keyboard Simulation</option>
+                    <option value="clipboard">Clipboard + Paste</option>
+                </select>
+            </div>
+
+            <div class="settings-actions">
+                <button id="save-settings" class="btn btn-primary">Save Settings</button>
+            </div>
+        </section>
+    </div>
+
+    <!-- Report Issue Modal -->
+    <div id="report-modal" class="modal hidden">
+        <div class="modal-content">
+            <h2>Report Issue</h2>
+            <p>This will create a debug ZIP file containing:</p>
+            <ul>
+                <li>Recording audio (last session)</li>
+                <li>Debug logs with VAD analysis</li>
+                <li>Transcription history</li>
+                <li>Your settings</li>
+            </ul>
+            <p class="note">No personal data is included except the audio you recorded.</p>
+            <div class="modal-actions">
+                <button id="cancel-report" class="btn btn-secondary">Cancel</button>
+                <button id="create-report" class="btn btn-danger">Create & Open GitHub Issue</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

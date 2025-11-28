@@ -1,0 +1,72 @@
+[package]
+name = "voice-keyboard-app"
+version = "0.1.0"
+description = "Voice Keyboard - Speech to text with local Whisper"
+authors = ["Alex Mak"]
+license = "MIT"
+repository = "https://github.com/alexmakeev/voice-keyboard"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Whisper speech recognition
+whisper-rs = { version = "0.15", optional = true }
+
+# Audio
+hound = "3.5"
+cpal = "0.15"
+
+# Clipboard
+arboard = "3"
+
+# Global hotkeys
+rdev = "0.5"
+
+# Keyboard simulation
+enigo = "0.2"
+
+# Async
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+
+# ZIP creation for debug reports
+zip = "2"
+
+# Timestamps
+chrono = "0.4"
+
+# Directories
+dirs = "5"
+
+# URL encoding
+urlencoding = "2"
+
+# Open URLs in browser
+open = "5"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+whisper = ["whisper-rs"]
+metal = ["whisper-rs/metal"]
+coreml = ["whisper-rs/coreml"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
