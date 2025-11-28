@@ -522,6 +522,15 @@ fn get_model_path(model_arg: Option<String>) -> PathBuf {
     get_models_dir().join("ggml-base.bin")
 }
 
+fn print_version() {
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
+    const NAME: &str = env!("CARGO_PKG_NAME");
+    println!("{} {}", NAME, VERSION);
+    println!();
+    println!("Voice to text using local Whisper AI");
+    println!("https://github.com/alexmak/voice-keyboard");
+}
+
 fn print_usage() {
     let default_key = HotkeyType::default_for_platform();
     println!("Usage: voice-typer [OPTIONS]");
@@ -536,6 +545,7 @@ fn print_usage() {
     println!("  --keyboard         Use keyboard simulation (default)");
     println!("  --list-models      List available model presets");
     println!("  --list-keys        List available hotkey options");
+    println!("  --version, -V      Show version information");
     println!("  --help, -h         Show this help");
     println!();
     println!("Examples:");
@@ -638,6 +648,10 @@ fn main() {
         match args[i].as_str() {
             "--help" | "-h" => {
                 print_usage();
+                return;
+            }
+            "--version" | "-V" => {
+                print_version();
                 return;
             }
             "--list-models" => {
