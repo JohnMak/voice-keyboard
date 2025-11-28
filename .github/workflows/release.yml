@@ -1,0 +1,308 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Build binaries for all platforms
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS Apple Silicon
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact_name: voice-typer
+            asset_name: voice-typer-macos-arm64
+
+          # macOS Intel
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact_name: voice-typer
+            asset_name: voice-typer-macos-x64
+
+          # Windows
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: voice-typer.exe
+            asset_name: voice-typer-windows-x64
+
+          # Linux
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact_name: voice-typer
+            asset_name: voice-typer-linux-x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-release
+
+      # Linux dependencies
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libxdo-dev \
+            libx11-dev \
+            libxtst-dev \
+            libevdev-dev \
+            pkg-config
+
+      # Build
+      - name: Build
+        run: cargo build --release --bin voice-typer --features whisper --target ${{ matrix.target }}
+
+      # Test that binary works
+      - name: Test binary
+        shell: bash
+        run: |
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            ./target/${{ matrix.target }}/release/voice-typer.exe --help
+          else
+            ./target/${{ matrix.target }}/release/voice-typer --help
+          fi
+
+      # Prepare artifacts
+      - name: Prepare artifacts (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} dist/
+          cp README.md dist/ || true
+          cp LICENSE dist/
+          chmod +x dist/${{ matrix.artifact_name }}
+          cd dist && tar -czvf ../${{ matrix.asset_name }}.tar.gz *
+
+      - name: Prepare artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" -Destination "dist/"
+          Copy-Item "README.md" -Destination "dist/" -ErrorAction SilentlyContinue
+          Copy-Item "LICENSE" -Destination "dist/"
+          Compress-Archive -Path "dist/*" -DestinationPath "${{ matrix.asset_name }}.zip"
+
+      # Upload
+      - name: Upload artifact (Unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}.tar.gz
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}.zip
+
+  # Linux DEB package
+  build-linux-deb:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libxdo-dev libx11-dev libxtst-dev libevdev-dev pkg-config
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
+      - name: Build release
+        run: cargo build --release --bin voice-typer --features whisper
+
+      - name: Create PNG icon from SVG
+        run: |
+          sudo apt-get install -y librsvg2-bin
+          rsvg-convert -w 256 -h 256 installer/icon.svg -o installer/linux/icon.png
+
+      - name: Build DEB package
+        run: cargo deb --no-build -p voice-keyboard
+
+      - name: Upload DEB
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-typer-linux-deb
+          path: target/debian/*.deb
+
+  # macOS DMG
+  build-macos-dmg:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            arch: arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            arch: x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-dmg
+
+      - name: Build release
+        run: cargo build --release --bin voice-typer --features whisper --target ${{ matrix.target }}
+
+      - name: Create app bundle
+        run: |
+          APP_NAME="Voice Typer"
+          mkdir -p "$APP_NAME.app/Contents/MacOS"
+          mkdir -p "$APP_NAME.app/Contents/Resources"
+
+          cp target/${{ matrix.target }}/release/voice-typer "$APP_NAME.app/Contents/MacOS/"
+          cp installer/macos/Info.plist "$APP_NAME.app/Contents/"
+
+          # Create simple icon if not exists
+          if [ ! -f installer/macos/icon.icns ]; then
+            # Use system icon as placeholder
+            cp /System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericApplicationIcon.icns "$APP_NAME.app/Contents/Resources/icon.icns" || true
+          else
+            cp installer/macos/icon.icns "$APP_NAME.app/Contents/Resources/"
+          fi
+
+      - name: Create DMG
+        run: |
+          hdiutil create -volname "Voice Typer" -srcfolder "Voice Typer.app" -ov -format UDZO voice-typer-macos-${{ matrix.arch }}.dmg
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-typer-macos-${{ matrix.arch }}-dmg
+          path: voice-typer-macos-${{ matrix.arch }}.dmg
+
+  # Create GitHub Release
+  release:
+    needs: [build, build-linux-deb, build-macos-dmg]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout (for changelog)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f -ls
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+
+          # Copy all release files
+          find artifacts -type f \( \
+            -name "*.tar.gz" -o \
+            -name "*.zip" -o \
+            -name "*.deb" -o \
+            -name "*.dmg" \
+          \) -exec cp {} release/ \;
+
+          # List final release files
+          echo "=== Release files ==="
+          ls -la release/
+
+      - name: Generate checksums
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Determine pre-release
+        id: prerelease
+        run: |
+          TAG="${{ github.ref_name }}"
+          if [[ "$TAG" == *"alpha"* ]] || [[ "$TAG" == *"beta"* ]] || [[ "$TAG" == *"rc"* ]]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+            echo "This is a pre-release: $TAG"
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+            echo "This is a stable release: $TAG"
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*
+          draft: false
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
+          generate_release_notes: true
+          body: |
+            ## Installation
+
+            ### macOS
+            - **Apple Silicon (M1/M2/M3):** Download `voice-typer-macos-arm64.dmg`
+            - **Intel:** Download `voice-typer-macos-x64.dmg`
+
+            ### Windows
+            - Download `voice-typer-windows-x64.zip` and extract
+
+            ### Linux
+            - **Debian/Ubuntu/Astra:** `sudo dpkg -i voice-typer_*.deb`
+            - **Other:** Download `voice-typer-linux-x64.tar.gz` and extract
+
+            ## Quick Start
+            ```bash
+            # Download a Whisper model first
+            mkdir -p ~/.local/share/voice-keyboard/models
+            curl -L -o ~/.local/share/voice-keyboard/models/ggml-tiny.bin \
+              https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
+
+            # Run voice-typer
+            voice-typer --model tiny
+            ```
+
+            Hold **Right Ctrl** (Linux/Windows) or **Fn** (macOS) to record, release to transcribe.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

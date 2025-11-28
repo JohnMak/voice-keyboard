@@ -1,0 +1,181 @@
+# Voice Keyboard License Agreement
+
+**Version 1.0 — Effective Date: November 2024**
+
+Copyright (c) 2024 Alex Mak. All rights reserved.
+
+## Summary
+
+| Use Case | License Required | Cost |
+|----------|------------------|------|
+| Personal, non-commercial | Personal License | **Free** |
+| Professional, commercial | Professional License | **Paid (one-time)** |
+| Organization (5+ users) | Enterprise License | **Contact us** |
+
+---
+
+## 1. Definitions
+
+**"Software"** means Voice Keyboard application and all associated files, documentation, and updates.
+
+**"Licensor"** means Alex Mak, the copyright holder.
+
+**"Personal Use"** means use by an individual for private, non-commercial purposes on devices owned by that individual.
+
+**"Professional Use"** means any use in connection with employment, business activities, freelance work, or any activity that generates or supports revenue.
+
+**"Enterprise Use"** means use by an organization, company, or entity with more than 5 individuals using the Software.
+
+**"Competing Product"** means any product or service that provides voice-to-text, speech recognition, or dictation functionality.
+
+---
+
+## 2. License Grants
+
+### 2.1 Personal License (Free)
+
+Subject to the terms of this Agreement, Licensor grants you a free, non-exclusive, non-transferable license to use the Software for Personal Use only.
+
+**You MAY:**
+- Install and use the Software on your personal devices
+- Make copies for backup purposes
+- Modify the Software for your personal use
+
+**You MAY NOT:**
+- Use the Software for any Professional or commercial purpose
+- Redistribute the Software or modifications
+- Remove or alter any license notices
+
+### 2.2 Professional License (Paid)
+
+A Professional License is required for any Professional Use of the Software.
+
+**Professional License grants you the right to:**
+- Use the Software for Professional and commercial purposes
+- Install on multiple devices owned or controlled by you
+- Receive updates for 1 year from purchase date
+
+**Professional License does NOT allow:**
+- Redistribution or resale of the Software
+- Creating Competing Products based on the Software
+- Transferring the license to another person or entity
+- Use by multiple individuals (each user needs their own license)
+
+**Pricing:** See https://voice-keyboard.app/pricing
+
+### 2.3 Enterprise License (Contact Sales)
+
+Organizations with 5 or more users must obtain an Enterprise License.
+
+**Enterprise License includes:**
+- Volume licensing for your organization
+- Priority support
+- **Optional:** Administrative dashboard for compliance monitoring
+- **Optional:** Audit logs of Software usage within your organization
+- Custom deployment options
+- Dedicated account manager
+
+**Enterprise features (optional add-ons):**
+- Usage analytics and reporting
+- Centralized configuration management
+- Integration with corporate security systems
+- Compliance reporting for regulated industries
+
+**Contact:** enterprise@voice-keyboard.app
+
+---
+
+## 3. Restrictions
+
+Regardless of license type, you MAY NOT:
+
+a) Use the Software to create, develop, or distribute a Competing Product;
+
+b) Reverse engineer, decompile, or disassemble the Software, except as permitted by law;
+
+c) Remove, alter, or obscure any copyright, trademark, or other proprietary notices;
+
+d) Use the Software in any way that violates applicable laws or regulations;
+
+e) Sublicense, rent, lease, or lend the Software to third parties;
+
+f) Use the Software to process data in violation of privacy laws.
+
+---
+
+## 4. Intellectual Property
+
+The Software and all copies thereof are proprietary to Licensor and title thereto remains exclusively with Licensor. All rights not specifically granted in this Agreement are reserved to Licensor.
+
+---
+
+## 5. Data Privacy
+
+### 5.1 Personal and Professional Licenses
+
+The Software processes audio locally on your device. No audio data or transcriptions are transmitted to Licensor or third parties.
+
+### 5.2 Enterprise License
+
+If your organization enables optional monitoring features:
+- Administrators may access usage logs and transcription data
+- Users will be notified when monitoring is active
+- Data handling is subject to your organization's privacy policies
+- Licensor does not receive or store this data
+
+---
+
+## 6. Disclaimer of Warranties
+
+THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+---
+
+## 7. Limitation of Liability
+
+IN NO EVENT SHALL LICENSOR BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES ARISING OUT OF OR IN CONNECTION WITH THIS AGREEMENT OR THE USE OF THE SOFTWARE.
+
+---
+
+## 8. Term and Termination
+
+This Agreement is effective until terminated. Your rights under this Agreement will terminate automatically without notice if you fail to comply with any of its terms. Upon termination, you must destroy all copies of the Software.
+
+---
+
+## 9. General
+
+This Agreement constitutes the entire agreement between you and Licensor regarding the Software. This Agreement is governed by the laws of the Russian Federation. Any disputes shall be resolved in the courts of Moscow, Russia.
+
+---
+
+## 10. Contact
+
+- **Website:** https://voice-keyboard.app
+- **Sales:** sales@voice-keyboard.app
+- **Enterprise:** enterprise@voice-keyboard.app
+- **Support:** support@voice-keyboard.app
+
+---
+
+## Quick Reference
+
+```
+Personal Use (Free):
+  ✓ Use at home for personal tasks
+  ✓ Personal projects and hobbies
+  ✗ Work-related tasks
+  ✗ Freelance projects
+
+Professional License (Paid, one-time):
+  ✓ All personal use rights
+  ✓ Use for work and business
+  ✓ Freelance and consulting
+  ✗ Multiple users (need separate licenses)
+
+Enterprise License (Contact us):
+  ✓ All professional use rights
+  ✓ Volume licensing
+  ✓ Optional: Usage monitoring & compliance
+  ✓ Priority support
+```

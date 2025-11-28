@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Voice Typer
+Comment=Voice to text using local Whisper AI
+Exec=voice-typer
+Icon=voice-typer
+Terminal=true
+Type=Application
+Categories=Utility;Accessibility;AudioVideo;
+Keywords=voice;speech;dictation;whisper;transcription;
+StartupNotify=false

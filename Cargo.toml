@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Alex Mak"]
 description = "Push-to-talk voice keyboard with local Whisper recognition"
-license = "MIT"
+license = "LicenseRef-Proprietary"
 repository = "https://github.com/alexmak/voice-keyboard"
 
 [dependencies]
@@ -33,11 +33,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 anyhow = "1"
 
-# macOS-only dependencies (require system frameworks, not available on Linux CI)
+# Cross-platform audio and input
+cpal = "0.15"           # Audio recording (CoreAudio/ALSA/WASAPI)
+rdev = "0.5"            # Global hotkeys
+enigo = "0.2"           # Keyboard simulation
+
+# macOS-only dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
-cpal = "0.15"           # Audio recording (uses CoreAudio)
-rdev = "0.5"            # Global hotkeys (uses IOKit)
-enigo = "0.2"           # Keyboard simulation (requires Accessibility)
 tray-icon = "0.19"      # System tray
 cocoa = "0.26"          # macOS clipboard for files
 objc = "0.2"            # Objective-C runtime
@@ -79,3 +81,35 @@ identifier = "com.alexmak.voice-keyboard"
 icon = ["icons/icon.icns"]
 category = "public.app-category.productivity"
 short_description = "Voice to text input"
+
+# Linux DEB package configuration (cargo-deb)
+[package.metadata.deb]
+maintainer = "Alex Mak <alex@example.com>"
+copyright = "2024, Alex Mak"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+Voice to text input using local Whisper AI. \
+Push-to-talk: hold a hotkey to record, release to transcribe. \
+Works offline, no internet required for transcription."""
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/voice-typer", "usr/bin/", "755"],
+    ["installer/linux/voice-typer.desktop", "usr/share/applications/", "644"],
+    ["installer/linux/icon.png", "usr/share/icons/hicolor/256x256/apps/voice-typer.png", "644"],
+    ["README.md", "usr/share/doc/voice-typer/README", "644"],
+]
+depends = "$auto"
+
+# Linux RPM package configuration (cargo-generate-rpm)
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/voice-typer", dest = "/usr/bin/voice-typer", mode = "755" },
+    { source = "installer/linux/voice-typer.desktop", dest = "/usr/share/applications/voice-typer.desktop", mode = "644" },
+    { source = "installer/linux/icon.png", dest = "/usr/share/icons/hicolor/256x256/apps/voice-typer.png", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+alsa-lib = "*"
+libX11 = "*"
+libXtst = "*"
