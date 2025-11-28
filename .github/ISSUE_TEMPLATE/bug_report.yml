@@ -1,0 +1,94 @@
+name: Bug Report
+description: Сообщить об ошибке в Voice Keyboard
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо за сообщение об ошибке! Пожалуйста, заполните форму ниже.
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Операционная система
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Windows 10/11
+        - Linux (Ubuntu/Debian)
+        - Linux (Astra Linux)
+        - Linux (ALT Linux)
+        - Linux (другой)
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Версия приложения
+      description: "Запустите `voice-typer --version`"
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: model
+    attributes:
+      label: Модель Whisper
+      options:
+        - tiny
+        - base
+        - small
+        - medium
+        - large-v3-turbo
+        - другая
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Описание проблемы
+      description: Что произошло?
+      placeholder: "Опишите проблему подробно..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги для воспроизведения
+      description: Как воспроизвести проблему?
+      placeholder: |
+        1. Запустил voice-typer с параметрами...
+        2. Нажал клавишу...
+        3. Сказал...
+        4. Увидел ошибку...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемое поведение
+      description: Что должно было произойти?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Логи
+      description: Вставьте вывод консоли (если есть)
+      render: shell
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Чеклист
+      options:
+        - label: Я проверил, что такой issue ещё не создан
+          required: true
+        - label: Я использую последнюю версию
+          required: false

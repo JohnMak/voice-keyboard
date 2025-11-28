@@ -1,0 +1,45 @@
+name: Feature Request
+description: Предложить новую функцию
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо за предложение! Опишите желаемую функцию.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какую проблему это решит?
+      description: Опишите проблему или неудобство
+      placeholder: "Мне неудобно, когда..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Предлагаемое решение
+      description: Как вы видите реализацию?
+      placeholder: "Было бы здорово, если бы..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Альтернативы
+      description: Рассматривали ли вы другие варианты?
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Насколько это важно для вас?
+      options:
+        - Критично - без этого не могу пользоваться
+        - Важно - сильно улучшит опыт
+        - Было бы неплохо
+        - Просто идея
+    validations:
+      required: true
