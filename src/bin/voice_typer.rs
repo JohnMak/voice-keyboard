@@ -1190,13 +1190,11 @@ fn remove_trailing_punctuation(text: &str) -> String {
 // ============================================================================
 
 const HALLUCINATION_PATTERNS: &[&str] = &[
-    // Russian YouTuber/subtitle hallucinations
-    "DimaTorzok", "Семкин", "Егорова",
-    "Субтитры создавал", "Субтитры сделал", "Редактор субтитров", "Корректор",
-    "Продолжение следует", "продолжение следует",
+    // Russian YouTuber/subtitle hallucinations (from Whisper training data)
+    "DimaTorzok",
+    "Субтитры создавал", "Субтитры сделал", "Редактор субтитров",
     "ПОДПИШИСЬ НА КАНАЛ", "Подпишись на канал", "подпишись на канал",
     "Спасибо за просмотр", "спасибо за просмотр",
-    "Пока-пока", "пока-пока",
     // English subtitle/transcription hallucinations
     "Amara.org", "amara.org",
     "transcribed by", "Transcribed by",
@@ -1206,25 +1204,40 @@ const HALLUCINATION_PATTERNS: &[&str] = &[
     "Please subscribe", "please subscribe",
 ];
 
+/// Maximum audio duration (in seconds) to apply hallucination filtering
+/// Longer segments are unlikely to be pure hallucinations
+const HALLUCINATION_MAX_DURATION_SECS: f32 = 1.5;
+
 const HALLUCINATION_EXACT: &[&str] = &[
-    "У|м", "У|эм", "Уэм", "у|м", "Ум", "ум", "Эм", "эм",
-    "Хм", "хм", "Ах", "ах", "Ох", "ох", "М-м", "м-м", "А-а", "а-а",
+    // Filler sounds that Whisper hallucinates from silence/noise
+    "У|м", "У|эм", "Уэм", "у|м", "Эм", "эм",
+    "Хм", "хм", "М-м", "м-м", "А-а", "а-а",
     "...", "…",
 ];
 
 #[cfg(feature = "whisper")]
-fn is_hallucination(text: &str) -> bool {
+fn is_hallucination(text: &str, audio_duration_secs: f32) -> bool {
+    // Only filter hallucinations for short audio segments
+    // Longer segments are unlikely to be pure hallucinations
+    if audio_duration_secs > HALLUCINATION_MAX_DURATION_SECS {
+        return false;
+    }
+
     let trimmed = text.trim();
     let lower = trimmed.to_lowercase();
 
+    // Check exact matches (filler sounds)
     for pattern in HALLUCINATION_EXACT {
         if trimmed == *pattern || trimmed.trim_end_matches('.') == *pattern {
+            println!("[FILTER] Hallucination (exact match, {:.1}s): \"{}\"", audio_duration_secs, trimmed);
             return true;
         }
     }
 
+    // Check pattern matches (YouTube/subtitle phrases)
     for pattern in HALLUCINATION_PATTERNS {
         if trimmed.contains(pattern) || lower.contains(&pattern.to_lowercase()) {
+            println!("[FILTER] Hallucination (pattern match, {:.1}s): \"{}\"", audio_duration_secs, trimmed);
             return true;
         }
     }
@@ -1717,11 +1730,12 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                 let resampled = resample_48k_to_16k(&phrase_samples);
                 match transcribe(&whisper_for_vad, &resampled, context.as_deref()) {
                     Ok(text) => {
-                        if is_hallucination(&text) {
-                            println!("[{}] (filtered: hallucination)", timestamp());
+                        // Filter hallucinations - only for short segments
+                        if is_hallucination(&text, duration_secs) {
                             continue;
                         }
 
+                        // Additional duration-based hallucination check
                         if is_duration_hallucination(&text, duration_secs) {
                             continue;
                         }
@@ -1856,8 +1870,9 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                         let resampled = resample_48k_to_16k(&phrase_samples);
                         match transcribe(&whisper_clone, &resampled, context.as_deref()) {
                             Ok(text) => {
-                                if is_hallucination(&text) {
-                                    println!("[{}] (filtered: hallucination)", timestamp());
+                                // Filter hallucinations - only for short segments
+                                if is_hallucination(&text, duration_secs) {
+                                    // Already logged in is_hallucination
                                 } else if is_duration_hallucination(&text, duration_secs) {
                                     // Already logged
                                 } else if !text.is_empty() {
