@@ -13,16 +13,20 @@
 //!   cargo run --bin voice-typer --features whisper -- --model /path/to/model.bin
 
 use std::env;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::thread;
 
 // Cross-platform imports
 use rdev::{listen, Event, EventType, Key};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use arboard::Clipboard;
 use enigo::{Direction, Enigo, Key as EnigoKey, Keyboard, Settings};
+use indicatif::{ProgressBar, ProgressStyle};
+use reqwest::blocking::Client;
 
 /// Minimum recording duration to process (avoid accidental taps)
 const MIN_RECORDING_MS: u64 = 300;
@@ -39,6 +43,25 @@ const MODEL_PRESETS: &[(&str, &str)] = &[
     ("medium", "ggml-medium.bin"),
     ("large-v3-turbo", "ggml-large-v3-turbo.bin"),
     ("turbo", "ggml-large-v3-turbo.bin"), // alias
+];
+
+/// Model download mirrors (ordered by preference)
+const MODEL_MIRRORS: &[&str] = &[
+    // Primary: HuggingFace (ggerganov's official repo)
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/",
+    // Mirror 1: Alternative HuggingFace repo
+    "https://huggingface.co/distil-whisper/distil-small.en/resolve/main/",
+    // Mirror 2: GGML models collection
+    "https://huggingface.co/ggml-org/whisper-ggml/resolve/main/",
+];
+
+/// Model sizes for progress display (approximate, in bytes)
+const MODEL_SIZES: &[(&str, u64)] = &[
+    ("ggml-tiny.bin", 77_700_000),
+    ("ggml-base.bin", 148_000_000),
+    ("ggml-small.bin", 488_000_000),
+    ("ggml-medium.bin", 1_530_000_000),
+    ("ggml-large-v3-turbo.bin", 1_620_000_000),
 ];
 
 /// Initial prompt for Whisper to help with code-switching (Russian + English tech terms)
@@ -539,6 +562,8 @@ fn print_usage() {
     println!("  --model <MODEL>    Model name or path to .bin file");
     println!("                     Presets: tiny, base, small, medium, large-v3-turbo (or turbo)");
     println!("                     Default: base");
+    println!("  --download <MODEL> Download a model from the internet (tries multiple mirrors)");
+    println!("                     Example: --download tiny");
     println!("  --key <KEY>        Push-to-talk hotkey (default: {} on this platform)", default_key.name());
     println!("                     Options: fn, ctrl, ctrlright, alt, altright, shift, cmd");
     println!("  --clipboard        Use clipboard+paste instead of keyboard input");
@@ -549,7 +574,8 @@ fn print_usage() {
     println!("  --help, -h         Show this help");
     println!();
     println!("Examples:");
-    println!("  voice-typer --model tiny");
+    println!("  voice-typer --download tiny          # Download tiny model");
+    println!("  voice-typer --model tiny             # Run with tiny model");
     println!("  voice-typer --model large-v3-turbo --key ctrl");
     println!("  voice-typer --key ctrlright --clipboard");
     println!();
@@ -622,6 +648,259 @@ fn list_models() {
         println!("  curl -L -o ~/.local/share/voice-keyboard/models/ggml-tiny.bin \\");
         println!("    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin");
     }
+    println!();
+    println!("Or use automatic download:");
+    println!("  voice-typer --download tiny");
+}
+
+// ============================================================================
+// Model Download with Multi-Mirror Support
+// ============================================================================
+
+/// Probe a mirror to check availability and get download speed estimate
+fn probe_mirror(client: &Client, url: &str) -> Option<(f64, u64)> {
+    let start = Instant::now();
+    match client
+        .head(url)
+        .timeout(Duration::from_secs(5))
+        .send()
+    {
+        Ok(response) => {
+            if response.status().is_success() || response.status().is_redirection() {
+                let elapsed = start.elapsed().as_secs_f64();
+                let content_length = response
+                    .headers()
+                    .get("content-length")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                // Speed score: lower latency = better
+                Some((elapsed, content_length))
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+/// Find the best mirror by probing all mirrors in parallel
+fn find_best_mirror(filename: &str) -> Option<String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .ok()?;
+
+    println!("Checking mirrors for {}...", filename);
+
+    // Probe all mirrors in parallel
+    let handles: Vec<_> = MODEL_MIRRORS
+        .iter()
+        .map(|mirror| {
+            let url = format!("{}{}", mirror, filename);
+            let client = client.clone();
+            thread::spawn(move || {
+                let result = probe_mirror(&client, &url);
+                (url, result)
+            })
+        })
+        .collect();
+
+    // Collect results
+    let mut results: Vec<(String, f64, u64)> = Vec::new();
+    for handle in handles {
+        if let Ok((url, Some((latency, size)))) = handle.join() {
+            println!("  [OK] {} ({:.0}ms, {} bytes)", url, latency * 1000.0, size);
+            results.push((url, latency, size));
+        }
+    }
+
+    if results.is_empty() {
+        eprintln!("No mirrors available for {}", filename);
+        return None;
+    }
+
+    // Sort by latency (fastest first)
+    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let best = &results[0];
+    println!("Selected: {} ({:.0}ms)", best.0, best.1 * 1000.0);
+
+    Some(best.0.clone())
+}
+
+/// Download a model file with progress bar and automatic mirror fallback
+fn download_model(model_name: &str) -> Result<PathBuf, String> {
+    // Resolve model name to filename
+    let filename = MODEL_PRESETS
+        .iter()
+        .find(|(name, _)| *name == model_name)
+        .map(|(_, file)| *file)
+        .unwrap_or_else(|| {
+            // If not a preset, assume it's already a filename
+            if model_name.ends_with(".bin") {
+                model_name
+            } else {
+                // Create filename from model name
+                Box::leak(format!("ggml-{}.bin", model_name).into_boxed_str())
+            }
+        });
+
+    let dest_path = get_models_dir().join(filename);
+
+    // Check if already exists
+    if dest_path.exists() {
+        println!("Model already exists: {}", dest_path.display());
+        return Ok(dest_path);
+    }
+
+    // Create models directory
+    if let Some(parent) = dest_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create models directory: {}", e))?;
+    }
+
+    // Find best mirror
+    let url = find_best_mirror(filename)
+        .ok_or_else(|| "No available mirrors found".to_string())?;
+
+    // Get expected size for progress bar
+    let expected_size = MODEL_SIZES
+        .iter()
+        .find(|(name, _)| *name == filename)
+        .map(|(_, size)| *size)
+        .unwrap_or(0);
+
+    println!("\nDownloading {} from:", filename);
+    println!("  {}", url);
+    println!();
+
+    // Download with progress
+    download_with_progress(&url, &dest_path, expected_size)?;
+
+    println!("\nModel saved to: {}", dest_path.display());
+    Ok(dest_path)
+}
+
+/// Download file with progress bar
+fn download_with_progress(url: &str, dest: &PathBuf, expected_size: u64) -> Result<(), String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(3600)) // 1 hour timeout for large files
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("Failed to connect: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("HTTP error: {}", response.status()));
+    }
+
+    let total_size = response
+        .content_length()
+        .unwrap_or(expected_size);
+
+    // Create progress bar
+    let pb = ProgressBar::new(total_size);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+
+    // Download to temporary file first
+    let temp_path = dest.with_extension("bin.tmp");
+    let mut file = File::create(&temp_path)
+        .map_err(|e| format!("Failed to create temp file: {}", e))?;
+
+    let mut downloaded: u64 = 0;
+    let mut buffer = [0u8; 8192];
+
+    // Read response body in chunks
+    let mut reader = response;
+    loop {
+        use std::io::Read;
+        match reader.read(&mut buffer) {
+            Ok(0) => break, // EOF
+            Ok(n) => {
+                file.write_all(&buffer[..n])
+                    .map_err(|e| format!("Failed to write: {}", e))?;
+                downloaded += n as u64;
+                pb.set_position(downloaded);
+            }
+            Err(e) => {
+                // Remove temp file on error
+                let _ = fs::remove_file(&temp_path);
+                return Err(format!("Download failed: {}", e));
+            }
+        }
+    }
+
+    pb.finish_with_message("Download complete!");
+
+    // Verify size
+    if total_size > 0 && downloaded != total_size {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!(
+            "Size mismatch: expected {} bytes, got {} bytes",
+            total_size, downloaded
+        ));
+    }
+
+    // Rename temp file to final destination
+    fs::rename(&temp_path, dest)
+        .map_err(|e| format!("Failed to rename temp file: {}", e))?;
+
+    Ok(())
+}
+
+/// Download model with fallback to other mirrors on failure
+fn download_model_with_fallback(model_name: &str) -> Result<PathBuf, String> {
+    // First try the smart download (finds best mirror)
+    match download_model(model_name) {
+        Ok(path) => return Ok(path),
+        Err(e) => {
+            eprintln!("Primary download failed: {}", e);
+            eprintln!("Trying fallback mirrors...");
+        }
+    }
+
+    // Resolve filename
+    let filename = MODEL_PRESETS
+        .iter()
+        .find(|(name, _)| *name == model_name)
+        .map(|(_, file)| *file)
+        .unwrap_or_else(|| {
+            if model_name.ends_with(".bin") { model_name } else { "ggml-base.bin" }
+        });
+
+    let dest_path = get_models_dir().join(filename);
+    let expected_size = MODEL_SIZES
+        .iter()
+        .find(|(name, _)| *name == filename)
+        .map(|(_, size)| *size)
+        .unwrap_or(0);
+
+    // Try each mirror sequentially
+    for mirror in MODEL_MIRRORS {
+        let url = format!("{}{}", mirror, filename);
+        println!("\nTrying: {}", url);
+
+        match download_with_progress(&url, &dest_path, expected_size) {
+            Ok(()) => {
+                println!("\nModel saved to: {}", dest_path.display());
+                return Ok(dest_path);
+            }
+            Err(e) => {
+                eprintln!("Failed: {}", e);
+            }
+        }
+    }
+
+    Err("All mirrors failed. Please check your internet connection.".to_string())
 }
 
 // ============================================================================
@@ -660,6 +939,41 @@ fn main() {
             }
             "--list-keys" => {
                 list_keys();
+                return;
+            }
+            "--download" => {
+                if i + 1 < args.len() {
+                    let model = &args[i + 1];
+                    match download_model_with_fallback(model) {
+                        Ok(path) => {
+                            println!("\nSuccess! Model ready at: {}", path.display());
+                            println!("Run: voice-typer --model {}", model);
+                        }
+                        Err(e) => {
+                            eprintln!("\nDownload failed: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                    return;
+                } else {
+                    eprintln!("Error: --download requires a model name");
+                    eprintln!("Example: voice-typer --download tiny");
+                    eprintln!("Use --list-models to see available models");
+                    std::process::exit(1);
+                }
+            }
+            arg if arg.starts_with("--download=") => {
+                let model = arg.trim_start_matches("--download=");
+                match download_model_with_fallback(model) {
+                    Ok(path) => {
+                        println!("\nSuccess! Model ready at: {}", path.display());
+                        println!("Run: voice-typer --model {}", model);
+                    }
+                    Err(e) => {
+                        eprintln!("\nDownload failed: {}", e);
+                        std::process::exit(1);
+                    }
+                }
                 return;
             }
             "--clipboard" => {

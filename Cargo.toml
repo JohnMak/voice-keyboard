@@ -33,6 +33,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 anyhow = "1"
 
+# HTTP client for model downloads
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false }
+indicatif = "0.17"  # Progress bar
+
 # Cross-platform audio and input
 cpal = "0.15"           # Audio recording (CoreAudio/ALSA/WASAPI)
 rdev = "0.5"            # Global hotkeys
