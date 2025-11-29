@@ -77,13 +77,11 @@ git clone https://github.com/alexmak/voice-keyboard.git
 cd voice-keyboard
 cargo build --release --features "whisper,metal"
 
-# 3. Download model
-mkdir -p ~/.local/share/voice-keyboard/models
-curl -L -o ~/.local/share/voice-keyboard/models/ggml-large-v3-turbo.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
+# 3. Download model (automatic)
+./target/release/voice-typer --download large-v3-turbo
 
 # 4. Run
-./target/release/voice-typer
+./target/release/voice-typer --model large-v3-turbo
 ```
 
 ### Linux
@@ -110,13 +108,11 @@ git clone https://github.com/alexmak/voice-keyboard.git
 cd voice-keyboard
 cargo build --release --features whisper
 
-# 4. Download model
-mkdir -p ~/.local/share/voice-keyboard/models
-curl -L -o ~/.local/share/voice-keyboard/models/ggml-large-v3-turbo.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
+# 4. Download model (automatic)
+./target/release/voice-typer --download large-v3-turbo
 
 # 5. Run
-./target/release/voice-typer
+./target/release/voice-typer --model large-v3-turbo
 ```
 
 ### Windows
@@ -141,13 +137,11 @@ git clone https://github.com/alexmak/voice-keyboard.git
 cd voice-keyboard
 cargo build --release --features whisper
 
-# Download model
-New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\voice-keyboard\models"
-Invoke-WebRequest -Uri "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin" `
-  -OutFile "$env:LOCALAPPDATA\voice-keyboard\models\ggml-large-v3-turbo.bin"
+# Download model (automatic)
+.\target\release\voice-typer.exe --download large-v3-turbo
 
 # Run
-.\target\release\voice-typer.exe
+.\target\release\voice-typer.exe --model large-v3-turbo
 ```
 
 ## Usage
@@ -161,11 +155,21 @@ Invoke-WebRequest -Uri "https://huggingface.co/ggerganov/whisper.cpp/resolve/mai
 # With specific model
 ./target/release/voice-typer --model large-v3-turbo
 
+# Download model automatically (with multi-mirror support)
+./target/release/voice-typer --download tiny
+./target/release/voice-typer --download large-v3-turbo
+
 # Keyboard input (types character by character)
 ./target/release/voice-typer --keyboard
 
 # Clipboard input (pastes via Cmd+V / Ctrl+V)
 ./target/release/voice-typer --clipboard
+
+# Silent mode (no beep sounds)
+./target/release/voice-typer --silent
+
+# Custom beep volume (0.0 to 1.0, default: 0.1)
+./target/release/voice-typer --volume 0.5
 ```
 
 **Basic Usage:**
@@ -196,6 +200,48 @@ Full application with tray icon:
 ./target/release/voice-keyboard
 ./target/release/voice-keyboard --config    # Show config paths
 ./target/release/voice-keyboard --transcribe file.wav  # Transcribe file
+```
+
+## Command Line Options
+
+```
+Usage: voice-typer [OPTIONS]
+
+Options:
+  --model <MODEL>      Model name or path (tiny, base, small, medium, large-v3-turbo)
+  --download <MODEL>   Download a model from the internet
+  --key <KEY>          Push-to-talk hotkey (fn, ctrl, ctrlright, alt, shift, cmd)
+  --volume <0.0-1.0>   Beep sounds volume (default: 0.1 = 10%)
+  --silent, -q         Disable all beep sounds
+  --clipboard          Use clipboard+paste instead of keyboard
+  --keyboard           Use keyboard simulation (default)
+  --list-models        List available models
+  --list-keys          List available hotkeys
+  --version, -V        Show version
+  --help, -h           Show help
+```
+
+### Examples
+
+```bash
+# Basic usage with tiny model
+voice-typer --model tiny
+
+# Download and use large-v3-turbo
+voice-typer --download large-v3-turbo
+voice-typer --model large-v3-turbo
+
+# Silent mode (no beep sounds)
+voice-typer --model tiny --silent
+
+# Louder beeps for presentations
+voice-typer --model tiny --volume 0.5
+
+# Use Right Ctrl as hotkey
+voice-typer --key ctrlright
+
+# Use clipboard mode
+voice-typer --clipboard
 ```
 
 ## Configuration
@@ -258,6 +304,24 @@ Config file location:
 > **Recommendation**: Use **large-v3-turbo** for the best quality with good speed.
 
 ### Download Models
+
+**Automatic download (recommended):**
+
+```bash
+# Download with automatic mirror selection
+./target/release/voice-typer --download large-v3-turbo
+
+# Or download a smaller model for testing
+./target/release/voice-typer --download tiny
+```
+
+The `--download` command automatically:
+- Probes multiple mirrors in parallel
+- Selects the fastest available mirror
+- Shows download progress with speed and ETA
+- Falls back to other mirrors on failure
+
+**Manual download:**
 
 ```bash
 # Models directory
