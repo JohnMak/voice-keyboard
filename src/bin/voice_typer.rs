@@ -77,6 +77,18 @@ debug, server, database, config, test, build, merge, branch, release, prompt, \
 const BEEP_START_FREQ: f32 = 880.0;  // A5 - higher pitch for start
 const BEEP_STOP_FREQ: f32 = 440.0;   // A4 - lower pitch for stop
 const BEEP_DURATION_MS: u64 = 100;
+const BEEP_DEFAULT_VOLUME: f32 = 0.1;  // 10% volume (0.0 - 1.0)
+
+/// Global volume setting for beep sounds (0.0 = silent, 1.0 = max)
+static BEEP_VOLUME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn get_beep_volume() -> f32 {
+    f32::from_bits(BEEP_VOLUME.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn set_beep_volume(volume: f32) {
+    BEEP_VOLUME.store(volume.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Sample rate for recording (48kHz is typical)
 const RECORDING_SAMPLE_RATE: u32 = 48000;
@@ -566,6 +578,9 @@ fn print_usage() {
     println!("                     Example: --download tiny");
     println!("  --key <KEY>        Push-to-talk hotkey (default: {} on this platform)", default_key.name());
     println!("                     Options: fn, ctrl, ctrlright, alt, altright, shift, cmd");
+    println!("  --volume <0.0-1.0> Beep sounds volume (default: 0.1 = 10%)");
+    println!("                     Use 0 to disable sounds, 1.0 for max volume");
+    println!("  --silent, -q       Disable all beep sounds (same as --volume 0)");
     println!("  --clipboard        Use clipboard+paste instead of keyboard input");
     println!("  --keyboard         Use keyboard simulation (default)");
     println!("  --list-models      List available model presets");
@@ -576,7 +591,8 @@ fn print_usage() {
     println!("Examples:");
     println!("  voice-typer --download tiny          # Download tiny model");
     println!("  voice-typer --model tiny             # Run with tiny model");
-    println!("  voice-typer --model large-v3-turbo --key ctrl");
+    println!("  voice-typer --model turbo --volume 0.5  # Louder beeps for demos");
+    println!("  voice-typer --model tiny --silent    # No beep sounds");
     println!("  voice-typer --key ctrlright --clipboard");
     println!();
     println!("Config file: {}", get_config_path().map(|p| p.display().to_string()).unwrap_or_default());
@@ -922,6 +938,9 @@ fn main() {
         .and_then(|h| HotkeyType::from_str(h))
         .unwrap_or_else(HotkeyType::default_for_platform);
 
+    // Initialize beep volume (default 10%)
+    set_beep_volume(BEEP_DEFAULT_VOLUME);
+
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -1018,6 +1037,46 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
+            }
+            "--volume" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse::<f32>() {
+                        Ok(v) if (0.0..=1.0).contains(&v) => {
+                            set_beep_volume(v);
+                        }
+                        Ok(_) => {
+                            eprintln!("Error: --volume must be between 0.0 and 1.0");
+                            std::process::exit(1);
+                        }
+                        Err(_) => {
+                            eprintln!("Error: --volume requires a number (0.0 to 1.0)");
+                            std::process::exit(1);
+                        }
+                    }
+                    i += 1;
+                } else {
+                    eprintln!("Error: --volume requires an argument (0.0 to 1.0)");
+                    std::process::exit(1);
+                }
+            }
+            arg if arg.starts_with("--volume=") => {
+                let vol_str = arg.trim_start_matches("--volume=");
+                match vol_str.parse::<f32>() {
+                    Ok(v) if (0.0..=1.0).contains(&v) => {
+                        set_beep_volume(v);
+                    }
+                    Ok(_) => {
+                        eprintln!("Error: --volume must be between 0.0 and 1.0");
+                        std::process::exit(1);
+                    }
+                    Err(_) => {
+                        eprintln!("Error: --volume requires a number (0.0 to 1.0)");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            "--silent" | "--quiet" | "-q" => {
+                set_beep_volume(0.0);
             }
             arg => {
                 eprintln!("Unknown argument: {}", arg);
@@ -1541,6 +1600,12 @@ fn play_beep(frequency: f32, duration_ms: u64) {
 fn play_beep_blocking(frequency: f32, duration_ms: u64) {
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    // Skip if volume is zero (silent mode)
+    let volume = get_beep_volume();
+    if volume <= 0.0 {
+        return;
+    }
+
     let host = cpal::default_host();
     let device = match host.default_output_device() {
         Some(d) => d,
@@ -1582,7 +1647,7 @@ fn play_beep_blocking(frequency: f32, duration_ms: u64) {
                     };
 
                     let value = (sample_clock * 2.0 * std::f32::consts::PI * frequency / sample_rate).sin()
-                        * 0.1 * envelope;
+                        * volume * envelope;
 
                     for sample in frame.iter_mut() {
                         *sample = value;
