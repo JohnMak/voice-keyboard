@@ -1190,14 +1190,14 @@ fn remove_trailing_punctuation(text: &str) -> String {
 // ============================================================================
 
 const HALLUCINATION_PATTERNS: &[&str] = &[
+    // Russian YouTuber/subtitle hallucinations
     "DimaTorzok", "Семкин", "Егорова",
     "Субтитры создавал", "Субтитры сделал", "Редактор субтитров", "Корректор",
     "Продолжение следует", "продолжение следует",
     "ПОДПИШИСЬ НА КАНАЛ", "Подпишись на канал", "подпишись на канал",
     "Спасибо за просмотр", "спасибо за просмотр",
     "Пока-пока", "пока-пока",
-    "Время – это", "время – это", "Время — это", "время — это",
-    "Это не", "это не",
+    // English subtitle/transcription hallucinations
     "Amara.org", "amara.org",
     "transcribed by", "Transcribed by",
     "subtitles by", "Subtitles by",
