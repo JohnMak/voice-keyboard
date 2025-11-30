@@ -1314,15 +1314,36 @@ fn is_duration_hallucination(text: &str, audio_duration_secs: f32) -> bool {
     let char_count = trimmed.chars().count();
     let chars_per_second = char_count as f32 / audio_duration_secs;
 
-    if audio_duration_secs < 0.5 && char_count > 10 {
-        println!("[FILTER] Hallucination detected: {:.1}s audio -> {} chars ({:.0} chars/s)",
+    // Rule 1: Very short audio (< 0.3s) should have very few characters
+    // 0.3s of noise shouldn't produce more than 5-6 characters
+    if audio_duration_secs < 0.3 && char_count > 5 {
+        println!("[FILTER] Hallucination: {:.2}s audio -> {} chars (too much text for noise)",
+            audio_duration_secs, char_count);
+        return true;
+    }
+
+    // Rule 2: Short audio (< 0.5s) with too much text
+    // At most ~8 chars for 0.5s of real speech
+    if audio_duration_secs < 0.5 && char_count > 8 {
+        println!("[FILTER] Hallucination: {:.2}s audio -> {} chars ({:.0} chars/s)",
             audio_duration_secs, char_count, chars_per_second);
         return true;
     }
 
-    if chars_per_second > 35.0 {
-        println!("[FILTER] Hallucination detected: {:.0} chars/s is impossibly fast",
+    // Rule 3: Unrealistic speech rate
+    // Normal speech: ~14-15 chars/sec, fast speech: ~20 chars/sec
+    // Threshold: 25 chars/sec (allows some margin for fast talkers)
+    if chars_per_second > 25.0 {
+        println!("[FILTER] Hallucination: {:.0} chars/s exceeds realistic speech rate (~15-20 chars/s)",
             chars_per_second);
+        return true;
+    }
+
+    // Rule 4: Medium duration (0.5-1.0s) with disproportionate text
+    // 1 second of speech = ~15 chars max realistically
+    if audio_duration_secs >= 0.5 && audio_duration_secs < 1.0 && char_count > 20 {
+        println!("[FILTER] Hallucination: {:.2}s audio -> {} chars (too dense)",
+            audio_duration_secs, char_count);
         return true;
     }
 
