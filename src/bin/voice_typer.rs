@@ -76,7 +76,7 @@ debug, server, database, config, test, build, merge, branch, release, prompt, \
 /// MIDI note frequencies for beep sounds
 const BEEP_START_FREQ: f32 = 880.0;  // A5 - higher pitch for start
 const BEEP_STOP_FREQ: f32 = 440.0;   // A4 - lower pitch for stop
-const BEEP_DURATION_MS: u64 = 100;
+const BEEP_DURATION_MS: u64 = 30;    // Very short beep - recording starts immediately
 const BEEP_DEFAULT_VOLUME: f32 = 0.1;  // 10% volume (0.0 - 1.0)
 
 /// Global volume setting for beep sounds (0.0 = silent, 1.0 = max)
@@ -1659,10 +1659,11 @@ fn play_beep_blocking(frequency: f32, duration_ms: u64) {
                     done_clone.store(true, Ordering::Relaxed);
                 } else {
                     let t = samples_played as f32 / total_samples as f32;
-                    let envelope = if t < 0.1 {
-                        t * 10.0
-                    } else if t > 0.7 {
-                        (1.0 - t) / 0.3
+                    // For short beeps, use faster attack/decay to keep it audible
+                    let envelope = if t < 0.05 {
+                        t * 20.0  // 5% attack
+                    } else if t > 0.8 {
+                        (1.0 - t) / 0.2  // 20% decay
                     } else {
                         1.0
                     };
