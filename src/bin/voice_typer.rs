@@ -1219,12 +1219,13 @@ fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32], context: Option
                     }
 
                     if let Ok(token_text) = token.to_str_lossy() {
-                        let token_str = token_text.as_ref();
+                        let token_str = token_text.as_ref().trim();
                         // Skip special Whisper tokens like [_BEG_], [_TT_123], etc.
                         if token_str.starts_with("[_") && token_str.ends_with("]") {
                             continue;
                         }
-                        text.push_str(token_str);
+                        // Preserve original spacing
+                        text.push_str(token_text.as_ref());
                     }
                 }
             }
