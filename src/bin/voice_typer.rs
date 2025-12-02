@@ -1373,17 +1373,17 @@ fn is_duration_hallucination(text: &str, audio_duration_secs: f32) -> bool {
     }
 
     // Rule 3: Unrealistic speech rate
-    // Normal speech: ~14-15 chars/sec, fast speech: ~20 chars/sec
-    // Threshold: 25 chars/sec (allows some margin for fast talkers)
-    if chars_per_second > 25.0 {
-        println!("[FILTER] Hallucination: {:.0} chars/s exceeds realistic speech rate (~15-20 chars/s)",
+    // Normal speech: ~14-15 chars/sec, fast speech: ~25-30 chars/sec
+    // Threshold: 50 chars/sec (allows for very fast talkers)
+    if chars_per_second > 50.0 {
+        println!("[FILTER] Hallucination: {:.0} chars/s exceeds realistic speech rate",
             chars_per_second);
         return true;
     }
 
     // Rule 4: Medium duration (0.5-1.0s) with disproportionate text
-    // 1 second of speech = ~15 chars max realistically
-    if audio_duration_secs >= 0.5 && audio_duration_secs < 1.0 && char_count > 20 {
+    // 1 second of fast speech = ~40-50 chars max
+    if audio_duration_secs >= 0.5 && audio_duration_secs < 1.0 && char_count > 50 {
         println!("[FILTER] Hallucination: {:.2}s audio -> {} chars (too dense)",
             audio_duration_secs, char_count);
         return true;
