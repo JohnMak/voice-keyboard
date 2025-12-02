@@ -1153,6 +1153,10 @@ fn load_whisper(model_path: &PathBuf) -> Result<whisper_rs::WhisperContext, Stri
     ).map_err(|e| format!("Failed to load model: {}", e))
 }
 
+/// Minimum token duration in centiseconds (1 centisecond = 10ms)
+/// Tokens shorter than this are likely hallucinations
+const MIN_TOKEN_DURATION_CS: i64 = 2;  // 20ms
+
 #[cfg(feature = "whisper")]
 fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32], context: Option<&str>) -> Result<String, String> {
     use whisper_rs::{FullParams, SamplingStrategy};
@@ -1166,6 +1170,7 @@ fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32], context: Option
     params.set_translate(false);
     params.set_no_context(true);
     params.set_single_segment(false);
+    params.set_token_timestamps(true);  // Enable token-level timestamps for hallucination filtering
 
     params.set_language(Some("ru"));
 
@@ -1187,12 +1192,42 @@ fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32], context: Option
     let num_segments = state.full_n_segments();
 
     let mut text = String::new();
+    let mut filtered_count = 0;
+
     for i in 0..num_segments {
         if let Some(segment) = state.get_segment(i) {
-            if let Ok(segment_text) = segment.to_str_lossy() {
-                text.push_str(&segment_text);
+            let n_tokens = segment.n_tokens();
+
+            for j in 0..n_tokens {
+                if let Some(token) = segment.get_token(j) {
+                    let token_data = token.token_data();
+                    let duration = token_data.t1 - token_data.t0;
+
+                    // Filter out tokens with very short duration (likely hallucinations)
+                    // t0 and t1 are in centiseconds (10ms units)
+                    if duration < MIN_TOKEN_DURATION_CS {
+                        if let Ok(token_text) = token.to_str_lossy() {
+                            let token_str = token_text.trim();
+                            // Only filter non-empty, non-punctuation tokens
+                            if !token_str.is_empty() && !token_str.chars().all(|c| c.is_whitespace() || c.is_ascii_punctuation() || c == '…') {
+                                filtered_count += 1;
+                                eprintln!("[timestamp-filter] Filtered token '{}' (duration: {}cs = {}ms)",
+                                    token_str, duration, duration * 10);
+                                continue;
+                            }
+                        }
+                    }
+
+                    if let Ok(token_text) = token.to_str_lossy() {
+                        text.push_str(&token_text);
+                    }
+                }
             }
         }
+    }
+
+    if filtered_count > 0 {
+        eprintln!("[timestamp-filter] Total filtered tokens: {}", filtered_count);
     }
 
     Ok(text.trim().to_string())
