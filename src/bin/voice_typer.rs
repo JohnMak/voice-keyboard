@@ -74,9 +74,7 @@ debug, server, database, config, test, build, merge, branch, release, prompt, \
 Если фраза продолжает предыдущее предложение из контекста, начни с многоточия (...).";
 
 /// MIDI note frequencies for beep sounds
-const BEEP_START_FREQ: f32 = 880.0;  // A5 - higher pitch for start
 const BEEP_STOP_FREQ: f32 = 440.0;   // A4 - lower pitch for stop
-const BEEP_START_DURATION_MS: u64 = 30;   // Very short - recording starts immediately
 const BEEP_STOP_DURATION_MS: u64 = 100;   // Normal length for end beep
 const BEEP_DEFAULT_VOLUME: f32 = 0.1;  // 10% volume (0.0 - 1.0)
 
@@ -1424,8 +1422,15 @@ fn count_chars_to_delete(text: &str) -> usize {
 // Cross-Platform Audio Recording
 // ============================================================================
 
-fn start_recording(samples: Arc<Mutex<Vec<f32>>>) -> Result<cpal::Stream, String> {
+/// Start a persistent audio stream that's always listening.
+/// Only writes to samples buffer when is_recording is true.
+/// This eliminates latency when starting recording - just flip the flag!
+fn start_recording_persistent(
+    samples: Arc<Mutex<Vec<f32>>>,
+    is_recording: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<cpal::Stream, String> {
     use cpal::SampleFormat;
+    use std::sync::atomic::Ordering;
 
     let host = cpal::default_host();
     let device = host.default_input_device()
@@ -1436,28 +1441,38 @@ fn start_recording(samples: Arc<Mutex<Vec<f32>>>) -> Result<cpal::Stream, String
 
     let channels = config.channels() as usize;
 
-    samples.lock().unwrap().clear();
-
     let err_fn = |err| eprintln!("Audio stream error: {}", err);
 
     let stream = match config.sample_format() {
-        SampleFormat::F32 => device.build_input_stream(
-            &config.into(),
-            move |data: &[f32], _| {
-                let mut s = samples.lock().unwrap();
-                for chunk in data.chunks(channels) {
-                    let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;
-                    s.push(mono);
-                }
-            },
-            err_fn,
-            None,
-        ),
+        SampleFormat::F32 => {
+            let is_rec = Arc::clone(&is_recording);
+            device.build_input_stream(
+                &config.into(),
+                move |data: &[f32], _| {
+                    // Check atomic flag - no lock, instant check
+                    if !is_rec.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let mut s = samples.lock().unwrap();
+                    for chunk in data.chunks(channels) {
+                        let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;
+                        s.push(mono);
+                    }
+                },
+                err_fn,
+                None,
+            )
+        }
         SampleFormat::I16 => {
             let samples_clone = Arc::clone(&samples);
+            let is_rec = Arc::clone(&is_recording);
             device.build_input_stream(
                 &config.into(),
                 move |data: &[i16], _| {
+                    // Check atomic flag - no lock, instant check
+                    if !is_rec.load(Ordering::Relaxed) {
+                        return;
+                    }
                     let mut s = samples_clone.lock().unwrap();
                     for chunk in data.chunks(channels) {
                         let mono: f32 = chunk.iter()
@@ -1738,10 +1753,6 @@ fn play_beep_blocking(frequency: f32, duration_ms: u64) {
     std::thread::sleep(Duration::from_millis(20));
 }
 
-fn play_start_beep() {
-    play_beep(BEEP_START_FREQ, BEEP_START_DURATION_MS);
-}
-
 fn play_stop_beep() {
     play_beep(BEEP_STOP_FREQ, BEEP_STOP_DURATION_MS);
 }
@@ -1768,25 +1779,33 @@ fn timestamp() -> String {
 
 #[cfg(feature = "whisper")]
 fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotkey: HotkeyType) {
-    use cpal::Stream;
     use std::thread;
+    use std::sync::atomic::AtomicBool;
 
     let whisper = Arc::new(whisper_ctx);
     let target_key = hotkey.to_rdev_key();
 
     let state: Arc<Mutex<RecordingState>> = Arc::new(Mutex::new(RecordingState::Idle));
     let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
-    let stream: Arc<Mutex<Option<Stream>>> = Arc::new(Mutex::new(None));
     let recording_start: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+
+    // Atomic flag for instant recording start - no lock needed
+    let is_recording_flag = Arc::new(AtomicBool::new(false));
 
     let vad: Arc<Mutex<VadPhraseDetector>> = Arc::new(Mutex::new(VadPhraseDetector::new()));
 
+    // Start audio stream ONCE at startup - always listening
+    let samples_for_stream = Arc::clone(&samples);
+    let is_recording_for_stream = Arc::clone(&is_recording_flag);
+    let _persistent_stream = start_recording_persistent(samples_for_stream, is_recording_for_stream)
+        .expect("Failed to start audio stream");
+
     let state_clone = Arc::clone(&state);
     let samples_clone = Arc::clone(&samples);
-    let stream_clone = Arc::clone(&stream);
     let recording_start_clone = Arc::clone(&recording_start);
     let whisper_clone = Arc::clone(&whisper);
     let vad_clone = Arc::clone(&vad);
+    let is_recording_clone = Arc::clone(&is_recording_flag);
 
     let last_phrase: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let last_phrase_for_vad = Arc::clone(&last_phrase);
@@ -1929,6 +1948,8 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
 
     let input_method_for_callback = input_method;
     let callback = move |event: Event| {
+        use std::sync::atomic::Ordering;
+
         match event.event_type {
             EventType::KeyPress(key) if key == target_key => {
                 let mut rec_state = state_clone.lock().unwrap();
@@ -1937,22 +1958,14 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                     vad_clone.lock().unwrap().reset();
                     samples_clone.lock().unwrap().clear();
 
-                    play_start_beep();
+                    // Set atomic flag FIRST - recording starts INSTANTLY
+                    // No stream creation delay - stream is already running!
+                    is_recording_clone.store(true, Ordering::Relaxed);
 
                     *recording_start_clone.lock().unwrap() = Some(Instant::now());
+                    *rec_state = RecordingState::Recording;
 
                     println!("[{}] Recording (VAD mode)...", timestamp());
-
-                    let samples_for_stream = Arc::clone(&samples_clone);
-                    match start_recording(samples_for_stream) {
-                        Ok(new_stream) => {
-                            *stream_clone.lock().unwrap() = Some(new_stream);
-                            *rec_state = RecordingState::Recording;
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to start recording: {}", e);
-                        }
-                    }
                 }
             }
 
@@ -1960,15 +1973,14 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                 let mut rec_state = state_clone.lock().unwrap();
 
                 if *rec_state == RecordingState::Recording {
+                    // Stop recording INSTANTLY via atomic flag
+                    is_recording_clone.store(false, Ordering::Relaxed);
+
                     let recording_duration = recording_start_clone.lock().unwrap()
                         .map(|start| start.elapsed())
                         .unwrap_or(Duration::ZERO);
 
                     play_stop_beep();
-
-                    if let Some(s) = stream_clone.lock().unwrap().take() {
-                        drop(s);
-                    }
 
                     *rec_state = RecordingState::Idle;
                     *recording_start_clone.lock().unwrap() = None;
