@@ -72,6 +72,7 @@ const PROGRAMMER_PROMPT: &str = "\
 Строй связные осмысленные предложения, избегай обрывочных фраз. \
 IT-термины пиши на английском: \
 Git, pull, push, commit, merge, branch, rebase, stash, checkout, clone, fetch, reset, diff, status, \
+pull request, merge request, code review, cherry-pick, squash, \
 Docker, container, image, Kubernetes, pod, deploy, CI/CD, pipeline, \
 API, REST, GraphQL, endpoint, request, response, callback, webhook, WebSocket, \
 frontend, backend, fullstack, server, client, database, cache, Redis, PostgreSQL, MongoDB, \
