@@ -1155,7 +1155,7 @@ fn load_whisper(model_path: &PathBuf) -> Result<whisper_rs::WhisperContext, Stri
 
 /// Minimum token duration in centiseconds (1 centisecond = 10ms)
 /// Tokens shorter than this are likely hallucinations
-const MIN_TOKEN_DURATION_CS: i64 = 2;  // 20ms
+const MIN_TOKEN_DURATION_CS: i64 = 1;  // 10ms
 
 #[cfg(feature = "whisper")]
 fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32], context: Option<&str>) -> Result<String, String> {
