@@ -66,12 +66,22 @@ const MODEL_SIZES: &[(&str, u64)] = &[
 
 /// Initial prompt for Whisper to help with code-switching (Russian + English tech terms)
 const PROGRAMMER_PROMPT: &str = "\
-Диктовка программиста на русском. Технические термины: \
-API, Git, Docker, pull request, commit, push, deploy, frontend, backend, \
-debug, server, database, config, test, build, merge, branch, release, prompt, \
-ввод, вывод, поле ввода, база данных, сервер, клиент, запрос, ответ, \
-сессия, токен, авторизация, аутентификация, endpoint, callback, webhook, промпт. \
-Если фраза продолжает предыдущее предложение из контекста, начни с многоточия (...).";
+Голосовые команды программиста для ИИ-ассистента на русском языке. \
+Человек диктует команды роботу (создай, добавь, исправь, открой, запусти, удали). \
+При неясности предпочитай повелительное наклонение. \
+Строй связные осмысленные предложения, избегай обрывочных фраз. \
+IT-термины пиши на английском: \
+Git, pull, push, commit, merge, branch, rebase, stash, checkout, clone, fetch, reset, diff, status, \
+Docker, container, image, Kubernetes, pod, deploy, CI/CD, pipeline, \
+API, REST, GraphQL, endpoint, request, response, callback, webhook, WebSocket, \
+frontend, backend, fullstack, server, client, database, cache, Redis, PostgreSQL, MongoDB, \
+React, Vue, Node, TypeScript, JavaScript, Python, Rust, Go, \
+npm, yarn, pnpm, pip, cargo, build, test, debug, lint, format, \
+config, env, token, session, auth, OAuth, JWT, \
+file, folder, directory, path, URL, JSON, XML, CSV, \
+function, class, method, variable, const, import, export, async, await, \
+prompt, model, LLM, Claude, Whisper, embedding. \
+Если фраза продолжает предыдущую мысль, начни с многоточия (...).";
 
 /// MIDI note frequencies for beep sounds
 const BEEP_STOP_FREQ: f32 = 440.0;   // A4 - lower pitch for stop
