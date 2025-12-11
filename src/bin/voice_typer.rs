@@ -14,7 +14,7 @@
 
 use std::env;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Write, Read as IoRead, Cursor};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -613,6 +613,165 @@ fn save_audio_segment(samples: &[f32], sample_rate: u32) -> Option<String> {
     None
 }
 
+// ============================================================================
+// OpenAI Transcription API Support
+// ============================================================================
+
+/// OpenAI API configuration loaded from .env file
+#[derive(Clone)]
+struct OpenAIConfig {
+    api_key: String,
+    api_url: String,
+    model: String,
+}
+
+impl OpenAIConfig {
+    /// Load OpenAI configuration from .env file and environment
+    fn load() -> Option<Self> {
+        // Try to load .env file from current directory or home
+        let _ = dotenvy::dotenv();
+
+        // Also try from data directory
+        let env_path = get_data_dir().join(".env");
+        if env_path.exists() {
+            let _ = dotenvy::from_path(&env_path);
+        }
+
+        let api_key = env::var("OPENAI_API_KEY").ok()?;
+        let api_url = env::var("OPENAI_API_URL")
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        let model = env::var("OPENAI_TRANSCRIPTION_MODEL")
+            .unwrap_or_else(|_| "gpt-4o-transcribe".to_string());
+
+        Some(Self { api_key, api_url, model })
+    }
+
+    /// Test connection to OpenAI API
+    fn test_connection(&self) -> bool {
+        let client = Client::new();
+        let url = format!("{}/models", self.api_url);
+
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .timeout(Duration::from_secs(5))
+            .send()
+        {
+            Ok(response) => response.status().is_success(),
+            Err(_) => false,
+        }
+    }
+}
+
+/// Transcribe audio using OpenAI API (gpt-4o-transcribe)
+fn transcribe_openai(config: &OpenAIConfig, samples: &[f32], sample_rate: u32, prompt: Option<&str>) -> Result<String, String> {
+    // Convert samples to WAV in memory
+    let mut wav_buffer = Cursor::new(Vec::new());
+    {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+
+        let mut writer = hound::WavWriter::new(&mut wav_buffer, spec)
+            .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
+
+        for &sample in samples {
+            let sample_i16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
+            writer.write_sample(sample_i16)
+                .map_err(|e| format!("Failed to write sample: {}", e))?;
+        }
+
+        writer.finalize()
+            .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
+    }
+
+    let wav_data = wav_buffer.into_inner();
+
+    // Build multipart form
+    let client = Client::new();
+    let url = format!("{}/audio/transcriptions", config.api_url);
+
+    // Create multipart boundary
+    let boundary = format!("----WebKitFormBoundary{}", chrono::Utc::now().timestamp_millis());
+
+    let mut body = Vec::new();
+
+    // Add file field
+    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n");
+    body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
+    body.extend_from_slice(&wav_data);
+    body.extend_from_slice(b"\r\n");
+
+    // Add model field
+    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"model\"\r\n\r\n");
+    body.extend_from_slice(config.model.as_bytes());
+    body.extend_from_slice(b"\r\n");
+
+    // Add language field (Russian with English terms)
+    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"language\"\r\n\r\n");
+    body.extend_from_slice(b"ru");
+    body.extend_from_slice(b"\r\n");
+
+    // Add prompt if provided
+    if let Some(p) = prompt {
+        body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"prompt\"\r\n\r\n");
+        body.extend_from_slice(p.as_bytes());
+        body.extend_from_slice(b"\r\n");
+    }
+
+    // End boundary
+    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("Content-Type", format!("multipart/form-data; boundary={}", boundary))
+        .body(body)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().unwrap_or_default();
+        return Err(format!("API error {}: {}", status, error_text));
+    }
+
+    // Parse JSON response
+    let response_text = response.text()
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+
+    // Simple JSON parsing for {"text": "..."}
+    if let Some(start) = response_text.find("\"text\"") {
+        if let Some(colon) = response_text[start..].find(':') {
+            let after_colon = &response_text[start + colon + 1..];
+            let trimmed = after_colon.trim_start();
+            if trimmed.starts_with('"') {
+                if let Some(end) = trimmed[1..].find('"') {
+                    let text = &trimmed[1..end + 1];
+                    // Unescape basic JSON escapes
+                    let unescaped = text
+                        .replace("\\n", "\n")
+                        .replace("\\r", "\r")
+                        .replace("\\t", "\t")
+                        .replace("\\\"", "\"")
+                        .replace("\\\\", "\\");
+                    return Ok(unescaped);
+                }
+            }
+        }
+    }
+
+    Err(format!("Failed to parse response: {}", response_text))
+}
+
 fn resolve_model_path(model: &str) -> PathBuf {
     for (name, filename) in MODEL_PRESETS {
         if model.eq_ignore_ascii_case(name) {
@@ -670,6 +829,9 @@ fn print_usage() {
     println!("  --silent, -q       Disable all beep sounds (same as --volume 0)");
     println!("  --clipboard        Use clipboard+paste instead of keyboard input");
     println!("  --keyboard         Use keyboard simulation (default)");
+    println!("  --openai           Use OpenAI gpt-4o-transcribe API instead of local Whisper");
+    println!("                     Requires OPENAI_API_KEY in .env file or environment");
+    println!("                     Optional: OPENAI_API_URL for custom endpoint (proxy)");
     println!("  --list-models      List available model presets");
     println!("  --list-keys        List available hotkey options");
     println!("  --version, -V      Show version information");
@@ -1014,6 +1176,7 @@ fn main() {
     let config = load_config();
     let args: Vec<String> = env::args().collect();
     let mut model_arg: Option<String> = config.model.clone();
+    let mut use_openai = false;
 
     let mut input_method = match config.input_method.as_deref() {
         Some("clipboard") => InputMethod::Clipboard,
@@ -1087,6 +1250,9 @@ fn main() {
             }
             "--keyboard" => {
                 input_method = InputMethod::Keyboard;
+            }
+            "--openai" => {
+                use_openai = true;
             }
             "--model" => {
                 if i + 1 < args.len() {
@@ -1191,6 +1357,38 @@ fn main() {
     println!("Input method: {}", input_mode_str);
     println!("Press Ctrl+C to exit\n");
 
+    // OpenAI mode: use gpt-4o-transcribe API
+    if use_openai {
+        match OpenAIConfig::load() {
+            Some(openai_config) => {
+                println!("Transcription: OpenAI API ({})", openai_config.model);
+                println!("API URL: {}", openai_config.api_url);
+
+                print!("Testing connection... ");
+                std::io::stdout().flush().ok();
+
+                if openai_config.test_connection() {
+                    println!("OK\n");
+                    run_openai(openai_config, input_method, hotkey);
+                } else {
+                    println!("FAILED");
+                    eprintln!("\nCannot connect to OpenAI API.");
+                    eprintln!("Check your OPENAI_API_KEY and OPENAI_API_URL.");
+                    std::process::exit(1);
+                }
+            }
+            None => {
+                eprintln!("OpenAI mode requires OPENAI_API_KEY.");
+                eprintln!("\nCreate a .env file with:");
+                eprintln!("  OPENAI_API_KEY=sk-...");
+                eprintln!("  OPENAI_API_URL=https://api.openai.com/v1  # or your proxy");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // Local Whisper mode
     let model_path = get_model_path(model_arg);
     if !model_path.exists() {
         eprintln!("Whisper model not found at: {}", model_path.display());
@@ -1908,7 +2106,177 @@ fn timestamp() -> String {
 }
 
 // ============================================================================
-// Main Run Loop (Cross-Platform)
+// Main Run Loop (OpenAI Mode)
+// ============================================================================
+
+fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: HotkeyType) {
+    use std::sync::atomic::AtomicBool;
+
+    let config = Arc::new(openai_config);
+    let target_key = hotkey.to_rdev_key();
+
+    let state: Arc<Mutex<RecordingState>> = Arc::new(Mutex::new(RecordingState::Idle));
+    let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+    let recording_start: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    let last_phrase: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+
+    let stream = start_audio_recording(Arc::clone(&samples), Arc::clone(&state));
+
+    let state_clone = Arc::clone(&state);
+    let samples_clone = Arc::clone(&samples);
+    let recording_start_clone = Arc::clone(&recording_start);
+    let last_phrase_clone = Arc::clone(&last_phrase);
+    let config_clone = Arc::clone(&config);
+
+    // Debounce state
+    let key_debounce = Arc::new(AtomicBool::new(false));
+    let key_debounce_clone = Arc::clone(&key_debounce);
+
+    let callback = move |event: Event| {
+        use std::sync::atomic::Ordering;
+
+        match event.event_type {
+            EventType::KeyPress(key) if key == target_key => {
+                if key_debounce_clone.swap(true, Ordering::SeqCst) {
+                    return; // Already pressed, ignore repeat
+                }
+
+                let mut rec_state = state_clone.lock().unwrap();
+                if *rec_state == RecordingState::Idle {
+                    *rec_state = RecordingState::Recording;
+                    samples_clone.lock().unwrap().clear();
+                    *recording_start_clone.lock().unwrap() = Some(Instant::now());
+
+                    println!("[{}] Recording...", timestamp());
+                    play_start_beep();
+                }
+            }
+            EventType::KeyRelease(key) if key == target_key => {
+                key_debounce_clone.store(false, Ordering::SeqCst);
+
+                let mut rec_state = state_clone.lock().unwrap();
+                if *rec_state == RecordingState::Recording {
+                    *rec_state = RecordingState::Idle;
+                    play_stop_beep();
+
+                    let recording_duration = recording_start_clone.lock().unwrap()
+                        .map(|start| start.elapsed())
+                        .unwrap_or(Duration::ZERO);
+
+                    if recording_duration < Duration::from_millis(MIN_RECORDING_MS) {
+                        println!("[{}] Recording too short, ignoring", timestamp());
+                        samples_clone.lock().unwrap().clear();
+                        return;
+                    }
+
+                    let phrase_samples: Vec<f32> = samples_clone.lock().unwrap().clone();
+                    let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
+
+                    if phrase_samples.is_empty() {
+                        println!("[{}] No audio captured", timestamp());
+                        return;
+                    }
+
+                    println!("[{}] Transcribing via OpenAI ({:.1}s)...", timestamp(), duration_secs);
+
+                    let context = {
+                        let ctx = last_phrase_clone.lock().unwrap();
+                        if ctx.is_empty() { None } else { Some(ctx.clone()) }
+                    };
+
+                    // Build prompt with context
+                    let prompt = if let Some(ref ctx_text) = context {
+                        let last_sentence = extract_last_sentence(ctx_text);
+                        format!("{} {}", PROGRAMMER_PROMPT, last_sentence)
+                    } else {
+                        PROGRAMMER_PROMPT.to_string()
+                    };
+
+                    // Resample to 16kHz for API
+                    let resampled = resample_48k_to_16k(&phrase_samples);
+
+                    match transcribe_openai(&config_clone, &resampled, WHISPER_SAMPLE_RATE, Some(&prompt)) {
+                        Ok(text) => {
+                            if text.trim().is_empty() {
+                                println!("[{}] (no speech detected)", timestamp());
+                            } else {
+                                // Save audio for analysis
+                                let audio_file = save_audio_segment(&phrase_samples, RECORDING_SAMPLE_RATE);
+
+                                let (processed_text, marker_continuation) = process_continuation(&text);
+                                let is_first_phrase = context.is_none();
+
+                                let is_continuation = if is_first_phrase {
+                                    false
+                                } else {
+                                    marker_continuation
+                                };
+
+                                if is_continuation {
+                                    let (chars_to_delete, deleted_chars) = {
+                                        let ctx = last_phrase_clone.lock().unwrap();
+                                        let count = count_chars_to_delete(&ctx);
+                                        let deleted: String = ctx.chars().rev().take(count).collect::<String>().chars().rev().collect();
+                                        (count, deleted)
+                                    };
+
+                                    println!("[{}] <{} (deleting \"{}\")", timestamp(), chars_to_delete, deleted_chars);
+
+                                    if let Err(e) = delete_chars(chars_to_delete) {
+                                        eprintln!("Failed to delete chars: {}", e);
+                                    }
+                                    let text_with_space = format!(" {} ", processed_text);
+                                    if let Err(e) = insert_text(&text_with_space, input_method) {
+                                        eprintln!("Failed to insert text: {}", e);
+                                    } else {
+                                        println!("[{}] +\"{}\"", timestamp(), processed_text);
+                                        log_transcription_with_audio(&text, &processed_text, true, audio_file.as_deref());
+                                    }
+                                    let mut ctx = last_phrase_clone.lock().unwrap();
+                                    let old_ctx = ctx.clone();
+                                    *ctx = format!("{} {}", remove_trailing_punctuation(&old_ctx), processed_text);
+                                } else {
+                                    let final_text = if is_first_phrase {
+                                        capitalize_first(&processed_text)
+                                    } else {
+                                        processed_text.clone()
+                                    };
+
+                                    let text_with_space = format!("{} ", final_text);
+                                    if let Err(e) = insert_text(&text_with_space, input_method) {
+                                        eprintln!("Failed to insert text: {}", e);
+                                    } else {
+                                        println!("[{}] \"{}\"", timestamp(), final_text);
+                                        log_transcription_with_audio(&text, &final_text, false, audio_file.as_deref());
+                                    }
+                                    *last_phrase_clone.lock().unwrap() = final_text;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[{}] Transcription error: {}", timestamp(), e);
+                        }
+                    }
+
+                    samples_clone.lock().unwrap().clear();
+                }
+            }
+            _ => {}
+        }
+    };
+
+    println!("[{}] Ready! Hold {} to record, release to transcribe.", timestamp(), hotkey.name());
+    println!("OpenAI mode: transcription via API (no VAD)");
+
+    if let Err(e) = listen(callback) {
+        eprintln!("Error: {:?}", e);
+    }
+
+    drop(stream);
+}
+
+// ============================================================================
+// Main Run Loop (Local Whisper)
 // ============================================================================
 
 #[cfg(feature = "whisper")]

@@ -40,6 +40,12 @@ indicatif = "0.17"  # Progress bar
 # Timestamps for logging
 chrono = "0.4"
 
+# Environment variables (.env file)
+dotenvy = "0.15"
+
+# Base64 encoding for audio
+base64 = "0.22"
+
 # Cross-platform audio and input
 cpal = "0.15"           # Audio recording (CoreAudio/ALSA/WASAPI)
 rdev = "0.5"            # Global hotkeys
