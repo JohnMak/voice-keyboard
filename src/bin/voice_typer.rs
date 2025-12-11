@@ -14,7 +14,7 @@
 
 use std::env;
 use std::fs::{self, File};
-use std::io::{Write, Read as IoRead, Cursor};
+use std::io::{Write, Cursor};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -1525,7 +1525,6 @@ fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32], context: Option
     Ok(text.trim().to_string())
 }
 
-#[cfg(feature = "whisper")]
 fn extract_last_sentence(text: &str) -> &str {
     let last_boundary = text.rfind(|c| c == '.' || c == '!' || c == '?');
 
@@ -1545,7 +1544,6 @@ fn extract_last_sentence(text: &str) -> &str {
     }
 }
 
-#[cfg(feature = "whisper")]
 fn process_continuation(text: &str) -> (String, bool) {
     let trimmed = text.trim();
 
@@ -1608,7 +1606,6 @@ fn is_duplicate_segment(new_text: &str, context: &str) -> bool {
     false
 }
 
-#[cfg(feature = "whisper")]
 fn remove_trailing_punctuation(text: &str) -> String {
     let trimmed = text.trim_end();
     trimmed.trim_end_matches(|c| c == '.' || c == '!' || c == '?' || c == '…').to_string()
@@ -1724,7 +1721,6 @@ fn is_duration_hallucination(text: &str, audio_duration_secs: f32) -> bool {
     false
 }
 
-#[cfg(feature = "whisper")]
 fn capitalize_first(text: &str) -> String {
     let mut chars = text.chars();
     match chars.next() {
@@ -1733,7 +1729,6 @@ fn capitalize_first(text: &str) -> String {
     }
 }
 
-#[cfg(feature = "whisper")]
 fn count_chars_to_delete(text: &str) -> usize {
     let trimmed = text.trim_end();
 
@@ -2116,7 +2111,7 @@ fn timestamp() -> String {
 // ============================================================================
 
 fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: HotkeyType) {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
 
     let config = Arc::new(openai_config);
     let target_key = hotkey.to_rdev_key();
