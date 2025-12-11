@@ -84,7 +84,7 @@ file, folder, directory, path, URL, JSON, XML, CSV, \
 function, class, method, variable, const, import, export, async, await, \
 prompt, model, LLM, Claude, Whisper, embedding. \
 ВАЖНО: Аудио разбито на части по паузам. Если часть продолжает предыдущую мысль — \
-начни с многоточия (...). Примеры: «...и потом сделай commit», «...который мы обсуждали».";
+начни с многоточия (...). Примеры: ...и потом сделай commit, ...который мы обсуждали.";
 
 /// MIDI note frequencies for beep sounds
 const BEEP_STOP_FREQ: f32 = 440.0;   // A4 - lower pitch for stop
@@ -1274,11 +1274,18 @@ fn extract_last_sentence(text: &str) -> &str {
 fn process_continuation(text: &str) -> (String, bool) {
     let trimmed = text.trim();
 
-    if trimmed.starts_with("...") {
-        let processed = trimmed.trim_start_matches("...").trim_start();
+    // Check for ellipsis with optional leading quote marks: «... „... "...
+    let without_quote = trimmed
+        .trim_start_matches('«')
+        .trim_start_matches('„')
+        .trim_start_matches('"')
+        .trim_start();
+
+    if without_quote.starts_with("...") {
+        let processed = without_quote.trim_start_matches("...").trim_start();
         (processed.to_string(), true)
-    } else if trimmed.starts_with("…") {
-        let processed = trimmed.trim_start_matches("…").trim_start();
+    } else if without_quote.starts_with("…") {
+        let processed = without_quote.trim_start_matches("…").trim_start();
         (processed.to_string(), true)
     } else {
         (trimmed.to_string(), false)
@@ -1288,6 +1295,41 @@ fn process_continuation(text: &str) -> (String, bool) {
 #[cfg(feature = "whisper")]
 #[allow(dead_code)]
 fn should_continue(_text: &str, _prev_context: &str) -> bool {
+    false
+}
+
+/// Check if new segment is a duplicate of existing context
+/// Returns true if the new text appears to be a re-transcription of already inserted text
+#[cfg(feature = "whisper")]
+fn is_duplicate_segment(new_text: &str, context: &str) -> bool {
+    let new_trimmed = new_text.trim();
+    let ctx_trimmed = context.trim();
+
+    if new_trimmed.is_empty() || ctx_trimmed.is_empty() {
+        return false;
+    }
+
+    // Exact match with end of context
+    if ctx_trimmed.ends_with(new_trimmed) {
+        println!("[FILTER] Duplicate segment (exact match): \"{}\"", new_trimmed);
+        return true;
+    }
+
+    // Check if context ends with significant portion of new text (>70% overlap)
+    let new_chars: Vec<char> = new_trimmed.chars().collect();
+    let min_overlap = (new_chars.len() as f32 * 0.7) as usize;
+
+    if min_overlap > 3 {
+        for start in 0..new_chars.len().saturating_sub(min_overlap) {
+            let suffix: String = new_chars[start..].iter().collect();
+            if ctx_trimmed.ends_with(&suffix) {
+                println!("[FILTER] Duplicate segment ({}% overlap): \"{}\"",
+                    (new_chars.len() - start) * 100 / new_chars.len(), new_trimmed);
+                return true;
+            }
+        }
+    }
+
     false
 }
 
@@ -1307,6 +1349,9 @@ const HALLUCINATION_PATTERNS: &[&str] = &[
     "Субтитры создавал", "Субтитры сделал", "Редактор субтитров",
     "ПОДПИШИСЬ НА КАНАЛ", "Подпишись на канал", "подпишись на канал",
     "Спасибо за просмотр", "спасибо за просмотр",
+    // TV series / movie cliffhanger phrases
+    "Продолжение следует", "продолжение следует",
+    "Конец первой части", "конец первой части",
     // English subtitle/transcription hallucinations
     "Amara.org", "amara.org",
     "transcribed by", "Transcribed by",
@@ -1314,6 +1359,7 @@ const HALLUCINATION_PATTERNS: &[&str] = &[
     "Thanks for watching", "thanks for watching",
     "Thank you for watching", "thank you for watching",
     "Please subscribe", "please subscribe",
+    "To be continued", "to be continued",
 ];
 
 /// Maximum audio duration (in seconds) to apply hallucination filtering
@@ -1901,6 +1947,13 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                             continue;
                         }
 
+                        // Check for duplicate segments (re-transcription of same audio)
+                        if let Some(ref ctx) = context {
+                            if is_duplicate_segment(&text, ctx) {
+                                continue;
+                            }
+                        }
+
                         if !text.is_empty() {
                             let (processed_text, marker_continuation) = process_continuation(&text);
                             let is_first_phrase = context.is_none();
@@ -2029,6 +2082,8 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                     // Already logged in is_hallucination
                                 } else if is_duration_hallucination(&text, duration_secs) {
                                     // Already logged
+                                } else if context.as_ref().map_or(false, |ctx| is_duplicate_segment(&text, ctx)) {
+                                    // Already logged in is_duplicate_segment
                                 } else if !text.is_empty() {
                                     let (processed_text, marker_continuation) = process_continuation(&text);
                                     let is_first_phrase = context.is_none();
