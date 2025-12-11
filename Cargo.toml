@@ -47,7 +47,7 @@ dotenvy = "0.15"
 base64 = "0.22"
 
 # Cross-platform audio and input
-cpal = "0.15"           # Audio recording (CoreAudio/ALSA/WASAPI)
+cpal = "0.16"           # Audio recording (CoreAudio/ALSA/WASAPI)
 rdev = "0.5"            # Global hotkeys
 enigo = "0.2"           # Keyboard simulation
 
