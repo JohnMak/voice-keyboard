@@ -79,11 +79,12 @@ API, REST, GraphQL, endpoint, request, response, callback, webhook, WebSocket, \
 frontend, backend, fullstack, server, client, database, cache, Redis, PostgreSQL, MongoDB, \
 React, Vue, Node, TypeScript, JavaScript, Python, Rust, Go, \
 npm, yarn, pnpm, pip, cargo, build, test, debug, lint, format, \
-config, env, token, session, auth, OAuth, JWT, \
+config, env, .env, token, session, auth, OAuth, JWT, \
 file, folder, directory, path, URL, JSON, XML, CSV, \
 function, class, method, variable, const, import, export, async, await, \
 prompt, model, LLM, Claude, Whisper, embedding. \
-Если фраза продолжает предыдущую мысль, начни с многоточия (...).";
+ВАЖНО: Аудио разбито на части по паузам. Если часть продолжает предыдущую мысль — \
+начни с многоточия (...). Примеры: «...и потом сделай commit», «...который мы обсуждали».";
 
 /// MIDI note frequencies for beep sounds
 const BEEP_STOP_FREQ: f32 = 440.0;   // A4 - lower pitch for stop
