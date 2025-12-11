@@ -538,6 +538,81 @@ fn get_models_dir() -> PathBuf {
     }
 }
 
+/// Get data directory for logs (cross-platform)
+fn get_data_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(appdata).join("voice-keyboard")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home).join(".local/share/voice-keyboard")
+    }
+}
+
+/// Log transcribed text to file for analysis
+/// Format: ISO timestamp | audio_file | raw whisper output | processed text | [cont]
+fn log_transcription(raw_text: &str, processed_text: &str, is_continuation: bool) {
+    log_transcription_with_audio(raw_text, processed_text, is_continuation, None);
+}
+
+/// Log transcribed text with optional audio file reference
+fn log_transcription_with_audio(raw_text: &str, processed_text: &str, is_continuation: bool, audio_file: Option<&str>) {
+    let log_path = get_data_dir().join("transcriptions.log");
+
+    // Ensure directory exists
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let cont_marker = if is_continuation { " [cont]" } else { "" };
+    let audio_ref = audio_file.unwrap_or("-");
+    let line = format!("{} | {} | {} | {}{}\n", timestamp, audio_ref, raw_text.trim(), processed_text.trim(), cont_marker);
+
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+/// Save audio samples to WAV file for debugging/analysis
+fn save_audio_segment(samples: &[f32], sample_rate: u32) -> Option<String> {
+    let audio_dir = get_data_dir().join("audio");
+
+    // Ensure directory exists
+    let _ = fs::create_dir_all(&audio_dir);
+
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
+    let filename = format!("{}.wav", timestamp);
+    let filepath = audio_dir.join(&filename);
+
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+
+    if let Ok(mut writer) = hound::WavWriter::create(&filepath, spec) {
+        for &sample in samples {
+            if writer.write_sample(sample).is_err() {
+                return None;
+            }
+        }
+        if writer.finalize().is_ok() {
+            return Some(filename);
+        }
+    }
+
+    None
+}
+
 fn resolve_model_path(model: &str) -> PathBuf {
     for (name, filename) in MODEL_PRESETS {
         if model.eq_ignore_ascii_case(name) {
@@ -1955,6 +2030,9 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                         }
 
                         if !text.is_empty() {
+                            // Save audio for analysis
+                            let audio_file = save_audio_segment(&phrase_samples, RECORDING_SAMPLE_RATE);
+
                             let (processed_text, marker_continuation) = process_continuation(&text);
                             let is_first_phrase = context.is_none();
 
@@ -1982,6 +2060,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                     eprintln!("Failed to insert text: {}", e);
                                 } else {
                                     println!("[{}] +\"{}\"", timestamp(), processed_text);
+                                    log_transcription_with_audio(&text, &processed_text, true, audio_file.as_deref());
                                 }
                                 let mut ctx = last_phrase_for_vad.lock().unwrap();
                                 let old_ctx = ctx.clone();
@@ -1999,6 +2078,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                     eprintln!("Failed to insert text: {}", e);
                                 } else {
                                     println!("[{}] \"{}\"", timestamp(), final_text);
+                                    log_transcription_with_audio(&text, &final_text, false, audio_file.as_deref());
                                 }
                                 *last_phrase_for_vad.lock().unwrap() = final_text;
                             }
@@ -2085,6 +2165,9 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                 } else if context.as_ref().map_or(false, |ctx| is_duplicate_segment(&text, ctx)) {
                                     // Already logged in is_duplicate_segment
                                 } else if !text.is_empty() {
+                                    // Save audio for analysis
+                                    let audio_file = save_audio_segment(&phrase_samples, RECORDING_SAMPLE_RATE);
+
                                     let (processed_text, marker_continuation) = process_continuation(&text);
                                     let is_first_phrase = context.is_none();
 
@@ -2112,6 +2195,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                             eprintln!("Failed to insert text: {}", e);
                                         } else {
                                             println!("[{}] +\"{}\"", timestamp(), processed_text);
+                                            log_transcription_with_audio(&text, &processed_text, true, audio_file.as_deref());
                                         }
                                     } else {
                                         let final_text = if is_first_phrase {
@@ -2125,6 +2209,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                             eprintln!("Failed to insert text: {}", e);
                                         } else {
                                             println!("[{}] \"{}\"", timestamp(), final_text);
+                                            log_transcription_with_audio(&text, &final_text, false, audio_file.as_deref());
                                         }
                                     }
                                 } else {
