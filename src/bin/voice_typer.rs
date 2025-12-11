@@ -87,6 +87,8 @@ prompt, model, LLM, Claude, Whisper, embedding. \
 начни с многоточия (...). Примеры: ...и потом сделай commit, ...который мы обсуждали.";
 
 /// MIDI note frequencies for beep sounds
+const BEEP_START_FREQ: f32 = 880.0;  // A5 - higher pitch for start
+const BEEP_START_DURATION_MS: u64 = 50;   // Short chirp for start
 const BEEP_STOP_FREQ: f32 = 440.0;   // A4 - lower pitch for stop
 const BEEP_STOP_DURATION_MS: u64 = 100;   // Normal length for end beep
 const BEEP_DEFAULT_VOLUME: f32 = 0.1;  // 10% volume (0.0 - 1.0)
@@ -2085,6 +2087,10 @@ fn play_beep_blocking(frequency: f32, duration_ms: u64) {
     std::thread::sleep(Duration::from_millis(20));
 }
 
+fn play_start_beep() {
+    play_beep(BEEP_START_FREQ, BEEP_START_DURATION_MS);
+}
+
 fn play_stop_beep() {
     play_beep(BEEP_STOP_FREQ, BEEP_STOP_DURATION_MS);
 }
@@ -2110,19 +2116,22 @@ fn timestamp() -> String {
 // ============================================================================
 
 fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: HotkeyType) {
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let config = Arc::new(openai_config);
     let target_key = hotkey.to_rdev_key();
 
-    let state: Arc<Mutex<RecordingState>> = Arc::new(Mutex::new(RecordingState::Idle));
     let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
     let recording_start: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let last_phrase: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 
-    let stream = start_audio_recording(Arc::clone(&samples), Arc::clone(&state));
+    // Atomic flag for recording state - used by audio stream
+    let is_recording = Arc::new(AtomicBool::new(false));
 
-    let state_clone = Arc::clone(&state);
+    let stream = start_recording_persistent(Arc::clone(&samples), Arc::clone(&is_recording))
+        .expect("Failed to start audio recording");
+
+    let is_recording_clone = Arc::clone(&is_recording);
     let samples_clone = Arc::clone(&samples);
     let recording_start_clone = Arc::clone(&recording_start);
     let last_phrase_clone = Arc::clone(&last_phrase);
@@ -2141,11 +2150,11 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                     return; // Already pressed, ignore repeat
                 }
 
-                let mut rec_state = state_clone.lock().unwrap();
-                if *rec_state == RecordingState::Idle {
-                    *rec_state = RecordingState::Recording;
+                // Check if not already recording
+                if !is_recording_clone.load(Ordering::SeqCst) {
                     samples_clone.lock().unwrap().clear();
                     *recording_start_clone.lock().unwrap() = Some(Instant::now());
+                    is_recording_clone.store(true, Ordering::SeqCst);
 
                     println!("[{}] Recording...", timestamp());
                     play_start_beep();
@@ -2154,9 +2163,9 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
             EventType::KeyRelease(key) if key == target_key => {
                 key_debounce_clone.store(false, Ordering::SeqCst);
 
-                let mut rec_state = state_clone.lock().unwrap();
-                if *rec_state == RecordingState::Recording {
-                    *rec_state = RecordingState::Idle;
+                // Check if currently recording
+                if is_recording_clone.load(Ordering::SeqCst) {
+                    is_recording_clone.store(false, Ordering::SeqCst);
                     play_stop_beep();
 
                     let recording_duration = recording_start_clone.lock().unwrap()
