@@ -670,31 +670,16 @@ impl OpenAIConfig {
 }
 
 /// Transcribe audio using OpenAI API (gpt-4o-transcribe)
-fn transcribe_openai(config: &OpenAIConfig, samples: &[f32], sample_rate: u32, prompt: Option<&str>) -> Result<String, String> {
-    // Convert samples to WAV in memory
-    let mut wav_buffer = Cursor::new(Vec::new());
-    {
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
+fn transcribe_openai(config: &OpenAIConfig, samples: &[f32], _sample_rate: u32, prompt: Option<&str>) -> Result<String, String> {
+    // Convert f32 samples to i16 for OGG/Opus encoding
+    let samples_i16: Vec<i16> = samples.iter()
+        .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+        .collect();
 
-        let mut writer = hound::WavWriter::new(&mut wav_buffer, spec)
-            .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
-
-        for &sample in samples {
-            let sample_i16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
-            writer.write_sample(sample_i16)
-                .map_err(|e| format!("Failed to write sample: {}", e))?;
-        }
-
-        writer.finalize()
-            .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
-    }
-
-    let wav_data = wav_buffer.into_inner();
+    // Encode as OGG/Opus (16kHz mono) - much smaller than WAV
+    // ogg-opus expects 16kHz input (which we already have after resampling)
+    let ogg_data = ogg_opus::encode::<16000, 1>(&samples_i16)
+        .map_err(|e| format!("Failed to encode OGG/Opus: {:?}", e))?;
 
     // Build multipart form
     let client = Client::new();
@@ -705,11 +690,11 @@ fn transcribe_openai(config: &OpenAIConfig, samples: &[f32], sample_rate: u32, p
 
     let mut body = Vec::new();
 
-    // Add file field
+    // Add file field (OGG/Opus format)
     body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-    body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n");
-    body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
-    body.extend_from_slice(&wav_data);
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.ogg\"\r\n");
+    body.extend_from_slice(b"Content-Type: audio/ogg\r\n\r\n");
+    body.extend_from_slice(&ogg_data);
     body.extend_from_slice(b"\r\n");
 
     // Add model field
