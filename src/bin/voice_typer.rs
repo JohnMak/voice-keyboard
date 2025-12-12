@@ -89,26 +89,8 @@ prompt, model, LLM, Claude, Whisper, embedding. \
 начни с многоточия (...). Примеры: ...и потом сделай commit, ...который мы обсуждали.";
 
 // ============================================================================
-// Transcriber Trait - unified interface for Whisper and OpenAI backends
+// Audio feedback and constants
 // ============================================================================
-
-/// Result of transcription
-struct TranscriptionResult {
-    text: String,
-}
-
-/// Unified transcription interface
-trait Transcriber: Send + Sync {
-    /// Transcribe audio samples (16kHz, mono, f32)
-    fn transcribe(
-        &self,
-        samples: &[f32],
-        context: Option<&str>,
-    ) -> Result<TranscriptionResult, String>;
-
-    /// Name of the backend for logging
-    fn name(&self) -> &'static str;
-}
 
 /// MIDI note frequencies for beep sounds
 #[cfg(feature = "whisper")]
@@ -717,70 +699,6 @@ impl OpenAIConfig {
             Ok(response) => response.status().is_success(),
             Err(_) => false,
         }
-    }
-}
-
-/// OpenAI transcription backend
-struct OpenAITranscriber {
-    config: OpenAIConfig,
-}
-
-impl OpenAITranscriber {
-    fn new(config: OpenAIConfig) -> Self {
-        Self { config }
-    }
-}
-
-impl Transcriber for OpenAITranscriber {
-    fn transcribe(
-        &self,
-        samples: &[f32],
-        context: Option<&str>,
-    ) -> Result<TranscriptionResult, String> {
-        // Build prompt with context
-        let prompt = if let Some(ctx_text) = context {
-            let last_sentence = extract_last_sentence(ctx_text);
-            format!("{} {}", PROGRAMMER_PROMPT, last_sentence)
-        } else {
-            PROGRAMMER_PROMPT.to_string()
-        };
-
-        let text =
-            transcribe_openai_internal(&self.config, samples, WHISPER_SAMPLE_RATE, Some(&prompt))?;
-        Ok(TranscriptionResult { text })
-    }
-
-    fn name(&self) -> &'static str {
-        "OpenAI"
-    }
-}
-
-/// Whisper transcription backend (local)
-#[cfg(feature = "whisper")]
-struct WhisperTranscriber {
-    ctx: Arc<whisper_rs::WhisperContext>,
-}
-
-#[cfg(feature = "whisper")]
-impl WhisperTranscriber {
-    fn new(ctx: whisper_rs::WhisperContext) -> Self {
-        Self { ctx: Arc::new(ctx) }
-    }
-}
-
-#[cfg(feature = "whisper")]
-impl Transcriber for WhisperTranscriber {
-    fn transcribe(
-        &self,
-        samples: &[f32],
-        context: Option<&str>,
-    ) -> Result<TranscriptionResult, String> {
-        let text = transcribe_whisper_internal(&self.ctx, samples, context)?;
-        Ok(TranscriptionResult { text })
-    }
-
-    fn name(&self) -> &'static str {
-        "Whisper"
     }
 }
 
