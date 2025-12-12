@@ -87,7 +87,9 @@ prompt, model, LLM, Claude, Whisper, embedding. \
 начни с многоточия (...). Примеры: ...и потом сделай commit, ...который мы обсуждали.";
 
 /// MIDI note frequencies for beep sounds
+#[cfg(feature = "whisper")]
 const BEEP_START_FREQ: f32 = 880.0;  // A5 - higher pitch for start
+#[cfg(feature = "whisper")]
 const BEEP_START_DURATION_MS: u64 = 50;   // Short chirp for start
 const BEEP_STOP_FREQ: f32 = 440.0;   // A4 - lower pitch for stop
 const BEEP_STOP_DURATION_MS: u64 = 100;   // Normal length for end beep
@@ -108,14 +110,21 @@ fn set_beep_volume(volume: f32) {
 const RECORDING_SAMPLE_RATE: u32 = 48000;
 
 /// VAD (Voice Activity Detection) settings
+#[cfg(feature = "whisper")]
 const VAD_SILENCE_MS: u64 = 350;
+#[cfg(feature = "whisper")]
 const VAD_MIN_SPEECH_MS: u64 = 500;
+#[cfg(feature = "whisper")]
 const VAD_WINDOW_MS: u64 = 30;
+#[cfg(feature = "whisper")]
 const VAD_ENERGY_THRESHOLD: f32 = 0.001;
+#[cfg(feature = "whisper")]
 const VAD_VOICE_RATIO_THRESHOLD: f32 = 0.15;
+#[cfg(feature = "whisper")]
 const VAD_SPEECH_CONFIRM_WINDOWS: usize = 2;
 
 /// Recording state
+#[cfg(feature = "whisper")]
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum RecordingState {
     Idle,
@@ -554,13 +563,8 @@ fn get_data_dir() -> PathBuf {
     }
 }
 
-/// Log transcribed text to file for analysis
-/// Format: ISO timestamp | audio_file | raw whisper output | processed text | [cont]
-fn log_transcription(raw_text: &str, processed_text: &str, is_continuation: bool) {
-    log_transcription_with_audio(raw_text, processed_text, is_continuation, None);
-}
-
 /// Log transcribed text with optional audio file reference
+/// Format: ISO timestamp | audio_file | raw whisper output | processed text | [cont]
 fn log_transcription_with_audio(raw_text: &str, processed_text: &str, is_continuation: bool, audio_file: Option<&str>) {
     let log_path = get_data_dir().join("transcriptions.log");
 
@@ -1441,6 +1445,7 @@ fn load_whisper(model_path: &PathBuf) -> Result<whisper_rs::WhisperContext, Stri
 
 /// Minimum token duration in centiseconds (1 centisecond = 10ms)
 /// Tokens with duration 0 are likely hallucinations (t0 == t1)
+#[cfg(feature = "whisper")]
 const MIN_TOKEN_DURATION_CS: i64 = 0;  // Only filter tokens with exactly 0 duration
 
 #[cfg(feature = "whisper")]
@@ -1615,6 +1620,7 @@ fn remove_trailing_punctuation(text: &str) -> String {
 // Hallucination Detection
 // ============================================================================
 
+#[cfg(feature = "whisper")]
 const HALLUCINATION_PATTERNS: &[&str] = &[
     // Russian YouTuber/subtitle hallucinations (from Whisper training data)
     "DimaTorzok",
@@ -1636,8 +1642,10 @@ const HALLUCINATION_PATTERNS: &[&str] = &[
 
 /// Maximum audio duration (in seconds) to apply hallucination filtering
 /// Longer segments are unlikely to be pure hallucinations
+#[cfg(feature = "whisper")]
 const HALLUCINATION_MAX_DURATION_SECS: f32 = 1.5;
 
+#[cfg(feature = "whisper")]
 const HALLUCINATION_EXACT: &[&str] = &[
     // Filler sounds that Whisper hallucinates from silence/noise
     "У|м", "У|эм", "Уэм", "у|м", "Эм", "эм",
@@ -2082,6 +2090,7 @@ fn play_beep_blocking(frequency: f32, duration_ms: u64) {
     std::thread::sleep(Duration::from_millis(20));
 }
 
+#[cfg(feature = "whisper")]
 fn play_start_beep() {
     play_beep(BEEP_START_FREQ, BEEP_START_DURATION_MS);
 }
@@ -2152,7 +2161,7 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                     is_recording_clone.store(true, Ordering::SeqCst);
 
                     println!("[{}] Recording...", timestamp());
-                    play_start_beep();
+                    // No start beep - it would be captured in the recording
                 }
             }
             EventType::KeyRelease(key) if key == target_key => {
