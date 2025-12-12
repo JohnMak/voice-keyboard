@@ -671,28 +671,48 @@ impl OpenAIConfig {
 
 /// Transcribe audio using OpenAI API (gpt-4o-transcribe)
 fn transcribe_openai(config: &OpenAIConfig, samples: &[f32], sample_rate: u32, prompt: Option<&str>) -> Result<String, String> {
-    use flacenc::component::BitRepr;
+    // Encode audio data
+    #[cfg(feature = "opus")]
+    let (audio_data, filename, content_type) = {
+        // Convert f32 samples to i16 for OGG/Opus encoding
+        let samples_i16: Vec<i16> = samples.iter()
+            .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+            .collect();
 
-    // Convert f32 samples to i32 for FLAC encoding
-    let samples_i32: Vec<i32> = samples.iter()
-        .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i32)
-        .collect();
+        // Encode as OGG/Opus (16kHz mono) - ~20x smaller than WAV
+        let ogg_data = ogg_opus::encode::<16000, 1>(&samples_i16)
+            .map_err(|e| format!("Failed to encode OGG/Opus: {:?}", e))?;
 
-    // Encode as FLAC (lossless, ~50% smaller than WAV, pure Rust)
-    let flac_config = flacenc::config::Encoder::default()
-        .into_verified()
-        .map_err(|e| format!("FLAC config error: {:?}", e))?;
+        (ogg_data, "audio.ogg", "audio/ogg")
+    };
 
-    let source = flacenc::source::MemSource::from_samples(
-        &samples_i32, 1, 16, sample_rate as usize);
+    #[cfg(not(feature = "opus"))]
+    let (audio_data, filename, content_type) = {
+        // Fallback to WAV (larger but no native dependencies)
+        let mut wav_buffer = Cursor::new(Vec::new());
+        {
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
 
-    let flac_stream = flacenc::encode_with_fixed_block_size(
-        &flac_config, source, flac_config.block_size
-    ).map_err(|e| format!("Failed to encode FLAC: {:?}", e))?;
+            let mut writer = hound::WavWriter::new(&mut wav_buffer, spec)
+                .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
 
-    let mut sink = flacenc::bitsink::ByteSink::new();
-    flac_stream.write(&mut sink);
-    let flac_data = sink.into_inner();
+            for &sample in samples {
+                let sample_i16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                writer.write_sample(sample_i16)
+                    .map_err(|e| format!("Failed to write sample: {}", e))?;
+            }
+
+            writer.finalize()
+                .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
+        }
+
+        (wav_buffer.into_inner(), "audio.wav", "audio/wav")
+    };
 
     // Build multipart form
     let client = Client::new();
@@ -703,11 +723,11 @@ fn transcribe_openai(config: &OpenAIConfig, samples: &[f32], sample_rate: u32, p
 
     let mut body = Vec::new();
 
-    // Add file field (FLAC format)
+    // Add file field
     body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-    body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.flac\"\r\n");
-    body.extend_from_slice(b"Content-Type: audio/flac\r\n\r\n");
-    body.extend_from_slice(&flac_data);
+    body.extend_from_slice(format!("Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n", filename).as_bytes());
+    body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", content_type).as_bytes());
+    body.extend_from_slice(&audio_data);
     body.extend_from_slice(b"\r\n");
 
     // Add model field
@@ -2277,7 +2297,22 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     };
 
     println!("[{}] Ready! Hold {} to record, release to transcribe.", timestamp(), hotkey.name());
-    println!("OpenAI mode: transcription via API (no VAD)");
+    #[cfg(feature = "opus")]
+    println!("OpenAI mode: OGG/Opus compression enabled");
+    #[cfg(not(feature = "opus"))]
+    {
+        println!("OpenAI mode: using WAV format (larger files)");
+        println!("");
+        println!("TIP: Enable OGG/Opus compression for ~20x smaller uploads:");
+        #[cfg(target_os = "macos")]
+        println!("  1. Install: brew install opus autoconf automake libtool");
+        #[cfg(target_os = "linux")]
+        println!("  1. Install: sudo apt install libopus-dev pkg-config");
+        #[cfg(target_os = "windows")]
+        println!("  1. Install: vcpkg install opus");
+        println!("  2. Rebuild: cargo build --features opus");
+        println!("");
+    }
 
     if let Err(e) = listen(callback) {
         eprintln!("Error: {:?}", e);

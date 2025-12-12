@@ -14,8 +14,8 @@ whisper-rs = { version = "0.15", optional = true }
 # Audio - WAV file handling (cross-platform)
 hound = "3.5"
 
-# Audio - FLAC encoding for API uploads (pure Rust, no native deps)
-flacenc = { version = "0.5", default-features = false }
+# Audio - OGG/Opus encoding for API uploads (optional, requires libopus)
+ogg-opus = { version = "0.1", optional = true }
 
 # Clipboard (cross-platform)
 arboard = "3"
@@ -85,6 +85,7 @@ default = []
 whisper = ["whisper-rs"]
 coreml = ["whisper-rs/coreml"]
 metal = ["whisper-rs/metal"]
+opus = ["ogg-opus"]  # OGG/Opus encoding (requires libopus: brew install opus)
 
 [profile.release]
 lto = true
