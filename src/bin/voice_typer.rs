@@ -670,16 +670,29 @@ impl OpenAIConfig {
 }
 
 /// Transcribe audio using OpenAI API (gpt-4o-transcribe)
-fn transcribe_openai(config: &OpenAIConfig, samples: &[f32], _sample_rate: u32, prompt: Option<&str>) -> Result<String, String> {
-    // Convert f32 samples to i16 for OGG/Opus encoding
-    let samples_i16: Vec<i16> = samples.iter()
-        .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+fn transcribe_openai(config: &OpenAIConfig, samples: &[f32], sample_rate: u32, prompt: Option<&str>) -> Result<String, String> {
+    use flacenc::component::BitRepr;
+
+    // Convert f32 samples to i32 for FLAC encoding
+    let samples_i32: Vec<i32> = samples.iter()
+        .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i32)
         .collect();
 
-    // Encode as OGG/Opus (16kHz mono) - much smaller than WAV
-    // ogg-opus expects 16kHz input (which we already have after resampling)
-    let ogg_data = ogg_opus::encode::<16000, 1>(&samples_i16)
-        .map_err(|e| format!("Failed to encode OGG/Opus: {:?}", e))?;
+    // Encode as FLAC (lossless, ~50% smaller than WAV, pure Rust)
+    let flac_config = flacenc::config::Encoder::default()
+        .into_verified()
+        .map_err(|e| format!("FLAC config error: {:?}", e))?;
+
+    let source = flacenc::source::MemSource::from_samples(
+        &samples_i32, 1, 16, sample_rate as usize);
+
+    let flac_stream = flacenc::encode_with_fixed_block_size(
+        &flac_config, source, flac_config.block_size
+    ).map_err(|e| format!("Failed to encode FLAC: {:?}", e))?;
+
+    let mut sink = flacenc::bitsink::ByteSink::new();
+    flac_stream.write(&mut sink);
+    let flac_data = sink.into_inner();
 
     // Build multipart form
     let client = Client::new();
@@ -690,11 +703,11 @@ fn transcribe_openai(config: &OpenAIConfig, samples: &[f32], _sample_rate: u32, 
 
     let mut body = Vec::new();
 
-    // Add file field (OGG/Opus format)
+    // Add file field (FLAC format)
     body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-    body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.ogg\"\r\n");
-    body.extend_from_slice(b"Content-Type: audio/ogg\r\n\r\n");
-    body.extend_from_slice(&ogg_data);
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.flac\"\r\n");
+    body.extend_from_slice(b"Content-Type: audio/flac\r\n\r\n");
+    body.extend_from_slice(&flac_data);
     body.extend_from_slice(b"\r\n");
 
     // Add model field

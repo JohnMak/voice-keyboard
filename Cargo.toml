@@ -14,8 +14,8 @@ whisper-rs = { version = "0.15", optional = true }
 # Audio - WAV file handling (cross-platform)
 hound = "3.5"
 
-# Audio - OGG/Opus encoding for API uploads
-ogg-opus = "0.1"
+# Audio - FLAC encoding for API uploads (pure Rust, no native deps)
+flacenc = { version = "0.5", default-features = false }
 
 # Clipboard (cross-platform)
 arboard = "3"
