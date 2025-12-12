@@ -115,10 +115,9 @@ impl Transcriber {
         }
 
         // Create state and run inference
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| VoiceKeyboardError::Transcription(format!("Failed to create state: {e}")))?;
+        let mut state = self.ctx.create_state().map_err(|e| {
+            VoiceKeyboardError::Transcription(format!("Failed to create state: {e}"))
+        })?;
 
         state
             .full(params, samples)
@@ -167,7 +166,10 @@ mod tests {
     #[test]
     fn test_model_size_filename() {
         assert_eq!(ModelSize::Tiny.filename(), "ggml-tiny.bin");
-        assert_eq!(ModelSize::LargeV3Turbo.filename(), "ggml-large-v3-turbo.bin");
+        assert_eq!(
+            ModelSize::LargeV3Turbo.filename(),
+            "ggml-large-v3-turbo.bin"
+        );
     }
 
     #[test]

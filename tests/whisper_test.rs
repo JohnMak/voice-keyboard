@@ -17,21 +17,21 @@ mod tests {
         let reader = hound::WavReader::open(path).expect("Failed to open WAV file");
         let spec = reader.spec();
 
-        println!("WAV spec: {} Hz, {} channels, {} bits",
-            spec.sample_rate, spec.channels, spec.bits_per_sample);
+        println!(
+            "WAV spec: {} Hz, {} channels, {} bits",
+            spec.sample_rate, spec.channels, spec.bits_per_sample
+        );
 
         let samples: Vec<f32> = match spec.sample_format {
-            hound::SampleFormat::Int => {
-                reader.into_samples::<i16>()
-                    .filter_map(|s| s.ok())
-                    .map(|s| s as f32 / i16::MAX as f32)
-                    .collect()
-            }
-            hound::SampleFormat::Float => {
-                reader.into_samples::<f32>()
-                    .filter_map(|s| s.ok())
-                    .collect()
-            }
+            hound::SampleFormat::Int => reader
+                .into_samples::<i16>()
+                .filter_map(|s| s.ok())
+                .map(|s| s as f32 / i16::MAX as f32)
+                .collect(),
+            hound::SampleFormat::Float => reader
+                .into_samples::<f32>()
+                .filter_map(|s| s.ok())
+                .collect(),
         };
 
         // Convert to mono if stereo
@@ -117,7 +117,10 @@ mod tests {
 
         let test_wav = PathBuf::from("test_data/english_test.wav");
         if !test_wav.exists() {
-            eprintln!("Skipping test: test file not found at {}", test_wav.display());
+            eprintln!(
+                "Skipping test: test file not found at {}",
+                test_wav.display()
+            );
             return;
         }
 
@@ -128,7 +131,11 @@ mod tests {
 
         println!("Loading audio...");
         let samples = load_wav(test_wav.to_str().unwrap());
-        println!("Loaded {} samples ({:.1}s at 16kHz)", samples.len(), samples.len() as f32 / 16000.0);
+        println!(
+            "Loaded {} samples ({:.1}s at 16kHz)",
+            samples.len(),
+            samples.len() as f32 / 16000.0
+        );
 
         println!("Transcribing...");
         let result = transcribe(&ctx, &samples);
@@ -223,7 +230,10 @@ mod tests {
 
         let test_wav = PathBuf::from("test_data/russian_speech_10s.wav");
         if !test_wav.exists() {
-            eprintln!("Skipping test: test file not found at {}", test_wav.display());
+            eprintln!(
+                "Skipping test: test file not found at {}",
+                test_wav.display()
+            );
             return;
         }
 
@@ -234,7 +244,11 @@ mod tests {
 
         println!("Loading Russian audio...");
         let samples = load_wav(test_wav.to_str().unwrap());
-        println!("Loaded {} samples ({:.1}s at 16kHz)", samples.len(), samples.len() as f32 / 16000.0);
+        println!(
+            "Loaded {} samples ({:.1}s at 16kHz)",
+            samples.len(),
+            samples.len() as f32 / 16000.0
+        );
 
         println!("Transcribing Russian...");
         let result = transcribe_russian(&ctx, &samples);
@@ -261,7 +275,10 @@ mod tests {
 
         let test_wav = PathBuf::from("test_data/russian_speech_30s.wav");
         if !test_wav.exists() {
-            eprintln!("Skipping test: test file not found at {}", test_wav.display());
+            eprintln!(
+                "Skipping test: test file not found at {}",
+                test_wav.display()
+            );
             return;
         }
 
@@ -272,7 +289,11 @@ mod tests {
 
         println!("Loading Russian audio (30s)...");
         let samples = load_wav(test_wav.to_str().unwrap());
-        println!("Loaded {} samples ({:.1}s at 16kHz)", samples.len(), samples.len() as f32 / 16000.0);
+        println!(
+            "Loaded {} samples ({:.1}s at 16kHz)",
+            samples.len(),
+            samples.len() as f32 / 16000.0
+        );
 
         println!("Transcribing Russian...");
         let start = std::time::Instant::now();
@@ -352,7 +373,8 @@ mod tests {
                     self.silent_windows += 1;
 
                     if self.silent_windows >= self.silence_windows_threshold {
-                        let phrase_end = window_start - (self.silent_windows - 1) * self.window_samples;
+                        let phrase_end =
+                            window_start - (self.silent_windows - 1) * self.window_samples;
                         let phrase_len = phrase_end.saturating_sub(self.phrase_start);
 
                         if phrase_len >= self.min_speech_windows * self.window_samples {
@@ -404,7 +426,10 @@ mod tests {
 
         let test_wav = PathBuf::from("test_data/russian_speech_30s.wav");
         if !test_wav.exists() {
-            eprintln!("Skipping test: test file not found at {}", test_wav.display());
+            eprintln!(
+                "Skipping test: test file not found at {}",
+                test_wav.display()
+            );
             return;
         }
 
@@ -415,7 +440,11 @@ mod tests {
 
         println!("Loading Russian audio (30s)...");
         let samples = load_wav(test_wav.to_str().unwrap());
-        println!("Loaded {} samples ({:.1}s at 16kHz)", samples.len(), samples.len() as f32 / 16000.0);
+        println!(
+            "Loaded {} samples ({:.1}s at 16kHz)",
+            samples.len(),
+            samples.len() as f32 / 16000.0
+        );
 
         // Use VAD to detect phrases
         let mut vad = VadPhraseDetector::new();
@@ -438,7 +467,12 @@ mod tests {
         let mut full_text = String::new();
         for (i, phrase) in phrases.iter().enumerate() {
             let duration = phrase.len() as f32 / SAMPLE_RATE as f32;
-            println!("Phrase {}: {:.1}s ({} samples)", i + 1, duration, phrase.len());
+            println!(
+                "Phrase {}: {:.1}s ({} samples)",
+                i + 1,
+                duration,
+                phrase.len()
+            );
 
             let text = transcribe_russian(&ctx, phrase);
             println!("  Text: \"{}\"", text);
@@ -475,7 +509,10 @@ mod tests {
 
         let test_wav = PathBuf::from("test_data/russian_speech_60s.wav");
         if !test_wav.exists() {
-            eprintln!("Skipping test: test file not found at {}", test_wav.display());
+            eprintln!(
+                "Skipping test: test file not found at {}",
+                test_wav.display()
+            );
             return;
         }
 
@@ -486,7 +523,11 @@ mod tests {
 
         println!("Loading Russian audio (60s)...");
         let samples = load_wav(test_wav.to_str().unwrap());
-        println!("Loaded {} samples ({:.1}s at 16kHz)", samples.len(), samples.len() as f32 / 16000.0);
+        println!(
+            "Loaded {} samples ({:.1}s at 16kHz)",
+            samples.len(),
+            samples.len() as f32 / 16000.0
+        );
 
         // Use VAD to detect phrases
         let mut vad = VadPhraseDetector::new();
@@ -504,7 +545,11 @@ mod tests {
         }
         let total_vad_time = vad_start.elapsed();
 
-        println!("VAD detected {} phrases in {:?}", phrases.len(), total_vad_time);
+        println!(
+            "VAD detected {} phrases in {:?}",
+            phrases.len(),
+            total_vad_time
+        );
 
         // Transcribe each phrase and measure time
         let mut full_text = String::new();
@@ -518,7 +563,13 @@ mod tests {
             let elapsed = start.elapsed();
             total_transcribe_time += elapsed;
 
-            println!("Phrase {}: {:.1}s -> {:?} -> \"{}\"", i + 1, duration, elapsed, text);
+            println!(
+                "Phrase {}: {:.1}s -> {:?} -> \"{}\"",
+                i + 1,
+                duration,
+                elapsed,
+                text
+            );
 
             if !text.is_empty() {
                 if !full_text.is_empty() {
@@ -548,5 +599,7 @@ mod tests {
 #[cfg(not(feature = "whisper"))]
 fn main() {
     eprintln!("Tests require 'whisper' feature. Run with:");
-    eprintln!("  MODEL_PATH=./models/ggml-tiny.bin cargo test --test whisper_test --features whisper");
+    eprintln!(
+        "  MODEL_PATH=./models/ggml-tiny.bin cargo test --test whisper_test --features whisper"
+    );
 }

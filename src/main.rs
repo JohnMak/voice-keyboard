@@ -134,7 +134,10 @@ async fn run_app() -> Result<()> {
             config.model_path.display()
         );
         eprintln!("Please download a model:");
-        eprintln!("  1. Create models directory: mkdir -p {:?}", Config::models_dir()?);
+        eprintln!(
+            "  1. Create models directory: mkdir -p {:?}",
+            Config::models_dir()?
+        );
         eprintln!("  2. Download model from: https://huggingface.co/ggerganov/whisper.cpp");
         eprintln!("  3. Recommended: ggml-large-v3-turbo.bin");
         std::process::exit(1);

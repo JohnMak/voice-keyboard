@@ -120,10 +120,9 @@ pub mod listener {
             let config = self.config.clone();
             let is_running = Arc::clone(&self.is_running);
 
-            let trigger_key = Self::string_to_key(&config.trigger_key)
-                .ok_or_else(|| VoiceKeyboardError::Hotkey(
-                    format!("Unknown key: {}", config.trigger_key)
-                ))?;
+            let trigger_key = Self::string_to_key(&config.trigger_key).ok_or_else(|| {
+                VoiceKeyboardError::Hotkey(format!("Unknown key: {}", config.trigger_key))
+            })?;
 
             let modifier_keys: Vec<Key> = config
                 .modifiers
@@ -131,9 +130,8 @@ pub mod listener {
                 .filter_map(|m| Self::string_to_modifier(m))
                 .collect();
 
-            let modifiers_pressed = Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            ));
+            let modifiers_pressed =
+                Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
             is_running.store(true, Ordering::SeqCst);
 
@@ -153,9 +151,8 @@ pub mod listener {
 
                             if key == trigger_key {
                                 let pressed = modifiers_pressed.lock().unwrap();
-                                let all_modifiers = modifier_keys
-                                    .iter()
-                                    .all(|m| pressed.contains(m));
+                                let all_modifiers =
+                                    modifier_keys.iter().all(|m| pressed.contains(m));
 
                                 if all_modifiers || modifier_keys.is_empty() {
                                     debug!("Hotkey pressed: {:?}", key);

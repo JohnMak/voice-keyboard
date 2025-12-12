@@ -31,7 +31,10 @@ pub struct TextInjector {
 
 impl TextInjector {
     pub fn new(method: InjectionMethod) -> Result<Self> {
-        let clipboard = if matches!(method, InjectionMethod::Clipboard | InjectionMethod::ClipboardOnly) {
+        let clipboard = if matches!(
+            method,
+            InjectionMethod::Clipboard | InjectionMethod::ClipboardOnly
+        ) {
             Some(
                 Clipboard::new()
                     .map_err(|e| VoiceKeyboardError::Injection(format!("Clipboard error: {e}")))?,
@@ -74,12 +77,16 @@ impl TextInjector {
 
     fn inject_via_clipboard(&mut self, text: &str) -> Result<()> {
         // Save current clipboard content
-        let previous = self.clipboard.as_mut()
+        let previous = self
+            .clipboard
+            .as_mut()
             .ok_or_else(|| VoiceKeyboardError::Injection("Clipboard not initialized".to_string()))?
-            .get_text().ok();
+            .get_text()
+            .ok();
 
         // Set new text
-        self.clipboard.as_mut()
+        self.clipboard
+            .as_mut()
             .ok_or_else(|| VoiceKeyboardError::Injection("Clipboard not initialized".to_string()))?
             .set_text(text.to_string())
             .map_err(|e| VoiceKeyboardError::Injection(format!("Failed to set clipboard: {e}")))?;

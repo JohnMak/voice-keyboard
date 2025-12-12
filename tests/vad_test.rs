@@ -145,9 +145,9 @@ fn test_single_phrase() {
 
     // Generate: silence + speech + silence
     let audio = concat_audio(vec![
-        generate_silence(100),      // 100ms silence
+        generate_silence(100),       // 100ms silence
         generate_speech(500, 440.0), // 500ms speech
-        generate_silence(400),      // 400ms silence (triggers phrase end)
+        generate_silence(400),       // 400ms silence (triggers phrase end)
     ]);
 
     // Should detect one phrase
@@ -158,8 +158,14 @@ fn test_single_phrase() {
     let phrase_duration_ms = phrase_samples.len() as f32 * 1000.0 / SAMPLE_RATE as f32;
 
     println!("Single phrase duration: {:.0}ms", phrase_duration_ms);
-    assert!(phrase_duration_ms >= 400.0, "Phrase should be at least 400ms");
-    assert!(phrase_duration_ms <= 600.0, "Phrase should be at most 600ms");
+    assert!(
+        phrase_duration_ms >= 400.0,
+        "Phrase should be at least 400ms"
+    );
+    assert!(
+        phrase_duration_ms <= 600.0,
+        "Phrase should be at most 600ms"
+    );
 }
 
 #[test]
@@ -240,10 +246,10 @@ fn test_short_silence_does_not_split() {
     // Generate: speech + short silence + speech (should be ONE phrase)
     let audio = concat_audio(vec![
         generate_silence(50),
-        generate_speech(300, 440.0),  // Speech
-        generate_silence(200),        // 200ms silence (< 300ms threshold)
-        generate_speech(300, 440.0),  // More speech (same phrase)
-        generate_silence(400),        // Long silence (triggers end)
+        generate_speech(300, 440.0), // Speech
+        generate_silence(200),       // 200ms silence (< 300ms threshold)
+        generate_speech(300, 440.0), // More speech (same phrase)
+        generate_silence(400),       // Long silence (triggers end)
     ]);
 
     let phrase = vad.detect_phrase(&audio);
@@ -253,11 +259,17 @@ fn test_short_silence_does_not_split() {
     println!("Combined phrase duration: {:.0}ms", phrase_duration);
 
     // The phrase should be longer because short silence doesn't split
-    assert!(phrase_duration >= 700.0, "Phrase should include both speech segments");
+    assert!(
+        phrase_duration >= 700.0,
+        "Phrase should include both speech segments"
+    );
 
     // No second phrase
     let phrase2 = vad.detect_phrase(&audio);
-    assert!(phrase2.is_none(), "Should not detect second phrase (short silence didn't split)");
+    assert!(
+        phrase2.is_none(),
+        "Should not detect second phrase (short silence didn't split)"
+    );
 }
 
 #[test]
@@ -267,7 +279,7 @@ fn test_ignore_short_speech() {
     // Generate very short speech (should be ignored)
     let audio = concat_audio(vec![
         generate_silence(100),
-        generate_speech(100, 440.0),  // 100ms speech (< 200ms minimum)
+        generate_speech(100, 440.0), // 100ms speech (< 200ms minimum)
         generate_silence(400),
     ]);
 
@@ -288,7 +300,10 @@ fn test_energy_calculation() {
     let speech = generate_speech(100, 440.0);
     let speech_energy = vad.calculate_energy(&speech);
     println!("Speech energy: {}", speech_energy);
-    assert!(speech_energy >= VAD_ENERGY_THRESHOLD, "Speech energy should be above threshold");
+    assert!(
+        speech_energy >= VAD_ENERGY_THRESHOLD,
+        "Speech energy should be above threshold"
+    );
 }
 
 #[test]
@@ -296,10 +311,7 @@ fn test_reset() {
     let mut vad = VadPhraseDetector::new();
 
     // Process some audio
-    let audio = concat_audio(vec![
-        generate_speech(500, 440.0),
-        generate_silence(400),
-    ]);
+    let audio = concat_audio(vec![generate_speech(500, 440.0), generate_silence(400)]);
 
     let _ = vad.detect_phrase(&audio);
 
@@ -321,16 +333,16 @@ fn test_long_recording_multiple_phrases() {
     // Like dictating: "Первое предложение. (пауза) Второе. (пауза) Третье. (пауза) Четвёртое. (пауза) Пятое."
     let audio = concat_audio(vec![
         generate_silence(100),
-        generate_speech(800, 300.0),  // Phrase 1
+        generate_speech(800, 300.0), // Phrase 1
         generate_silence(500),
-        generate_speech(600, 350.0),  // Phrase 2
+        generate_speech(600, 350.0), // Phrase 2
         generate_silence(400),
-        generate_speech(700, 400.0),  // Phrase 3
+        generate_speech(700, 400.0), // Phrase 3
         generate_silence(350),
-        generate_speech(500, 450.0),  // Phrase 4
+        generate_speech(500, 450.0), // Phrase 4
         generate_silence(600),
-        generate_speech(900, 500.0),  // Phrase 5
-        generate_silence(100),        // Short trailing
+        generate_speech(900, 500.0), // Phrase 5
+        generate_silence(100),       // Short trailing
     ]);
 
     let total_duration = audio.len() as f32 * 1000.0 / SAMPLE_RATE as f32;
@@ -351,7 +363,12 @@ fn test_long_recording_multiple_phrases() {
     println!("Detected {} phrases:", phrases.len());
     for (i, phrase) in phrases.iter().enumerate() {
         let duration = phrase.len() as f32 * 1000.0 / SAMPLE_RATE as f32;
-        println!("  Phrase {}: {:.0}ms ({} samples)", i + 1, duration, phrase.len());
+        println!(
+            "  Phrase {}: {:.0}ms ({} samples)",
+            i + 1,
+            duration,
+            phrase.len()
+        );
     }
 
     assert_eq!(phrases.len(), 5, "Should detect exactly 5 phrases");
@@ -364,9 +381,9 @@ fn test_no_duplicate_content() {
     // Generate distinct phrases with different frequencies
     let audio = concat_audio(vec![
         generate_silence(50),
-        generate_speech(400, 300.0),  // Low frequency - phrase 1
+        generate_speech(400, 300.0), // Low frequency - phrase 1
         generate_silence(400),
-        generate_speech(400, 600.0),  // High frequency - phrase 2
+        generate_speech(400, 600.0), // High frequency - phrase 2
         generate_silence(400),
     ]);
 
@@ -382,7 +399,10 @@ fn test_no_duplicate_content() {
 
     // Both should have similar amplitude (since we use same amplitude)
     // but the actual waveform should be different
-    assert!((p1_avg - p2_avg).abs() < 0.05, "Amplitudes should be similar");
+    assert!(
+        (p1_avg - p2_avg).abs() < 0.05,
+        "Amplitudes should be similar"
+    );
 
     // Verify no overlap in positions
     println!("Phrase 1 samples: {}", phrase1.len());

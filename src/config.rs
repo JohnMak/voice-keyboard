@@ -56,7 +56,6 @@ pub enum ModelSizeConfig {
     LargeV3Turbo,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HotkeyConfigSerde {
     /// Trigger key name (e.g., "F13", "Space")
@@ -111,13 +110,11 @@ impl Config {
         let path = Self::config_path()?;
 
         if path.exists() {
-            let content = std::fs::read_to_string(&path).map_err(|e| {
-                VoiceKeyboardError::Config(format!("Failed to read config: {e}"))
-            })?;
+            let content = std::fs::read_to_string(&path)
+                .map_err(|e| VoiceKeyboardError::Config(format!("Failed to read config: {e}")))?;
 
-            let config: Config = serde_json::from_str(&content).map_err(|e| {
-                VoiceKeyboardError::Config(format!("Failed to parse config: {e}"))
-            })?;
+            let config: Config = serde_json::from_str(&content)
+                .map_err(|e| VoiceKeyboardError::Config(format!("Failed to parse config: {e}")))?;
 
             info!("Loaded config from {}", path.display());
             Ok(config)
@@ -137,13 +134,11 @@ impl Config {
             })?;
         }
 
-        let content = serde_json::to_string_pretty(self).map_err(|e| {
-            VoiceKeyboardError::Config(format!("Failed to serialize config: {e}"))
-        })?;
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| VoiceKeyboardError::Config(format!("Failed to serialize config: {e}")))?;
 
-        std::fs::write(&path, content).map_err(|e| {
-            VoiceKeyboardError::Config(format!("Failed to write config: {e}"))
-        })?;
+        std::fs::write(&path, content)
+            .map_err(|e| VoiceKeyboardError::Config(format!("Failed to write config: {e}")))?;
 
         info!("Saved config to {}", path.display());
         Ok(())

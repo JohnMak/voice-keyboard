@@ -60,12 +60,11 @@ fn get_test_audio_path() -> Option<PathBuf> {
 #[test]
 #[ignore = "Requires Whisper model and test audio"]
 fn test_transcribe_english() {
-    let model_path = get_model_path().expect(
-        "Model not found. Set MODEL_PATH env var or place model in ./models/ggml-tiny.bin",
-    );
+    let model_path = get_model_path()
+        .expect("Model not found. Set MODEL_PATH env var or place model in ./models/ggml-tiny.bin");
 
-    let audio_path = get_test_audio_path()
-        .expect("Test audio not found. Place test.wav in ./test-assets/");
+    let audio_path =
+        get_test_audio_path().expect("Test audio not found. Place test.wav in ./test-assets/");
 
     let transcriber = Transcriber::new(&model_path).expect("Failed to load model");
     let result = transcriber

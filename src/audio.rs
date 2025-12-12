@@ -50,9 +50,9 @@ pub mod recorder {
 
             info!("Using input device: {}", device.name().unwrap_or_default());
 
-            let config = device
-                .default_input_config()
-                .map_err(|e| VoiceKeyboardError::Audio(format!("Failed to get input config: {e}")))?;
+            let config = device.default_input_config().map_err(|e| {
+                VoiceKeyboardError::Audio(format!("Failed to get input config: {e}"))
+            })?;
 
             debug!(
                 "Input config: {} channels, {} Hz, {:?}",
@@ -97,7 +97,9 @@ pub mod recorder {
                     None,
                 ),
                 _ => {
-                    return Err(VoiceKeyboardError::Audio("Unsupported sample format".to_string()))
+                    return Err(VoiceKeyboardError::Audio(
+                        "Unsupported sample format".to_string(),
+                    ))
                 }
             }
             .map_err(|e| VoiceKeyboardError::Audio(format!("Failed to build stream: {e}")))?;
@@ -221,9 +223,10 @@ pub fn load_wav(path: &Path) -> Result<Vec<f32>> {
             .filter_map(|s| s.ok())
             .map(|s| s as f32 / i16::MAX as f32)
             .collect(),
-        hound::SampleFormat::Float => {
-            reader.into_samples::<f32>().filter_map(|s| s.ok()).collect()
-        }
+        hound::SampleFormat::Float => reader
+            .into_samples::<f32>()
+            .filter_map(|s| s.ok())
+            .collect(),
     };
 
     // Convert to mono if stereo

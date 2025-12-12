@@ -14,18 +14,18 @@
 
 use std::env;
 use std::fs::{self, File};
-use std::io::{Write, Cursor};
+use std::io::{Cursor, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use std::thread;
+use std::time::{Duration, Instant};
 
 // Cross-platform imports
-use rdev::{listen, Event, EventType, Key};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use arboard::Clipboard;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use enigo::{Direction, Enigo, Key as EnigoKey, Keyboard, Settings};
 use indicatif::{ProgressBar, ProgressStyle};
+use rdev::{listen, Event, EventType, Key};
 use reqwest::blocking::Client;
 
 /// Minimum recording duration to process (avoid accidental taps)
@@ -98,7 +98,11 @@ struct TranscriptionResult {
 /// Unified transcription interface
 trait Transcriber: Send + Sync {
     /// Transcribe audio samples (16kHz, mono, f32)
-    fn transcribe(&self, samples: &[f32], context: Option<&str>) -> Result<TranscriptionResult, String>;
+    fn transcribe(
+        &self,
+        samples: &[f32],
+        context: Option<&str>,
+    ) -> Result<TranscriptionResult, String>;
 
     /// Name of the backend for logging
     fn name(&self) -> &'static str;
@@ -106,12 +110,12 @@ trait Transcriber: Send + Sync {
 
 /// MIDI note frequencies for beep sounds
 #[cfg(feature = "whisper")]
-const BEEP_START_FREQ: f32 = 880.0;  // A5 - higher pitch for start
+const BEEP_START_FREQ: f32 = 880.0; // A5 - higher pitch for start
 #[cfg(feature = "whisper")]
-const BEEP_START_DURATION_MS: u64 = 50;   // Short chirp for start
-const BEEP_STOP_FREQ: f32 = 440.0;   // A4 - lower pitch for stop
-const BEEP_STOP_DURATION_MS: u64 = 100;   // Normal length for end beep
-const BEEP_DEFAULT_VOLUME: f32 = 0.1;  // 10% volume (0.0 - 1.0)
+const BEEP_START_DURATION_MS: u64 = 50; // Short chirp for start
+const BEEP_STOP_FREQ: f32 = 440.0; // A4 - lower pitch for stop
+const BEEP_STOP_DURATION_MS: u64 = 100; // Normal length for end beep
+const BEEP_DEFAULT_VOLUME: f32 = 0.1; // 10% volume (0.0 - 1.0)
 
 /// Global volume setting for beep sounds (0.0 = silent, 1.0 = max)
 static BEEP_VOLUME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -154,15 +158,15 @@ enum InputMethod {
 /// Hotkey for push-to-talk (cross-platform)
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum HotkeyType {
-    Function,      // Fn/Globe key (macOS only)
-    ControlLeft,   // Left Ctrl
-    ControlRight,  // Right Ctrl
-    AltLeft,       // Left Alt/Option
-    AltRight,      // Right Alt/Option
-    ShiftLeft,     // Left Shift
-    ShiftRight,    // Right Shift
-    MetaLeft,      // Left Cmd/Win/Super
-    MetaRight,     // Right Cmd/Win/Super
+    Function,     // Fn/Globe key (macOS only)
+    ControlLeft,  // Left Ctrl
+    ControlRight, // Right Ctrl
+    AltLeft,      // Left Alt/Option
+    AltRight,     // Right Alt/Option
+    ShiftLeft,    // Left Shift
+    ShiftRight,   // Right Shift
+    MetaLeft,     // Left Cmd/Win/Super
+    MetaRight,    // Right Cmd/Win/Super
 }
 
 impl HotkeyType {
@@ -212,9 +216,13 @@ impl HotkeyType {
     /// Default hotkey for current platform
     fn default_for_platform() -> Self {
         #[cfg(target_os = "macos")]
-        { HotkeyType::Function }
+        {
+            HotkeyType::Function
+        }
         #[cfg(not(target_os = "macos"))]
-        { HotkeyType::ControlRight }  // Right Ctrl is less likely to conflict
+        {
+            HotkeyType::ControlRight
+        } // Right Ctrl is less likely to conflict
     }
 }
 
@@ -237,7 +245,8 @@ struct VadPhraseDetector {
 
 impl VadPhraseDetector {
     fn new() -> Self {
-        let window_samples = (VAD_WINDOW_MS as f32 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize;
+        let window_samples =
+            (VAD_WINDOW_MS as f32 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize;
         let silence_windows_threshold = (VAD_SILENCE_MS / VAD_WINDOW_MS) as usize;
         let min_speech_windows = (VAD_MIN_SPEECH_MS / VAD_WINDOW_MS) as usize;
 
@@ -357,7 +366,8 @@ impl VadPhraseDetector {
                     self.silent_windows += 1;
 
                     if self.silent_windows >= self.silence_windows_threshold {
-                        let phrase_end = window_start - (self.silent_windows - 1) * self.window_samples;
+                        let phrase_end =
+                            window_start - (self.silent_windows - 1) * self.window_samples;
                         let phrase_len = phrase_end.saturating_sub(self.phrase_start);
 
                         let voice_ratio = if self.phrase_windows_count > 0 {
@@ -367,19 +377,26 @@ impl VadPhraseDetector {
                         };
                         let has_enough_voice = voice_ratio >= 0.3;
 
-                        if phrase_len >= self.min_speech_windows * self.window_samples && has_enough_voice {
+                        if phrase_len >= self.min_speech_windows * self.window_samples
+                            && has_enough_voice
+                        {
                             let phrase = all_samples[self.phrase_start..phrase_end].to_vec();
                             self.in_speech = false;
                             self.silent_windows = 0;
                             self.voice_windows_count = 0;
                             self.phrase_windows_count = 0;
-                            self.last_transcribed_end = phrase_end;  // Mark as transcribed
+                            self.last_transcribed_end = phrase_end; // Mark as transcribed
                             self.phrase_start = window_end;
                             self.processed_pos = window_end;
                             return Some(phrase);
                         } else {
-                            if !has_enough_voice && phrase_len >= self.min_speech_windows * self.window_samples {
-                                println!("[VAD] Discarding noise-only phrase ({:.0}% voice)", voice_ratio * 100.0);
+                            if !has_enough_voice
+                                && phrase_len >= self.min_speech_windows * self.window_samples
+                            {
+                                println!(
+                                    "[VAD] Discarding noise-only phrase ({:.0}% voice)",
+                                    voice_ratio * 100.0
+                                );
                             }
                             self.in_speech = false;
                             self.silent_windows = 0;
@@ -445,8 +462,12 @@ impl VadPhraseDetector {
         };
 
         if voice_percent < 0.3 {
-            println!("[VAD] Discarding final segment: only {:.0}% voice ({} of {} windows)",
-                voice_percent * 100.0, voice_windows, total_windows);
+            println!(
+                "[VAD] Discarding final segment: only {:.0}% voice ({} of {} windows)",
+                voice_percent * 100.0,
+                voice_windows,
+                total_windows
+            );
             return None;
         }
 
@@ -532,14 +553,17 @@ fn load_config() -> Config {
 fn get_config_path() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
-        env::var("APPDATA").ok().map(|p| {
-            PathBuf::from(p).join("voice-keyboard").join("config.toml")
-        })
+        env::var("APPDATA")
+            .ok()
+            .map(|p| PathBuf::from(p).join("voice-keyboard").join("config.toml"))
     }
     #[cfg(not(target_os = "windows"))]
     {
         env::var("HOME").ok().map(|h| {
-            PathBuf::from(h).join(".config").join("voice-keyboard").join("config.toml")
+            PathBuf::from(h)
+                .join(".config")
+                .join("voice-keyboard")
+                .join("config.toml")
         })
     }
 }
@@ -574,7 +598,12 @@ fn get_data_dir() -> PathBuf {
 
 /// Log transcribed text with optional audio file reference
 /// Format: ISO timestamp | audio_file | raw whisper output | processed text | [cont]
-fn log_transcription_with_audio(raw_text: &str, processed_text: &str, is_continuation: bool, audio_file: Option<&str>) {
+fn log_transcription_with_audio(
+    raw_text: &str,
+    processed_text: &str,
+    is_continuation: bool,
+    audio_file: Option<&str>,
+) {
     let log_path = get_data_dir().join("transcriptions.log");
 
     // Ensure directory exists
@@ -585,7 +614,14 @@ fn log_transcription_with_audio(raw_text: &str, processed_text: &str, is_continu
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
     let cont_marker = if is_continuation { " [cont]" } else { "" };
     let audio_ref = audio_file.unwrap_or("-");
-    let line = format!("{} | {} | {} | {}{}\n", timestamp, audio_ref, raw_text.trim(), processed_text.trim(), cont_marker);
+    let line = format!(
+        "{} | {} | {} | {}{}\n",
+        timestamp,
+        audio_ref,
+        raw_text.trim(),
+        processed_text.trim(),
+        cont_marker
+    );
 
     if let Ok(mut file) = fs::OpenOptions::new()
         .create(true)
@@ -653,12 +689,16 @@ impl OpenAIConfig {
         }
 
         let api_key = env::var("OPENAI_API_KEY").ok()?;
-        let api_url = env::var("OPENAI_API_URL")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        let api_url =
+            env::var("OPENAI_API_URL").unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
         let model = env::var("OPENAI_TRANSCRIPTION_MODEL")
             .unwrap_or_else(|_| "gpt-4o-transcribe".to_string());
 
-        Some(Self { api_key, api_url, model })
+        Some(Self {
+            api_key,
+            api_url,
+            model,
+        })
     }
 
     /// Test connection to OpenAI API
@@ -690,7 +730,11 @@ impl OpenAITranscriber {
 }
 
 impl Transcriber for OpenAITranscriber {
-    fn transcribe(&self, samples: &[f32], context: Option<&str>) -> Result<TranscriptionResult, String> {
+    fn transcribe(
+        &self,
+        samples: &[f32],
+        context: Option<&str>,
+    ) -> Result<TranscriptionResult, String> {
         // Build prompt with context
         let prompt = if let Some(ctx_text) = context {
             let last_sentence = extract_last_sentence(ctx_text);
@@ -699,7 +743,8 @@ impl Transcriber for OpenAITranscriber {
             PROGRAMMER_PROMPT.to_string()
         };
 
-        let text = transcribe_openai_internal(&self.config, samples, WHISPER_SAMPLE_RATE, Some(&prompt))?;
+        let text =
+            transcribe_openai_internal(&self.config, samples, WHISPER_SAMPLE_RATE, Some(&prompt))?;
         Ok(TranscriptionResult { text })
     }
 
@@ -723,7 +768,11 @@ impl WhisperTranscriber {
 
 #[cfg(feature = "whisper")]
 impl Transcriber for WhisperTranscriber {
-    fn transcribe(&self, samples: &[f32], context: Option<&str>) -> Result<TranscriptionResult, String> {
+    fn transcribe(
+        &self,
+        samples: &[f32],
+        context: Option<&str>,
+    ) -> Result<TranscriptionResult, String> {
         let text = transcribe_whisper_internal(&self.ctx, samples, context)?;
         Ok(TranscriptionResult { text })
     }
@@ -734,12 +783,18 @@ impl Transcriber for WhisperTranscriber {
 }
 
 /// Internal function to transcribe audio using OpenAI API
-fn transcribe_openai_internal(config: &OpenAIConfig, samples: &[f32], sample_rate: u32, prompt: Option<&str>) -> Result<String, String> {
+fn transcribe_openai_internal(
+    config: &OpenAIConfig,
+    samples: &[f32],
+    sample_rate: u32,
+    prompt: Option<&str>,
+) -> Result<String, String> {
     // Encode audio data
     #[cfg(feature = "opus")]
     let (audio_data, filename, content_type) = {
         // Convert f32 samples to i16 for OGG/Opus encoding
-        let samples_i16: Vec<i16> = samples.iter()
+        let samples_i16: Vec<i16> = samples
+            .iter()
             .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
             .collect();
 
@@ -767,11 +822,13 @@ fn transcribe_openai_internal(config: &OpenAIConfig, samples: &[f32], sample_rat
 
             for &sample in samples {
                 let sample_i16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                writer.write_sample(sample_i16)
+                writer
+                    .write_sample(sample_i16)
                     .map_err(|e| format!("Failed to write sample: {}", e))?;
             }
 
-            writer.finalize()
+            writer
+                .finalize()
                 .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
         }
 
@@ -783,13 +840,22 @@ fn transcribe_openai_internal(config: &OpenAIConfig, samples: &[f32], sample_rat
     let url = format!("{}/audio/transcriptions", config.api_url);
 
     // Create multipart boundary
-    let boundary = format!("----WebKitFormBoundary{}", chrono::Utc::now().timestamp_millis());
+    let boundary = format!(
+        "----WebKitFormBoundary{}",
+        chrono::Utc::now().timestamp_millis()
+    );
 
     let mut body = Vec::new();
 
     // Add file field
     body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-    body.extend_from_slice(format!("Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n", filename).as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
+            filename
+        )
+        .as_bytes(),
+    );
     body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", content_type).as_bytes());
     body.extend_from_slice(&audio_data);
     body.extend_from_slice(b"\r\n");
@@ -820,7 +886,10 @@ fn transcribe_openai_internal(config: &OpenAIConfig, samples: &[f32], sample_rat
     let response = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", config.api_key))
-        .header("Content-Type", format!("multipart/form-data; boundary={}", boundary))
+        .header(
+            "Content-Type",
+            format!("multipart/form-data; boundary={}", boundary),
+        )
         .body(body)
         .timeout(Duration::from_secs(30))
         .send()
@@ -833,14 +902,16 @@ fn transcribe_openai_internal(config: &OpenAIConfig, samples: &[f32], sample_rat
     }
 
     // Parse JSON response using serde_json for proper escape handling
-    let response_text = response.text()
+    let response_text = response
+        .text()
         .map_err(|e| format!("Failed to read response: {}", e))?;
 
     // Parse as JSON object and extract "text" field
     let json: serde_json::Value = serde_json::from_str(&response_text)
         .map_err(|e| format!("Failed to parse JSON: {} (response: {})", e, response_text))?;
 
-    let text = json.get("text")
+    let text = json
+        .get("text")
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("No 'text' field in response: {}", response_text))?;
 
@@ -897,7 +968,10 @@ fn print_usage() {
     println!("                     Default: base");
     println!("  --download <MODEL> Download a model from the internet (tries multiple mirrors)");
     println!("                     Example: --download tiny");
-    println!("  --key <KEY>        Push-to-talk hotkey (default: {} on this platform)", default_key.name());
+    println!(
+        "  --key <KEY>        Push-to-talk hotkey (default: {} on this platform)",
+        default_key.name()
+    );
     println!("                     Options: fn, ctrl, ctrlright, alt, altright, shift, cmd");
     println!("  --volume <0.0-1.0> Beep sounds volume (default: 0.1 = 10%)");
     println!("                     Use 0 to disable sounds, 1.0 for max volume");
@@ -919,7 +993,12 @@ fn print_usage() {
     println!("  voice-typer --model tiny --silent    # No beep sounds");
     println!("  voice-typer --key ctrlright --clipboard");
     println!();
-    println!("Config file: {}", get_config_path().map(|p| p.display().to_string()).unwrap_or_default());
+    println!(
+        "Config file: {}",
+        get_config_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    );
     println!("Models dir:  {}", get_models_dir().display());
 }
 
@@ -931,13 +1010,37 @@ fn list_keys() {
     println!("  {:15} {}", "---", "-----------");
 
     #[cfg(target_os = "macos")]
-    println!("  {:15} {} {}", "fn / function", "Fn/Globe key on MacBook keyboards",
-        if matches!(default, HotkeyType::Function) { "(default)" } else { "" });
+    println!(
+        "  {:15} {} {}",
+        "fn / function",
+        "Fn/Globe key on MacBook keyboards",
+        if matches!(default, HotkeyType::Function) {
+            "(default)"
+        } else {
+            ""
+        }
+    );
 
-    println!("  {:15} {} {}", "ctrl", "Left Control key",
-        if matches!(default, HotkeyType::ControlLeft) { "(default)" } else { "" });
-    println!("  {:15} {} {}", "ctrlright", "Right Control key",
-        if matches!(default, HotkeyType::ControlRight) { "(default)" } else { "" });
+    println!(
+        "  {:15} {} {}",
+        "ctrl",
+        "Left Control key",
+        if matches!(default, HotkeyType::ControlLeft) {
+            "(default)"
+        } else {
+            ""
+        }
+    );
+    println!(
+        "  {:15} {} {}",
+        "ctrlright",
+        "Right Control key",
+        if matches!(default, HotkeyType::ControlRight) {
+            "(default)"
+        } else {
+            ""
+        }
+    );
     println!("  {:15} {}", "alt", "Left Alt/Option key");
     println!("  {:15} {}", "altright", "Right Alt/Option key");
     println!("  {:15} {}", "shift", "Left Shift key");
@@ -953,7 +1056,9 @@ fn list_keys() {
 
     #[cfg(target_os = "linux")]
     {
-        println!("Note: On Linux, you may need to run with sudo or add yourself to the 'input' group.");
+        println!(
+            "Note: On Linux, you may need to run with sudo or add yourself to the 'input' group."
+        );
         println!("      Run: sudo usermod -aG input $USER && newgrp input");
     }
 
@@ -968,12 +1073,30 @@ fn list_models() {
     println!();
     println!("  {:20} {:15} {:10} {}", "Name", "File", "Size", "Quality");
     println!("  {:20} {:15} {:10} {}", "----", "----", "----", "-------");
-    println!("  {:20} {:15} {:10} {}", "tiny", "ggml-tiny.bin", "75 MB", "Basic");
-    println!("  {:20} {:15} {:10} {}", "base", "ggml-base.bin", "142 MB", "Good");
-    println!("  {:20} {:15} {:10} {}", "small", "ggml-small.bin", "466 MB", "Very Good");
-    println!("  {:20} {:15} {:10} {}", "medium", "ggml-medium.bin", "1.5 GB", "Excellent");
-    println!("  {:20} {:15} {:10} {}", "large-v3-turbo", "ggml-large-v3-turbo.bin", "1.6 GB", "Best (recommended)");
-    println!("  {:20} {:15} {:10} {}", "turbo", "(alias for large-v3-turbo)", "", "");
+    println!(
+        "  {:20} {:15} {:10} {}",
+        "tiny", "ggml-tiny.bin", "75 MB", "Basic"
+    );
+    println!(
+        "  {:20} {:15} {:10} {}",
+        "base", "ggml-base.bin", "142 MB", "Good"
+    );
+    println!(
+        "  {:20} {:15} {:10} {}",
+        "small", "ggml-small.bin", "466 MB", "Very Good"
+    );
+    println!(
+        "  {:20} {:15} {:10} {}",
+        "medium", "ggml-medium.bin", "1.5 GB", "Excellent"
+    );
+    println!(
+        "  {:20} {:15} {:10} {}",
+        "large-v3-turbo", "ggml-large-v3-turbo.bin", "1.6 GB", "Best (recommended)"
+    );
+    println!(
+        "  {:20} {:15} {:10} {}",
+        "turbo", "(alias for large-v3-turbo)", "", ""
+    );
     println!();
     println!("Models directory: {}", get_models_dir().display());
     println!();
@@ -1000,11 +1123,7 @@ fn list_models() {
 /// Probe a mirror to check availability and get download speed estimate
 fn probe_mirror(client: &Client, url: &str) -> Option<(f64, u64)> {
     let start = Instant::now();
-    match client
-        .head(url)
-        .timeout(Duration::from_secs(5))
-        .send()
-    {
+    match client.head(url).timeout(Duration::from_secs(5)).send() {
         Ok(response) => {
             if response.status().is_success() || response.status().is_redirection() {
                 let elapsed = start.elapsed().as_secs_f64();
@@ -1101,8 +1220,7 @@ fn download_model(model_name: &str) -> Result<PathBuf, String> {
     }
 
     // Find best mirror
-    let url = find_best_mirror(filename)
-        .ok_or_else(|| "No available mirrors found".to_string())?;
+    let url = find_best_mirror(filename).ok_or_else(|| "No available mirrors found".to_string())?;
 
     // Get expected size for progress bar
     let expected_size = MODEL_SIZES
@@ -1138,9 +1256,7 @@ fn download_with_progress(url: &str, dest: &PathBuf, expected_size: u64) -> Resu
         return Err(format!("HTTP error: {}", response.status()));
     }
 
-    let total_size = response
-        .content_length()
-        .unwrap_or(expected_size);
+    let total_size = response.content_length().unwrap_or(expected_size);
 
     // Create progress bar
     let pb = ProgressBar::new(total_size);
@@ -1153,8 +1269,8 @@ fn download_with_progress(url: &str, dest: &PathBuf, expected_size: u64) -> Resu
 
     // Download to temporary file first
     let temp_path = dest.with_extension("bin.tmp");
-    let mut file = File::create(&temp_path)
-        .map_err(|e| format!("Failed to create temp file: {}", e))?;
+    let mut file =
+        File::create(&temp_path).map_err(|e| format!("Failed to create temp file: {}", e))?;
 
     let mut downloaded: u64 = 0;
     let mut buffer = [0u8; 8192];
@@ -1191,8 +1307,7 @@ fn download_with_progress(url: &str, dest: &PathBuf, expected_size: u64) -> Resu
     }
 
     // Rename temp file to final destination
-    fs::rename(&temp_path, dest)
-        .map_err(|e| format!("Failed to rename temp file: {}", e))?;
+    fs::rename(&temp_path, dest).map_err(|e| format!("Failed to rename temp file: {}", e))?;
 
     Ok(())
 }
@@ -1214,7 +1329,11 @@ fn download_model_with_fallback(model_name: &str) -> Result<PathBuf, String> {
         .find(|(name, _)| *name == model_name)
         .map(|(_, file)| *file)
         .unwrap_or_else(|| {
-            if model_name.ends_with(".bin") { model_name } else { "ggml-base.bin" }
+            if model_name.ends_with(".bin") {
+                model_name
+            } else {
+                "ggml-base.bin"
+            }
         });
 
     let dest_path = get_models_dir().join(filename);
@@ -1258,7 +1377,8 @@ fn main() {
         _ => InputMethod::Keyboard,
     };
 
-    let mut hotkey = config.hotkey
+    let mut hotkey = config
+        .hotkey
         .as_ref()
         .and_then(|h| HotkeyType::from_str(h))
         .unwrap_or_else(HotkeyType::default_for_platform);
@@ -1346,7 +1466,10 @@ fn main() {
                     match HotkeyType::from_str(&args[i + 1]) {
                         Some(key) => hotkey = key,
                         None => {
-                            eprintln!("Error: unknown hotkey '{}'. Use --list-keys to see options.", args[i + 1]);
+                            eprintln!(
+                                "Error: unknown hotkey '{}'. Use --list-keys to see options.",
+                                args[i + 1]
+                            );
                             std::process::exit(1);
                         }
                     }
@@ -1361,7 +1484,10 @@ fn main() {
                 match HotkeyType::from_str(key_str) {
                     Some(key) => hotkey = key,
                     None => {
-                        eprintln!("Error: unknown hotkey '{}'. Use --list-keys to see options.", key_str);
+                        eprintln!(
+                            "Error: unknown hotkey '{}'. Use --list-keys to see options.",
+                            key_str
+                        );
                         std::process::exit(1);
                     }
                 }
@@ -1419,9 +1545,13 @@ fn main() {
         InputMethod::Keyboard => "keyboard simulation",
         InputMethod::Clipboard => {
             #[cfg(target_os = "macos")]
-            { "clipboard + Cmd+V" }
+            {
+                "clipboard + Cmd+V"
+            }
             #[cfg(not(target_os = "macos"))]
-            { "clipboard + Ctrl+V" }
+            {
+                "clipboard + Ctrl+V"
+            }
         }
     };
 
@@ -1506,19 +1636,21 @@ fn load_whisper(model_path: &PathBuf) -> Result<whisper_rs::WhisperContext, Stri
     whisper_rs::install_logging_hooks();
 
     let params = WhisperContextParameters::default();
-    whisper_rs::WhisperContext::new_with_params(
-        model_path.to_str().unwrap(),
-        params,
-    ).map_err(|e| format!("Failed to load model: {}", e))
+    whisper_rs::WhisperContext::new_with_params(model_path.to_str().unwrap(), params)
+        .map_err(|e| format!("Failed to load model: {}", e))
 }
 
 /// Minimum token duration in centiseconds (1 centisecond = 10ms)
 /// Tokens with duration 0 are likely hallucinations (t0 == t1)
 #[cfg(feature = "whisper")]
-const MIN_TOKEN_DURATION_CS: i64 = 0;  // Only filter tokens with exactly 0 duration
+const MIN_TOKEN_DURATION_CS: i64 = 0; // Only filter tokens with exactly 0 duration
 
 #[cfg(feature = "whisper")]
-fn transcribe_whisper_internal(ctx: &whisper_rs::WhisperContext, samples: &[f32], context: Option<&str>) -> Result<String, String> {
+fn transcribe_whisper_internal(
+    ctx: &whisper_rs::WhisperContext,
+    samples: &[f32],
+    context: Option<&str>,
+) -> Result<String, String> {
     use whisper_rs::{FullParams, SamplingStrategy};
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
@@ -1530,7 +1662,7 @@ fn transcribe_whisper_internal(ctx: &whisper_rs::WhisperContext, samples: &[f32]
     params.set_translate(false);
     params.set_no_context(true);
     params.set_single_segment(false);
-    params.set_token_timestamps(true);  // Enable token-level timestamps for hallucination filtering
+    params.set_token_timestamps(true); // Enable token-level timestamps for hallucination filtering
 
     params.set_language(Some("ru"));
 
@@ -1543,10 +1675,12 @@ fn transcribe_whisper_internal(ctx: &whisper_rs::WhisperContext, samples: &[f32]
 
     params.set_initial_prompt(&prompt);
 
-    let mut state = ctx.create_state()
+    let mut state = ctx
+        .create_state()
         .map_err(|e| format!("Failed to create state: {}", e))?;
 
-    state.full(params, samples)
+    state
+        .full(params, samples)
         .map_err(|e| format!("Transcription failed: {}", e))?;
 
     let num_segments = state.full_n_segments();
@@ -1569,7 +1703,11 @@ fn transcribe_whisper_internal(ctx: &whisper_rs::WhisperContext, samples: &[f32]
                         if let Ok(token_text) = token.to_str_lossy() {
                             let token_str = token_text.trim();
                             // Only filter non-empty, non-punctuation tokens
-                            if !token_str.is_empty() && !token_str.chars().all(|c| c.is_whitespace() || c.is_ascii_punctuation() || c == '…') {
+                            if !token_str.is_empty()
+                                && !token_str.chars().all(|c| {
+                                    c.is_whitespace() || c.is_ascii_punctuation() || c == '…'
+                                })
+                            {
                                 filtered_count += 1;
                                 eprintln!("[timestamp-filter] Filtered token '{}' (duration: {}cs = {}ms)",
                                     token_str, duration, duration * 10);
@@ -1593,7 +1731,10 @@ fn transcribe_whisper_internal(ctx: &whisper_rs::WhisperContext, samples: &[f32]
     }
 
     if filtered_count > 0 {
-        eprintln!("[timestamp-filter] Total filtered tokens: {}", filtered_count);
+        eprintln!(
+            "[timestamp-filter] Total filtered tokens: {}",
+            filtered_count
+        );
     }
 
     Ok(text.trim().to_string())
@@ -1603,9 +1744,7 @@ fn extract_last_sentence(text: &str) -> &str {
     let last_boundary = text.rfind(|c| c == '.' || c == '!' || c == '?');
 
     match last_boundary {
-        Some(pos) if pos + 1 < text.len() => {
-            text[pos + 1..].trim()
-        }
+        Some(pos) if pos + 1 < text.len() => text[pos + 1..].trim(),
         _ => {
             let chars: Vec<char> = text.chars().collect();
             if chars.len() > 100 {
@@ -1658,7 +1797,10 @@ fn is_duplicate_segment(new_text: &str, context: &str) -> bool {
 
     // Exact match with end of context
     if ctx_trimmed.ends_with(new_trimmed) {
-        println!("[FILTER] Duplicate segment (exact match): \"{}\"", new_trimmed);
+        println!(
+            "[FILTER] Duplicate segment (exact match): \"{}\"",
+            new_trimmed
+        );
         return true;
     }
 
@@ -1670,8 +1812,11 @@ fn is_duplicate_segment(new_text: &str, context: &str) -> bool {
         for start in 0..new_chars.len().saturating_sub(min_overlap) {
             let suffix: String = new_chars[start..].iter().collect();
             if ctx_trimmed.ends_with(&suffix) {
-                println!("[FILTER] Duplicate segment ({}% overlap): \"{}\"",
-                    (new_chars.len() - start) * 100 / new_chars.len(), new_trimmed);
+                println!(
+                    "[FILTER] Duplicate segment ({}% overlap): \"{}\"",
+                    (new_chars.len() - start) * 100 / new_chars.len(),
+                    new_trimmed
+                );
                 return true;
             }
         }
@@ -1682,7 +1827,9 @@ fn is_duplicate_segment(new_text: &str, context: &str) -> bool {
 
 fn remove_trailing_punctuation(text: &str) -> String {
     let trimmed = text.trim_end();
-    trimmed.trim_end_matches(|c| c == '.' || c == '!' || c == '?' || c == '…').to_string()
+    trimmed
+        .trim_end_matches(|c| c == '.' || c == '!' || c == '?' || c == '…')
+        .to_string()
 }
 
 // ============================================================================
@@ -1693,20 +1840,34 @@ fn remove_trailing_punctuation(text: &str) -> String {
 const HALLUCINATION_PATTERNS: &[&str] = &[
     // Russian YouTuber/subtitle hallucinations (from Whisper training data)
     "DimaTorzok",
-    "Субтитры создавал", "Субтитры сделал", "Редактор субтитров",
-    "ПОДПИШИСЬ НА КАНАЛ", "Подпишись на канал", "подпишись на канал",
-    "Спасибо за просмотр", "спасибо за просмотр",
+    "Субтитры создавал",
+    "Субтитры сделал",
+    "Редактор субтитров",
+    "ПОДПИШИСЬ НА КАНАЛ",
+    "Подпишись на канал",
+    "подпишись на канал",
+    "Спасибо за просмотр",
+    "спасибо за просмотр",
     // TV series / movie cliffhanger phrases
-    "Продолжение следует", "продолжение следует",
-    "Конец первой части", "конец первой части",
+    "Продолжение следует",
+    "продолжение следует",
+    "Конец первой части",
+    "конец первой части",
     // English subtitle/transcription hallucinations
-    "Amara.org", "amara.org",
-    "transcribed by", "Transcribed by",
-    "subtitles by", "Subtitles by",
-    "Thanks for watching", "thanks for watching",
-    "Thank you for watching", "thank you for watching",
-    "Please subscribe", "please subscribe",
-    "To be continued", "to be continued",
+    "Amara.org",
+    "amara.org",
+    "transcribed by",
+    "Transcribed by",
+    "subtitles by",
+    "Subtitles by",
+    "Thanks for watching",
+    "thanks for watching",
+    "Thank you for watching",
+    "thank you for watching",
+    "Please subscribe",
+    "please subscribe",
+    "To be continued",
+    "to be continued",
 ];
 
 /// Maximum audio duration (in seconds) to apply hallucination filtering
@@ -1717,9 +1878,7 @@ const HALLUCINATION_MAX_DURATION_SECS: f32 = 1.5;
 #[cfg(feature = "whisper")]
 const HALLUCINATION_EXACT: &[&str] = &[
     // Filler sounds that Whisper hallucinates from silence/noise
-    "У|м", "У|эм", "Уэм", "у|м", "Эм", "эм",
-    "Хм", "хм", "М-м", "м-м", "А-а", "а-а",
-    "...", "…",
+    "У|м", "У|эм", "Уэм", "у|м", "Эм", "эм", "Хм", "хм", "М-м", "м-м", "А-а", "а-а", "...", "…",
 ];
 
 #[cfg(feature = "whisper")]
@@ -1736,7 +1895,10 @@ fn is_hallucination(text: &str, audio_duration_secs: f32) -> bool {
     // Check exact matches (filler sounds)
     for pattern in HALLUCINATION_EXACT {
         if trimmed == *pattern || trimmed.trim_end_matches('.') == *pattern {
-            println!("[FILTER] Hallucination (exact match, {:.1}s): \"{}\"", audio_duration_secs, trimmed);
+            println!(
+                "[FILTER] Hallucination (exact match, {:.1}s): \"{}\"",
+                audio_duration_secs, trimmed
+            );
             return true;
         }
     }
@@ -1744,7 +1906,10 @@ fn is_hallucination(text: &str, audio_duration_secs: f32) -> bool {
     // Check pattern matches (YouTube/subtitle phrases)
     for pattern in HALLUCINATION_PATTERNS {
         if trimmed.contains(pattern) || lower.contains(&pattern.to_lowercase()) {
-            println!("[FILTER] Hallucination (pattern match, {:.1}s): \"{}\"", audio_duration_secs, trimmed);
+            println!(
+                "[FILTER] Hallucination (pattern match, {:.1}s): \"{}\"",
+                audio_duration_secs, trimmed
+            );
             return true;
         }
     }
@@ -1765,16 +1930,20 @@ fn is_duration_hallucination(text: &str, audio_duration_secs: f32) -> bool {
     // Rule 1: Very short audio (< 0.3s) should have very few characters
     // 0.3s of noise shouldn't produce more than 5-6 characters
     if audio_duration_secs < 0.3 && char_count > 5 {
-        println!("[FILTER] Hallucination: {:.2}s audio -> {} chars (too much text for noise)",
-            audio_duration_secs, char_count);
+        println!(
+            "[FILTER] Hallucination: {:.2}s audio -> {} chars (too much text for noise)",
+            audio_duration_secs, char_count
+        );
         return true;
     }
 
     // Rule 2: Short audio (< 0.5s) with too much text
     // At most ~8 chars for 0.5s of real speech
     if audio_duration_secs < 0.5 && char_count > 8 {
-        println!("[FILTER] Hallucination: {:.2}s audio -> {} chars ({:.0} chars/s)",
-            audio_duration_secs, char_count, chars_per_second);
+        println!(
+            "[FILTER] Hallucination: {:.2}s audio -> {} chars ({:.0} chars/s)",
+            audio_duration_secs, char_count, chars_per_second
+        );
         return true;
     }
 
@@ -1782,16 +1951,20 @@ fn is_duration_hallucination(text: &str, audio_duration_secs: f32) -> bool {
     // Normal speech: ~14-15 chars/sec, fast speech: ~25-30 chars/sec
     // Threshold: 50 chars/sec (allows for very fast talkers)
     if chars_per_second > 50.0 {
-        println!("[FILTER] Hallucination: {:.0} chars/s exceeds realistic speech rate",
-            chars_per_second);
+        println!(
+            "[FILTER] Hallucination: {:.0} chars/s exceeds realistic speech rate",
+            chars_per_second
+        );
         return true;
     }
 
     // Rule 4: Medium duration (0.5-1.0s) with disproportionate text
     // 1 second of fast speech = ~40-50 chars max
     if audio_duration_secs >= 0.5 && audio_duration_secs < 1.0 && char_count > 50 {
-        println!("[FILTER] Hallucination: {:.2}s audio -> {} chars (too dense)",
-            audio_duration_secs, char_count);
+        println!(
+            "[FILTER] Hallucination: {:.2}s audio -> {} chars (too dense)",
+            audio_duration_secs, char_count
+        );
         return true;
     }
 
@@ -1839,10 +2012,10 @@ fn start_recording_persistent(
     use std::sync::atomic::Ordering;
 
     let host = cpal::default_host();
-    let device = host.default_input_device()
-        .ok_or("No input device found")?;
+    let device = host.default_input_device().ok_or("No input device found")?;
 
-    let config = device.default_input_config()
+    let config = device
+        .default_input_config()
         .map_err(|e| format!("Failed to get input config: {}", e))?;
 
     let channels = config.channels() as usize;
@@ -1881,9 +2054,11 @@ fn start_recording_persistent(
                     }
                     let mut s = samples_clone.lock().unwrap();
                     for chunk in data.chunks(channels) {
-                        let mono: f32 = chunk.iter()
+                        let mono: f32 = chunk
+                            .iter()
                             .map(|&x| x as f32 / i16::MAX as f32)
-                            .sum::<f32>() / channels as f32;
+                            .sum::<f32>()
+                            / channels as f32;
                         s.push(mono);
                     }
                 },
@@ -1892,9 +2067,12 @@ fn start_recording_persistent(
             )
         }
         _ => return Err("Unsupported sample format".to_string()),
-    }.map_err(|e| format!("Failed to build stream: {}", e))?;
+    }
+    .map_err(|e| format!("Failed to build stream: {}", e))?;
 
-    stream.play().map_err(|e| format!("Failed to start stream: {}", e))?;
+    stream
+        .play()
+        .map_err(|e| format!("Failed to start stream: {}", e))?;
 
     Ok(stream)
 }
@@ -1933,13 +2111,13 @@ fn type_text(text: &str) -> Result<(), String> {
 /// Type text using enigo (Linux/Windows)
 #[cfg(not(target_os = "macos"))]
 fn type_text_enigo(text: &str) -> Result<(), String> {
-    let mut enigo = Enigo::new(&Settings::default())
-        .map_err(|e| format!("Enigo error: {}", e))?;
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| format!("Enigo error: {}", e))?;
 
     // Small delay before typing
     std::thread::sleep(Duration::from_millis(50));
 
-    enigo.text(text)
+    enigo
+        .text(text)
         .map_err(|e| format!("Failed to type text: {}", e))?;
 
     Ok(())
@@ -1951,8 +2129,7 @@ fn type_text_macos(text: &str) -> Result<(), String> {
     use core_graphics::event::CGEvent;
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
-    let pid = get_frontmost_app_pid()
-        .ok_or("Failed to get frontmost application PID")?;
+    let pid = get_frontmost_app_pid().ok_or("Failed to get frontmost application PID")?;
 
     std::thread::sleep(Duration::from_millis(50));
 
@@ -2003,11 +2180,11 @@ fn get_frontmost_app_pid() -> Option<i32> {
 
 /// Delete N characters by sending backspace keys (cross-platform)
 fn delete_chars(count: usize) -> Result<(), String> {
-    let mut enigo = Enigo::new(&Settings::default())
-        .map_err(|e| format!("Enigo error: {}", e))?;
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| format!("Enigo error: {}", e))?;
 
     for _ in 0..count {
-        enigo.key(EnigoKey::Backspace, Direction::Click)
+        enigo
+            .key(EnigoKey::Backspace, Direction::Click)
             .map_err(|e| format!("Failed to send backspace: {}", e))?;
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -2019,24 +2196,22 @@ fn delete_chars(count: usize) -> Result<(), String> {
 fn paste_text(text: &str) -> Result<(), String> {
     // Save previous clipboard
     let previous = {
-        let mut clipboard = Clipboard::new()
-            .map_err(|e| format!("Clipboard error: {}", e))?;
+        let mut clipboard = Clipboard::new().map_err(|e| format!("Clipboard error: {}", e))?;
         clipboard.get_text().ok()
     };
 
     // Set text to clipboard
     {
-        let mut clipboard = Clipboard::new()
-            .map_err(|e| format!("Clipboard error: {}", e))?;
-        clipboard.set_text(text.to_string())
+        let mut clipboard = Clipboard::new().map_err(|e| format!("Clipboard error: {}", e))?;
+        clipboard
+            .set_text(text.to_string())
             .map_err(|e| format!("Failed to set clipboard: {}", e))?;
     }
 
     std::thread::sleep(Duration::from_millis(100));
 
     // Simulate paste shortcut
-    let mut enigo = Enigo::new(&Settings::default())
-        .map_err(|e| format!("Enigo error: {}", e))?;
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| format!("Enigo error: {}", e))?;
 
     // Use Cmd on macOS, Ctrl on other platforms
     #[cfg(target_os = "macos")]
@@ -2044,17 +2219,20 @@ fn paste_text(text: &str) -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     let modifier = EnigoKey::Control;
 
-    enigo.key(modifier, Direction::Press)
+    enigo
+        .key(modifier, Direction::Press)
         .map_err(|e| format!("Key error: {}", e))?;
 
     std::thread::sleep(Duration::from_millis(20));
 
-    enigo.key(EnigoKey::Unicode('v'), Direction::Click)
+    enigo
+        .key(EnigoKey::Unicode('v'), Direction::Click)
         .map_err(|e| format!("Key error: {}", e))?;
 
     std::thread::sleep(Duration::from_millis(20));
 
-    enigo.key(modifier, Direction::Release)
+    enigo
+        .key(modifier, Direction::Release)
         .map_err(|e| format!("Key error: {}", e))?;
 
     std::thread::sleep(Duration::from_millis(200));
@@ -2124,15 +2302,17 @@ fn play_beep_blocking(frequency: f32, duration_ms: u64) {
                     let t = samples_played as f32 / total_samples as f32;
                     // For short beeps, use faster attack/decay to keep it audible
                     let envelope = if t < 0.05 {
-                        t * 20.0  // 5% attack
+                        t * 20.0 // 5% attack
                     } else if t > 0.8 {
-                        (1.0 - t) / 0.2  // 20% decay
+                        (1.0 - t) / 0.2 // 20% decay
                     } else {
                         1.0
                     };
 
-                    let value = (sample_clock * 2.0 * std::f32::consts::PI * frequency / sample_rate).sin()
-                        * volume * envelope;
+                    let value =
+                        (sample_clock * 2.0 * std::f32::consts::PI * frequency / sample_rate).sin()
+                            * volume
+                            * envelope;
 
                     for sample in frame.iter_mut() {
                         *sample = value;
@@ -2194,6 +2374,7 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     let config = Arc::new(openai_config);
     let target_key = hotkey.to_rdev_key();
 
+    let state: Arc<Mutex<RecordingState>> = Arc::new(Mutex::new(RecordingState::Idle));
     let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
     let recording_start: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let last_phrase: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
@@ -2201,14 +2382,213 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     // Atomic flag for recording state - used by audio stream
     let is_recording = Arc::new(AtomicBool::new(false));
 
+    // VAD for phrase detection
+    let vad: Arc<Mutex<VadPhraseDetector>> = Arc::new(Mutex::new(VadPhraseDetector::new()));
+
     let stream = start_recording_persistent(Arc::clone(&samples), Arc::clone(&is_recording))
         .expect("Failed to start audio recording");
 
+    // VAD monitoring thread - detects phrases by pauses
+    let state_for_vad = Arc::clone(&state);
+    let samples_for_vad = Arc::clone(&samples);
+    let config_for_vad = Arc::clone(&config);
+    let vad_for_thread = Arc::clone(&vad);
+    let last_phrase_for_vad = Arc::clone(&last_phrase);
+    let input_method_for_vad = input_method;
+
+    thread::spawn(move || {
+        let mut last_sample_count = 0usize;
+
+        loop {
+            thread::sleep(Duration::from_millis(50));
+
+            let is_recording = {
+                let s = state_for_vad.lock().unwrap();
+                *s == RecordingState::Recording
+            };
+
+            if !is_recording {
+                last_sample_count = 0;
+                continue;
+            }
+
+            let (phrase, sample_count, vad_state, max_energy, voice_ratio) = {
+                let samples = samples_for_vad.lock().unwrap();
+                let mut vad = vad_for_thread.lock().unwrap();
+
+                let recent_start = if samples.len() > RECORDING_SAMPLE_RATE as usize / 2 {
+                    samples.len() - RECORDING_SAMPLE_RATE as usize / 2
+                } else {
+                    0
+                };
+                let max_energy = if samples.len() > recent_start {
+                    samples[recent_start..]
+                        .chunks(vad.window_samples)
+                        .map(|w| vad.calculate_energy(w))
+                        .fold(0.0f32, |a, b| a.max(b))
+                } else {
+                    0.0
+                };
+
+                let phrase = vad.detect_phrase(&samples);
+                let in_speech = vad.in_speech;
+                let silent_windows = vad.silent_windows;
+                let voice_ratio = vad.voice_ratio;
+                (
+                    phrase,
+                    samples.len(),
+                    (in_speech, silent_windows),
+                    max_energy,
+                    voice_ratio,
+                )
+            };
+
+            if sample_count > last_sample_count + RECORDING_SAMPLE_RATE as usize / 2 {
+                let duration = sample_count as f32 / RECORDING_SAMPLE_RATE as f32;
+                let (in_speech, silent_windows) = vad_state;
+                println!(
+                    "[VAD] {:.1}s, in_speech={}, silent={}, energy={:.4}, voice_ratio={:.2}",
+                    duration, in_speech, silent_windows, max_energy, voice_ratio
+                );
+                last_sample_count = sample_count;
+            }
+
+            if let Some(phrase_samples) = phrase {
+                let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
+                println!(
+                    "[{}] Phrase detected ({:.1}s), transcribing via OpenAI...",
+                    timestamp(),
+                    duration_secs
+                );
+
+                let context = {
+                    let ctx = last_phrase_for_vad.lock().unwrap();
+                    if ctx.is_empty() {
+                        None
+                    } else {
+                        Some(ctx.clone())
+                    }
+                };
+
+                // Build prompt with context
+                let prompt = if let Some(ref ctx_text) = context {
+                    let last_sentence = extract_last_sentence(ctx_text);
+                    format!("{} {}", PROGRAMMER_PROMPT, last_sentence)
+                } else {
+                    PROGRAMMER_PROMPT.to_string()
+                };
+
+                let resampled = resample_48k_to_16k(&phrase_samples);
+                match transcribe_openai_internal(
+                    &config_for_vad,
+                    &resampled,
+                    WHISPER_SAMPLE_RATE,
+                    Some(&prompt),
+                ) {
+                    Ok(text) => {
+                        if !text.trim().is_empty() {
+                            // Save audio for analysis
+                            let audio_file =
+                                save_audio_segment(&phrase_samples, RECORDING_SAMPLE_RATE);
+
+                            let (processed_text, marker_continuation) = process_continuation(&text);
+                            let is_first_phrase = context.is_none();
+
+                            let is_continuation = if is_first_phrase {
+                                false
+                            } else {
+                                marker_continuation
+                                    || should_continue(
+                                        &processed_text,
+                                        context.as_deref().unwrap_or(""),
+                                    )
+                            };
+
+                            if is_continuation {
+                                let (chars_to_delete, deleted_chars) = {
+                                    let ctx = last_phrase_for_vad.lock().unwrap();
+                                    let count = count_chars_to_delete(&ctx);
+                                    let deleted: String = ctx
+                                        .chars()
+                                        .rev()
+                                        .take(count)
+                                        .collect::<String>()
+                                        .chars()
+                                        .rev()
+                                        .collect();
+                                    (count, deleted)
+                                };
+
+                                println!(
+                                    "[{}] <{} (deleting \"{}\")",
+                                    timestamp(),
+                                    chars_to_delete,
+                                    deleted_chars
+                                );
+
+                                if let Err(e) = delete_chars(chars_to_delete) {
+                                    eprintln!("Failed to delete chars: {}", e);
+                                }
+                                let text_with_space = format!(" {} ", processed_text);
+                                if let Err(e) = insert_text(&text_with_space, input_method_for_vad)
+                                {
+                                    eprintln!("Failed to insert text: {}", e);
+                                } else {
+                                    println!("[{}] +\"{}\"", timestamp(), processed_text);
+                                    log_transcription_with_audio(
+                                        &text,
+                                        &processed_text,
+                                        true,
+                                        audio_file.as_deref(),
+                                    );
+                                }
+                                let mut ctx = last_phrase_for_vad.lock().unwrap();
+                                let old_ctx = ctx.clone();
+                                *ctx = format!(
+                                    "{} {}",
+                                    remove_trailing_punctuation(&old_ctx),
+                                    processed_text
+                                );
+                                println!("[{}] ctx: \"{}\" -> \"{}\"", timestamp(), old_ctx, *ctx);
+                            } else {
+                                let final_text = if is_first_phrase {
+                                    capitalize_first(&processed_text)
+                                } else {
+                                    processed_text.clone()
+                                };
+
+                                let text_with_space = format!("{} ", final_text);
+                                if let Err(e) = insert_text(&text_with_space, input_method_for_vad)
+                                {
+                                    eprintln!("Failed to insert text: {}", e);
+                                } else {
+                                    println!("[{}] \"{}\"", timestamp(), final_text);
+                                    log_transcription_with_audio(
+                                        &text,
+                                        &final_text,
+                                        false,
+                                        audio_file.as_deref(),
+                                    );
+                                }
+                                *last_phrase_for_vad.lock().unwrap() = final_text;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Transcription error: {}", e);
+                    }
+                }
+            }
+        }
+    });
+
+    let state_clone = Arc::clone(&state);
     let is_recording_clone = Arc::clone(&is_recording);
     let samples_clone = Arc::clone(&samples);
     let recording_start_clone = Arc::clone(&recording_start);
     let last_phrase_clone = Arc::clone(&last_phrase);
     let config_clone = Arc::clone(&config);
+    let vad_clone = Arc::clone(&vad);
 
     // Debounce state
     let key_debounce = Arc::new(AtomicBool::new(false));
@@ -2224,10 +2604,13 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                 }
 
                 // Check if not already recording
-                if !is_recording_clone.load(Ordering::SeqCst) {
+                let mut rec_state = state_clone.lock().unwrap();
+                if *rec_state == RecordingState::Idle {
                     samples_clone.lock().unwrap().clear();
+                    vad_clone.lock().unwrap().reset();
                     *recording_start_clone.lock().unwrap() = Some(Instant::now());
                     is_recording_clone.store(true, Ordering::SeqCst);
+                    *rec_state = RecordingState::Recording;
 
                     println!("[{}] Recording...", timestamp());
                     // No start beep - it would be captured in the recording
@@ -2237,11 +2620,15 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                 key_debounce_clone.store(false, Ordering::SeqCst);
 
                 // Check if currently recording
-                if is_recording_clone.load(Ordering::SeqCst) {
+                let mut rec_state = state_clone.lock().unwrap();
+                if *rec_state == RecordingState::Recording {
                     is_recording_clone.store(false, Ordering::SeqCst);
+                    *rec_state = RecordingState::Idle;
                     play_stop_beep();
 
-                    let recording_duration = recording_start_clone.lock().unwrap()
+                    let recording_duration = recording_start_clone
+                        .lock()
+                        .unwrap()
                         .map(|start| start.elapsed())
                         .unwrap_or(Duration::ZERO);
 
@@ -2251,93 +2638,153 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                         return;
                     }
 
-                    let phrase_samples: Vec<f32> = samples_clone.lock().unwrap().clone();
-                    let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
-
-                    if phrase_samples.is_empty() {
-                        println!("[{}] No audio captured", timestamp());
-                        return;
-                    }
-
-                    println!("[{}] Transcribing via OpenAI ({:.1}s)...", timestamp(), duration_secs);
-
-                    let context = {
-                        let ctx = last_phrase_clone.lock().unwrap();
-                        if ctx.is_empty() { None } else { Some(ctx.clone()) }
+                    // Get remaining audio from VAD (audio after last detected phrase)
+                    let remaining = {
+                        let samples = samples_clone.lock().unwrap();
+                        let vad = vad_clone.lock().unwrap();
+                        vad.get_remaining(&samples)
                     };
 
-                    // Build prompt with context
-                    let prompt = if let Some(ref ctx_text) = context {
-                        let last_sentence = extract_last_sentence(ctx_text);
-                        format!("{} {}", PROGRAMMER_PROMPT, last_sentence)
-                    } else {
-                        PROGRAMMER_PROMPT.to_string()
-                    };
+                    drop(rec_state);
 
-                    // Resample to 16kHz for API
-                    let resampled = resample_48k_to_16k(&phrase_samples);
+                    if let Some(phrase_samples) = remaining {
+                        let duration_secs =
+                            phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
+                        println!(
+                            "[{}] Final phrase ({:.1}s), transcribing via OpenAI...",
+                            timestamp(),
+                            duration_secs
+                        );
 
-                    match transcribe_openai_internal(&config_clone, &resampled, WHISPER_SAMPLE_RATE, Some(&prompt)) {
-                        Ok(text) => {
-                            if text.trim().is_empty() {
-                                println!("[{}] (no speech detected)", timestamp());
+                        let context = {
+                            let ctx = last_phrase_clone.lock().unwrap();
+                            if ctx.is_empty() {
+                                None
                             } else {
-                                // Save audio for analysis
-                                let audio_file = save_audio_segment(&phrase_samples, RECORDING_SAMPLE_RATE);
+                                Some(ctx.clone())
+                            }
+                        };
 
-                                let (processed_text, marker_continuation) = process_continuation(&text);
-                                let is_first_phrase = context.is_none();
+                        // Build prompt with context
+                        let prompt = if let Some(ref ctx_text) = context {
+                            let last_sentence = extract_last_sentence(ctx_text);
+                            format!("{} {}", PROGRAMMER_PROMPT, last_sentence)
+                        } else {
+                            PROGRAMMER_PROMPT.to_string()
+                        };
 
-                                let is_continuation = if is_first_phrase {
-                                    false
+                        // Resample to 16kHz for API
+                        let resampled = resample_48k_to_16k(&phrase_samples);
+
+                        match transcribe_openai_internal(
+                            &config_clone,
+                            &resampled,
+                            WHISPER_SAMPLE_RATE,
+                            Some(&prompt),
+                        ) {
+                            Ok(text) => {
+                                if text.trim().is_empty() {
+                                    println!("[{}] (no speech detected)", timestamp());
                                 } else {
-                                    marker_continuation
-                                };
+                                    // Save audio for analysis
+                                    let audio_file =
+                                        save_audio_segment(&phrase_samples, RECORDING_SAMPLE_RATE);
 
-                                if is_continuation {
-                                    let (chars_to_delete, deleted_chars) = {
-                                        let ctx = last_phrase_clone.lock().unwrap();
-                                        let count = count_chars_to_delete(&ctx);
-                                        let deleted: String = ctx.chars().rev().take(count).collect::<String>().chars().rev().collect();
-                                        (count, deleted)
+                                    let (processed_text, marker_continuation) =
+                                        process_continuation(&text);
+                                    let is_first_phrase = context.is_none();
+
+                                    let is_continuation = if is_first_phrase {
+                                        false
+                                    } else {
+                                        marker_continuation
+                                            || should_continue(
+                                                &processed_text,
+                                                context.as_deref().unwrap_or(""),
+                                            )
                                     };
 
-                                    println!("[{}] <{} (deleting \"{}\")", timestamp(), chars_to_delete, deleted_chars);
+                                    if is_continuation {
+                                        let (chars_to_delete, deleted_chars) = {
+                                            let ctx = last_phrase_clone.lock().unwrap();
+                                            let count = count_chars_to_delete(&ctx);
+                                            let deleted: String = ctx
+                                                .chars()
+                                                .rev()
+                                                .take(count)
+                                                .collect::<String>()
+                                                .chars()
+                                                .rev()
+                                                .collect();
+                                            (count, deleted)
+                                        };
 
-                                    if let Err(e) = delete_chars(chars_to_delete) {
-                                        eprintln!("Failed to delete chars: {}", e);
-                                    }
-                                    let text_with_space = format!(" {} ", processed_text);
-                                    if let Err(e) = insert_text(&text_with_space, input_method) {
-                                        eprintln!("Failed to insert text: {}", e);
-                                    } else {
-                                        println!("[{}] +\"{}\"", timestamp(), processed_text);
-                                        log_transcription_with_audio(&text, &processed_text, true, audio_file.as_deref());
-                                    }
-                                    let mut ctx = last_phrase_clone.lock().unwrap();
-                                    let old_ctx = ctx.clone();
-                                    *ctx = format!("{} {}", remove_trailing_punctuation(&old_ctx), processed_text);
-                                } else {
-                                    let final_text = if is_first_phrase {
-                                        capitalize_first(&processed_text)
-                                    } else {
-                                        processed_text.clone()
-                                    };
+                                        println!(
+                                            "[{}] <{} (deleting \"{}\")",
+                                            timestamp(),
+                                            chars_to_delete,
+                                            deleted_chars
+                                        );
 
-                                    let text_with_space = format!("{} ", final_text);
-                                    if let Err(e) = insert_text(&text_with_space, input_method) {
-                                        eprintln!("Failed to insert text: {}", e);
+                                        if let Err(e) = delete_chars(chars_to_delete) {
+                                            eprintln!("Failed to delete chars: {}", e);
+                                        }
+                                        let text_with_space = format!(" {} ", processed_text);
+                                        if let Err(e) = insert_text(&text_with_space, input_method)
+                                        {
+                                            eprintln!("Failed to insert text: {}", e);
+                                        } else {
+                                            println!("[{}] +\"{}\"", timestamp(), processed_text);
+                                            log_transcription_with_audio(
+                                                &text,
+                                                &processed_text,
+                                                true,
+                                                audio_file.as_deref(),
+                                            );
+                                        }
+                                        let mut ctx = last_phrase_clone.lock().unwrap();
+                                        let old_ctx = ctx.clone();
+                                        *ctx = format!(
+                                            "{} {}",
+                                            remove_trailing_punctuation(&old_ctx),
+                                            processed_text
+                                        );
+                                        println!(
+                                            "[{}] ctx: \"{}\" -> \"{}\"",
+                                            timestamp(),
+                                            old_ctx,
+                                            *ctx
+                                        );
                                     } else {
-                                        println!("[{}] \"{}\"", timestamp(), final_text);
-                                        log_transcription_with_audio(&text, &final_text, false, audio_file.as_deref());
+                                        let final_text = if is_first_phrase {
+                                            capitalize_first(&processed_text)
+                                        } else {
+                                            processed_text.clone()
+                                        };
+
+                                        let text_with_space = format!("{} ", final_text);
+                                        if let Err(e) = insert_text(&text_with_space, input_method)
+                                        {
+                                            eprintln!("Failed to insert text: {}", e);
+                                        } else {
+                                            println!("[{}] \"{}\"", timestamp(), final_text);
+                                            log_transcription_with_audio(
+                                                &text,
+                                                &final_text,
+                                                false,
+                                                audio_file.as_deref(),
+                                            );
+                                        }
+                                        *last_phrase_clone.lock().unwrap() = final_text;
                                     }
-                                    *last_phrase_clone.lock().unwrap() = final_text;
                                 }
                             }
+                            Err(e) => {
+                                eprintln!("[{}] Transcription error: {}", timestamp(), e);
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("[{}] Transcription error: {}", timestamp(), e);
-                        }
+                    } else {
+                        println!("[{}] No remaining audio to transcribe", timestamp());
                     }
 
                     samples_clone.lock().unwrap().clear();
@@ -2347,7 +2794,11 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
         }
     };
 
-    println!("[{}] Ready! Hold {} to record, release to transcribe.", timestamp(), hotkey.name());
+    println!(
+        "[{}] Ready! Hold {} to record, release to transcribe.",
+        timestamp(),
+        hotkey.name()
+    );
     #[cfg(feature = "opus")]
     println!("OpenAI mode: OGG/Opus compression enabled");
     #[cfg(not(feature = "opus"))]
@@ -2378,8 +2829,8 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
 
 #[cfg(feature = "whisper")]
 fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotkey: HotkeyType) {
-    use std::thread;
     use std::sync::atomic::AtomicBool;
+    use std::thread;
 
     let whisper = Arc::new(whisper_ctx);
     let target_key = hotkey.to_rdev_key();
@@ -2396,8 +2847,9 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
     // Start audio stream ONCE at startup - always listening
     let samples_for_stream = Arc::clone(&samples);
     let is_recording_for_stream = Arc::clone(&is_recording_flag);
-    let _persistent_stream = start_recording_persistent(samples_for_stream, is_recording_for_stream)
-        .expect("Failed to start audio stream");
+    let _persistent_stream =
+        start_recording_persistent(samples_for_stream, is_recording_for_stream)
+            .expect("Failed to start audio stream");
 
     let state_clone = Arc::clone(&state);
     let samples_clone = Arc::clone(&samples);
@@ -2443,7 +2895,8 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                     0
                 };
                 let max_energy = if samples.len() > recent_start {
-                    samples[recent_start..].chunks(vad.window_samples)
+                    samples[recent_start..]
+                        .chunks(vad.window_samples)
                         .map(|w| vad.calculate_energy(w))
                         .fold(0.0f32, |a, b| a.max(b))
                 } else {
@@ -2454,28 +2907,45 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                 let in_speech = vad.in_speech;
                 let silent_windows = vad.silent_windows;
                 let voice_ratio = vad.voice_ratio;
-                (phrase, samples.len(), (in_speech, silent_windows), max_energy, voice_ratio)
+                (
+                    phrase,
+                    samples.len(),
+                    (in_speech, silent_windows),
+                    max_energy,
+                    voice_ratio,
+                )
             };
 
             if sample_count > last_sample_count + RECORDING_SAMPLE_RATE as usize / 2 {
                 let duration = sample_count as f32 / RECORDING_SAMPLE_RATE as f32;
                 let (in_speech, silent_windows) = vad_state;
-                println!("[VAD] {:.1}s, in_speech={}, silent={}, energy={:.4}, voice_ratio={:.2}",
-                    duration, in_speech, silent_windows, max_energy, voice_ratio);
+                println!(
+                    "[VAD] {:.1}s, in_speech={}, silent={}, energy={:.4}, voice_ratio={:.2}",
+                    duration, in_speech, silent_windows, max_energy, voice_ratio
+                );
                 last_sample_count = sample_count;
             }
 
             if let Some(phrase_samples) = phrase {
                 let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
-                println!("[{}] Phrase detected ({:.1}s), transcribing...", timestamp(), duration_secs);
+                println!(
+                    "[{}] Phrase detected ({:.1}s), transcribing...",
+                    timestamp(),
+                    duration_secs
+                );
 
                 let context = {
                     let ctx = last_phrase_for_vad.lock().unwrap();
-                    if ctx.is_empty() { None } else { Some(ctx.clone()) }
+                    if ctx.is_empty() {
+                        None
+                    } else {
+                        Some(ctx.clone())
+                    }
                 };
 
                 let resampled = resample_48k_to_16k(&phrase_samples);
-                match transcribe_whisper_internal(&whisper_for_vad, &resampled, context.as_deref()) {
+                match transcribe_whisper_internal(&whisper_for_vad, &resampled, context.as_deref())
+                {
                     Ok(text) => {
                         // Filter hallucinations - only for short segments
                         if is_hallucination(&text, duration_secs) {
@@ -2496,7 +2966,8 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
 
                         if !text.is_empty() {
                             // Save audio for analysis
-                            let audio_file = save_audio_segment(&phrase_samples, RECORDING_SAMPLE_RATE);
+                            let audio_file =
+                                save_audio_segment(&phrase_samples, RECORDING_SAMPLE_RATE);
 
                             let (processed_text, marker_continuation) = process_continuation(&text);
                             let is_first_phrase = context.is_none();
@@ -2504,32 +2975,58 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                             let is_continuation = if is_first_phrase {
                                 false
                             } else {
-                                marker_continuation || should_continue(&processed_text, context.as_deref().unwrap_or(""))
+                                marker_continuation
+                                    || should_continue(
+                                        &processed_text,
+                                        context.as_deref().unwrap_or(""),
+                                    )
                             };
 
                             if is_continuation {
                                 let (chars_to_delete, deleted_chars) = {
                                     let ctx = last_phrase_for_vad.lock().unwrap();
                                     let count = count_chars_to_delete(&ctx);
-                                    let deleted: String = ctx.chars().rev().take(count).collect::<String>().chars().rev().collect();
+                                    let deleted: String = ctx
+                                        .chars()
+                                        .rev()
+                                        .take(count)
+                                        .collect::<String>()
+                                        .chars()
+                                        .rev()
+                                        .collect();
                                     (count, deleted)
                                 };
 
-                                println!("[{}] <{} (deleting \"{}\")", timestamp(), chars_to_delete, deleted_chars);
+                                println!(
+                                    "[{}] <{} (deleting \"{}\")",
+                                    timestamp(),
+                                    chars_to_delete,
+                                    deleted_chars
+                                );
 
                                 if let Err(e) = delete_chars(chars_to_delete) {
                                     eprintln!("Failed to delete chars: {}", e);
                                 }
                                 let text_with_space = format!(" {} ", processed_text);
-                                if let Err(e) = insert_text(&text_with_space, input_method_for_vad) {
+                                if let Err(e) = insert_text(&text_with_space, input_method_for_vad)
+                                {
                                     eprintln!("Failed to insert text: {}", e);
                                 } else {
                                     println!("[{}] +\"{}\"", timestamp(), processed_text);
-                                    log_transcription_with_audio(&text, &processed_text, true, audio_file.as_deref());
+                                    log_transcription_with_audio(
+                                        &text,
+                                        &processed_text,
+                                        true,
+                                        audio_file.as_deref(),
+                                    );
                                 }
                                 let mut ctx = last_phrase_for_vad.lock().unwrap();
                                 let old_ctx = ctx.clone();
-                                *ctx = format!("{} {}", remove_trailing_punctuation(&old_ctx), processed_text);
+                                *ctx = format!(
+                                    "{} {}",
+                                    remove_trailing_punctuation(&old_ctx),
+                                    processed_text
+                                );
                                 println!("[{}] ctx: \"{}\" -> \"{}\"", timestamp(), old_ctx, *ctx);
                             } else {
                                 let final_text = if is_first_phrase {
@@ -2539,11 +3036,17 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                 };
 
                                 let text_with_space = format!("{} ", final_text);
-                                if let Err(e) = insert_text(&text_with_space, input_method_for_vad) {
+                                if let Err(e) = insert_text(&text_with_space, input_method_for_vad)
+                                {
                                     eprintln!("Failed to insert text: {}", e);
                                 } else {
                                     println!("[{}] \"{}\"", timestamp(), final_text);
-                                    log_transcription_with_audio(&text, &final_text, false, audio_file.as_deref());
+                                    log_transcription_with_audio(
+                                        &text,
+                                        &final_text,
+                                        false,
+                                        audio_file.as_deref(),
+                                    );
                                 }
                                 *last_phrase_for_vad.lock().unwrap() = final_text;
                             }
@@ -2587,7 +3090,9 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                     // Stop recording INSTANTLY via atomic flag
                     is_recording_clone.store(false, Ordering::Relaxed);
 
-                    let recording_duration = recording_start_clone.lock().unwrap()
+                    let recording_duration = recording_start_clone
+                        .lock()
+                        .unwrap()
                         .map(|start| start.elapsed())
                         .unwrap_or(Duration::ZERO);
 
@@ -2611,12 +3116,21 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                     drop(rec_state);
 
                     if let Some(phrase_samples) = remaining {
-                        let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
-                        println!("[{}] Final phrase ({:.1}s), transcribing...", timestamp(), duration_secs);
+                        let duration_secs =
+                            phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
+                        println!(
+                            "[{}] Final phrase ({:.1}s), transcribing...",
+                            timestamp(),
+                            duration_secs
+                        );
 
                         let context = {
                             let ctx = last_phrase_clone.lock().unwrap();
-                            if ctx.is_empty() { None } else { Some(ctx.clone()) }
+                            if ctx.is_empty() {
+                                None
+                            } else {
+                                Some(ctx.clone())
+                            }
                         };
 
                         let resampled = resample_48k_to_16k(&phrase_samples);
@@ -2627,40 +3141,68 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                     // Already logged in is_hallucination
                                 } else if is_duration_hallucination(&text, duration_secs) {
                                     // Already logged
-                                } else if context.as_ref().map_or(false, |ctx| is_duplicate_segment(&text, ctx)) {
+                                } else if context
+                                    .as_ref()
+                                    .map_or(false, |ctx| is_duplicate_segment(&text, ctx))
+                                {
                                     // Already logged in is_duplicate_segment
                                 } else if !text.is_empty() {
                                     // Save audio for analysis
-                                    let audio_file = save_audio_segment(&phrase_samples, RECORDING_SAMPLE_RATE);
+                                    let audio_file =
+                                        save_audio_segment(&phrase_samples, RECORDING_SAMPLE_RATE);
 
-                                    let (processed_text, marker_continuation) = process_continuation(&text);
+                                    let (processed_text, marker_continuation) =
+                                        process_continuation(&text);
                                     let is_first_phrase = context.is_none();
 
                                     let is_continuation = if is_first_phrase {
                                         false
                                     } else {
-                                        marker_continuation || should_continue(&processed_text, context.as_deref().unwrap_or(""))
+                                        marker_continuation
+                                            || should_continue(
+                                                &processed_text,
+                                                context.as_deref().unwrap_or(""),
+                                            )
                                     };
 
                                     if is_continuation {
                                         let (chars_to_delete, deleted_chars) = {
                                             let ctx = last_phrase_clone.lock().unwrap();
                                             let count = count_chars_to_delete(&ctx);
-                                            let deleted: String = ctx.chars().rev().take(count).collect::<String>().chars().rev().collect();
+                                            let deleted: String = ctx
+                                                .chars()
+                                                .rev()
+                                                .take(count)
+                                                .collect::<String>()
+                                                .chars()
+                                                .rev()
+                                                .collect();
                                             (count, deleted)
                                         };
 
-                                        println!("[{}] <{} (deleting \"{}\")", timestamp(), chars_to_delete, deleted_chars);
+                                        println!(
+                                            "[{}] <{} (deleting \"{}\")",
+                                            timestamp(),
+                                            chars_to_delete,
+                                            deleted_chars
+                                        );
 
                                         if let Err(e) = delete_chars(chars_to_delete) {
                                             eprintln!("Failed to delete chars: {}", e);
                                         }
                                         let text_with_space = format!(" {} ", processed_text);
-                                        if let Err(e) = insert_text(&text_with_space, input_method_for_callback) {
+                                        if let Err(e) =
+                                            insert_text(&text_with_space, input_method_for_callback)
+                                        {
                                             eprintln!("Failed to insert text: {}", e);
                                         } else {
                                             println!("[{}] +\"{}\"", timestamp(), processed_text);
-                                            log_transcription_with_audio(&text, &processed_text, true, audio_file.as_deref());
+                                            log_transcription_with_audio(
+                                                &text,
+                                                &processed_text,
+                                                true,
+                                                audio_file.as_deref(),
+                                            );
                                         }
                                     } else {
                                         let final_text = if is_first_phrase {
@@ -2670,11 +3212,18 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                         };
 
                                         let text_with_space = format!("{} ", final_text);
-                                        if let Err(e) = insert_text(&text_with_space, input_method_for_callback) {
+                                        if let Err(e) =
+                                            insert_text(&text_with_space, input_method_for_callback)
+                                        {
                                             eprintln!("Failed to insert text: {}", e);
                                         } else {
                                             println!("[{}] \"{}\"", timestamp(), final_text);
-                                            log_transcription_with_audio(&text, &final_text, false, audio_file.as_deref());
+                                            log_transcription_with_audio(
+                                                &text,
+                                                &final_text,
+                                                false,
+                                                audio_file.as_deref(),
+                                            );
                                         }
                                     }
                                 } else {
@@ -2699,8 +3248,15 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
         }
     };
 
-    println!("[{}] Ready! Hold {} to record, release to stop.", timestamp(), hotkey.name());
-    println!("VAD mode: phrases transcribed on {}ms silence", VAD_SILENCE_MS);
+    println!(
+        "[{}] Ready! Hold {} to record, release to stop.",
+        timestamp(),
+        hotkey.name()
+    );
+    println!(
+        "VAD mode: phrases transcribed on {}ms silence",
+        VAD_SILENCE_MS
+    );
 
     if let Err(e) = listen(callback) {
         eprintln!("Error: {:?}", e);

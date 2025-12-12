@@ -66,10 +66,12 @@ struct VadPhraseDetector {
 
 impl VadPhraseDetector {
     fn new() -> Self {
-        let window_samples = (VAD_WINDOW_MS as f32 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize;
+        let window_samples =
+            (VAD_WINDOW_MS as f32 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize;
         let silence_windows_threshold = (VAD_SILENCE_MS / VAD_WINDOW_MS) as usize;
         let min_speech_windows = (VAD_MIN_SPEECH_MS / VAD_WINDOW_MS) as usize;
-        let skip_initial_samples = (VAD_SKIP_INITIAL_MS as f32 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize;
+        let skip_initial_samples =
+            (VAD_SKIP_INITIAL_MS as f32 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize;
 
         Self {
             window_samples,
@@ -295,7 +297,7 @@ fn test_vad_detects_speech_after_skip() {
     // Generate: initial + speech + silence (long enough to trigger)
     let audio = concat_audio(vec![
         generate_silence(VAD_SKIP_INITIAL_MS + 50), // Skip period + buffer
-        generate_speech(600, 440.0),                 // 600ms speech
+        generate_speech(600, 440.0),                // 600ms speech
         generate_silence(VAD_SILENCE_MS + 100),     // Enough silence to trigger end
     ]);
 
@@ -304,7 +306,10 @@ fn test_vad_detects_speech_after_skip() {
 
     let phrase_duration_ms = phrase.unwrap().len() as f32 * 1000.0 / RECORDING_SAMPLE_RATE as f32;
     println!("Phrase duration: {:.0}ms", phrase_duration_ms);
-    assert!(phrase_duration_ms >= 500.0, "Phrase should be at least 500ms (min speech)");
+    assert!(
+        phrase_duration_ms >= 500.0,
+        "Phrase should be at least 500ms (min speech)"
+    );
 }
 
 #[test]
@@ -314,12 +319,15 @@ fn test_vad_ignores_short_speech() {
     // Generate speech shorter than VAD_MIN_SPEECH_MS
     let audio = concat_audio(vec![
         generate_silence(VAD_SKIP_INITIAL_MS + 50),
-        generate_speech(300, 440.0),  // 300ms < 500ms minimum
+        generate_speech(300, 440.0), // 300ms < 500ms minimum
         generate_silence(VAD_SILENCE_MS + 100),
     ]);
 
     let phrase = vad.detect_phrase(&audio);
-    assert!(phrase.is_none(), "Should ignore speech shorter than minimum");
+    assert!(
+        phrase.is_none(),
+        "Should ignore speech shorter than minimum"
+    );
 }
 
 #[test]
@@ -337,10 +345,7 @@ fn test_vad_reset() {
     let mut vad = VadPhraseDetector::new();
 
     // Process some audio to change state
-    let audio = concat_audio(vec![
-        generate_silence(250),
-        generate_speech(600, 440.0),
-    ]);
+    let audio = concat_audio(vec![generate_silence(250), generate_speech(600, 440.0)]);
     let _ = vad.detect_phrase(&audio);
 
     // Reset
@@ -365,12 +370,18 @@ fn test_vad_energy_calculation() {
     // Constant value should have that value as RMS
     let constant = vec![0.5; 100];
     let energy = vad.calculate_energy(&constant);
-    assert!((energy - 0.5).abs() < 0.001, "Constant 0.5 should have RMS of 0.5");
+    assert!(
+        (energy - 0.5).abs() < 0.001,
+        "Constant 0.5 should have RMS of 0.5"
+    );
 
     // Speech signal should be above threshold
     let speech = generate_speech(50, 440.0);
     let energy = vad.calculate_energy(&speech);
-    assert!(energy >= VAD_ENERGY_THRESHOLD, "Speech should be above threshold");
+    assert!(
+        energy >= VAD_ENERGY_THRESHOLD,
+        "Speech should be above threshold"
+    );
 }
 
 #[test]
@@ -391,7 +402,8 @@ fn test_vad_get_remaining_in_speech() {
     let remaining = vad.get_remaining(&audio);
     assert!(remaining.is_some(), "Should return remaining speech");
 
-    let remaining_duration = remaining.unwrap().len() as f32 * 1000.0 / RECORDING_SAMPLE_RATE as f32;
+    let remaining_duration =
+        remaining.unwrap().len() as f32 * 1000.0 / RECORDING_SAMPLE_RATE as f32;
     println!("Remaining duration: {:.0}ms", remaining_duration);
     assert!(remaining_duration >= 500.0);
 }
@@ -403,10 +415,10 @@ fn test_vad_two_phrases() {
     // Generate two distinct phrases
     let audio = concat_audio(vec![
         generate_silence(VAD_SKIP_INITIAL_MS + 50),
-        generate_speech(600, 440.0),             // Phrase 1
-        generate_silence(VAD_SILENCE_MS + 100),  // Gap
-        generate_speech(550, 880.0),             // Phrase 2
-        generate_silence(VAD_SILENCE_MS + 100),  // End
+        generate_speech(600, 440.0),            // Phrase 1
+        generate_silence(VAD_SILENCE_MS + 100), // Gap
+        generate_speech(550, 880.0),            // Phrase 2
+        generate_silence(VAD_SILENCE_MS + 100), // End
     ]);
 
     // Detect first phrase
@@ -431,10 +443,10 @@ fn test_vad_short_pause_does_not_split() {
 
     let audio = concat_audio(vec![
         generate_silence(VAD_SKIP_INITIAL_MS + 50),
-        generate_speech(400, 440.0),             // Speech
-        generate_silence(short_pause_ms),        // Short pause
-        generate_speech(400, 440.0),             // More speech (same phrase)
-        generate_silence(VAD_SILENCE_MS + 100),  // Long pause (end)
+        generate_speech(400, 440.0),            // Speech
+        generate_silence(short_pause_ms),       // Short pause
+        generate_speech(400, 440.0),            // More speech (same phrase)
+        generate_silence(VAD_SILENCE_MS + 100), // Long pause (end)
     ]);
 
     let phrase = vad.detect_phrase(&audio);
@@ -444,11 +456,17 @@ fn test_vad_short_pause_does_not_split() {
     println!("Combined phrase duration: {:.0}ms", phrase_duration);
 
     // Should be longer than a single 400ms speech segment
-    assert!(phrase_duration > 600.0, "Short pause should not split phrase");
+    assert!(
+        phrase_duration > 600.0,
+        "Short pause should not split phrase"
+    );
 
     // No second phrase
     let phrase2 = vad.detect_phrase(&audio);
-    assert!(phrase2.is_none(), "Short pause should not create second phrase");
+    assert!(
+        phrase2.is_none(),
+        "Short pause should not create second phrase"
+    );
 }
 
 // ============== Continuation/Concatenation Tests ==============
@@ -488,8 +506,11 @@ fn remove_trailing_punctuation(text: &str) -> String {
     }
 
     // Remove single punctuation marks
-    if trimmed.ends_with('.') || trimmed.ends_with('!') ||
-       trimmed.ends_with('?') || trimmed.ends_with(',') {
+    if trimmed.ends_with('.')
+        || trimmed.ends_with('!')
+        || trimmed.ends_with('?')
+        || trimmed.ends_with(',')
+    {
         let mut s = trimmed.to_string();
         s.pop();
         return s.trim().to_string();
@@ -561,9 +582,7 @@ const HALLUCINATION_PATTERNS: &[&str] = &[
 ];
 
 /// Exact match hallucinations (filler sounds)
-const HALLUCINATION_EXACT: &[&str] = &[
-    "Уэм", "Ум", "Эм", "Хм", "Ах", "Ох", "М-м", "...", "…",
-];
+const HALLUCINATION_EXACT: &[&str] = &["Уэм", "Ум", "Эм", "Хм", "Ах", "Ох", "М-м", "...", "…"];
 
 /// Check if text is a Whisper hallucination
 fn is_hallucination(text: &str) -> bool {
@@ -830,7 +849,10 @@ fn test_key_argument_parsing() {
     assert_eq!(parse_key_arg(&["--key", "ctrl"]), Some("ctrl".to_string()));
     assert_eq!(parse_key_arg(&["--key=fn"]), Some("fn".to_string()));
     assert_eq!(parse_key_arg(&["--model", "tiny"]), None);
-    assert_eq!(parse_key_arg(&["--key", "ctrlright", "--model", "base"]), Some("ctrlright".to_string()));
+    assert_eq!(
+        parse_key_arg(&["--key", "ctrlright", "--model", "base"]),
+        Some("ctrlright".to_string())
+    );
 }
 
 // ============== Smart Continuation Detection Tests ==============
@@ -838,29 +860,114 @@ fn test_key_argument_parsing() {
 /// Russian conjunctions and words that typically continue a sentence
 const CONTINUATION_WORDS_RU: &[&str] = &[
     // Conjunctions
-    "и", "а", "но", "или", "либо", "да", "же", "то", "что", "чтобы",
-    "потому", "поэтому", "однако", "зато", "притом", "причём", "причем",
-    "когда", "если", "хотя", "пока", "чем", "как", "где", "куда",
-    "который", "которая", "которое", "которые", "которого", "которой",
+    "и",
+    "а",
+    "но",
+    "или",
+    "либо",
+    "да",
+    "же",
+    "то",
+    "что",
+    "чтобы",
+    "потому",
+    "поэтому",
+    "однако",
+    "зато",
+    "притом",
+    "причём",
+    "причем",
+    "когда",
+    "если",
+    "хотя",
+    "пока",
+    "чем",
+    "как",
+    "где",
+    "куда",
+    "который",
+    "которая",
+    "которое",
+    "которые",
+    "которого",
+    "которой",
     // Particles and connectors
-    "ведь", "вот", "даже", "именно", "только", "лишь", "просто",
-    "также", "тоже", "ещё", "еще", "уже",
+    "ведь",
+    "вот",
+    "даже",
+    "именно",
+    "только",
+    "лишь",
+    "просто",
+    "также",
+    "тоже",
+    "ещё",
+    "еще",
+    "уже",
     // Prepositions that rarely start sentences
-    "с", "в", "на", "к", "по", "за", "из", "от", "до", "для", "без", "при", "над", "под",
+    "с",
+    "в",
+    "на",
+    "к",
+    "по",
+    "за",
+    "из",
+    "от",
+    "до",
+    "для",
+    "без",
+    "при",
+    "над",
+    "под",
 ];
 
 /// English conjunctions and words that typically continue a sentence
 const CONTINUATION_WORDS_EN: &[&str] = &[
     // Conjunctions
-    "and", "but", "or", "nor", "yet", "so", "for",
-    "because", "although", "though", "while", "when", "where",
-    "if", "unless", "until", "since", "as", "than",
-    "which", "who", "whom", "whose", "that",
+    "and",
+    "but",
+    "or",
+    "nor",
+    "yet",
+    "so",
+    "for",
+    "because",
+    "although",
+    "though",
+    "while",
+    "when",
+    "where",
+    "if",
+    "unless",
+    "until",
+    "since",
+    "as",
+    "than",
+    "which",
+    "who",
+    "whom",
+    "whose",
+    "that",
     // Connectors
-    "however", "therefore", "moreover", "furthermore", "otherwise",
-    "also", "too", "either", "neither", "both",
+    "however",
+    "therefore",
+    "moreover",
+    "furthermore",
+    "otherwise",
+    "also",
+    "too",
+    "either",
+    "neither",
+    "both",
     // Prepositions that rarely start sentences
-    "with", "from", "to", "in", "on", "at", "by", "of",
+    "with",
+    "from",
+    "to",
+    "in",
+    "on",
+    "at",
+    "by",
+    "of",
 ];
 
 /// Detect if phrase should be a continuation based on its content
@@ -991,7 +1098,10 @@ fn test_should_continue_realistic_scenario() {
     assert!(should_continue("что конкатенация работает", "понять."));
 
     // "не совсем так." after "что конкатенация работает" - no punctuation in prev, should continue
-    assert!(should_continue("не совсем так.", "что конкатенация работает"));
+    assert!(should_continue(
+        "не совсем так.",
+        "что конкатенация работает"
+    ));
 
     // "как хотелось бы." after "не совсем так." - conjunction "как", should continue
     assert!(should_continue("как хотелось бы.", "не совсем так."));

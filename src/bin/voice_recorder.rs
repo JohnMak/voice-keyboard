@@ -51,7 +51,8 @@ fn run_macos() {
     let state: Arc<Mutex<RecordingState>> = Arc::new(Mutex::new(RecordingState::Idle));
     let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
     let stream: Arc<Mutex<Option<Stream>>> = Arc::new(Mutex::new(None));
-    let last_tap: Arc<Mutex<(Option<Instant>, Option<Instant>)>> = Arc::new(Mutex::new((None, None)));
+    let last_tap: Arc<Mutex<(Option<Instant>, Option<Instant>)>> =
+        Arc::new(Mutex::new((None, None)));
 
     let state_clone = Arc::clone(&state);
     let samples_clone = Arc::clone(&samples);
@@ -89,7 +90,10 @@ fn run_macos() {
                                 Ok(new_stream) => {
                                     *stream_clone.lock().unwrap() = Some(new_stream);
                                     *rec_state = RecordingState::Recording;
-                                    println!("[{}] Recording started! Tap Control to stop.", timestamp());
+                                    println!(
+                                        "[{}] Recording started! Tap Control to stop.",
+                                        timestamp()
+                                    );
                                 }
                                 Err(e) => {
                                     eprintln!("Failed to start recording: {}", e);
@@ -100,7 +104,10 @@ fn run_macos() {
                     }
                     // First tap - record time
                     tap_state.0 = Some(now);
-                    println!("[{}] Control released (double-tap to start recording...)", timestamp());
+                    println!(
+                        "[{}] Control released (double-tap to start recording...)",
+                        timestamp()
+                    );
                 }
                 RecordingState::Recording => {
                     // Single tap while recording - stop and save
@@ -132,8 +139,12 @@ fn run_macos() {
                     }
 
                     let duration_secs = recorded_samples.len() as f32 / 48000.0;
-                    println!("[{}] Recorded {:.1}s of audio ({} samples)",
-                        timestamp(), duration_secs, recorded_samples.len());
+                    println!(
+                        "[{}] Recorded {:.1}s of audio ({} samples)",
+                        timestamp(),
+                        duration_secs,
+                        recorded_samples.len()
+                    );
 
                     // Save and paste OGG file
                     match save_and_paste_ogg(&recorded_samples) {
@@ -163,16 +174,19 @@ fn start_recording(samples: Arc<Mutex<Vec<f32>>>) -> Result<cpal::Stream, String
     use cpal::SampleFormat;
 
     let host = cpal::default_host();
-    let device = host.default_input_device()
-        .ok_or("No input device found")?;
+    let device = host.default_input_device().ok_or("No input device found")?;
 
     println!("Using input device: {}", device.name().unwrap_or_default());
 
-    let config = device.default_input_config()
+    let config = device
+        .default_input_config()
         .map_err(|e| format!("Failed to get input config: {}", e))?;
 
-    println!("Input config: {} channels, {} Hz",
-        config.channels(), config.sample_rate().0);
+    println!(
+        "Input config: {} channels, {} Hz",
+        config.channels(),
+        config.sample_rate().0
+    );
 
     let channels = config.channels() as usize;
 
@@ -202,9 +216,11 @@ fn start_recording(samples: Arc<Mutex<Vec<f32>>>) -> Result<cpal::Stream, String
                 move |data: &[i16], _| {
                     let mut s = samples_clone.lock().unwrap();
                     for chunk in data.chunks(channels) {
-                        let mono: f32 = chunk.iter()
+                        let mono: f32 = chunk
+                            .iter()
                             .map(|&x| x as f32 / i16::MAX as f32)
-                            .sum::<f32>() / channels as f32;
+                            .sum::<f32>()
+                            / channels as f32;
                         s.push(mono);
                     }
                 },
@@ -213,9 +229,12 @@ fn start_recording(samples: Arc<Mutex<Vec<f32>>>) -> Result<cpal::Stream, String
             )
         }
         _ => return Err("Unsupported sample format".to_string()),
-    }.map_err(|e| format!("Failed to build stream: {}", e))?;
+    }
+    .map_err(|e| format!("Failed to build stream: {}", e))?;
 
-    stream.play().map_err(|e| format!("Failed to start stream: {}", e))?;
+    stream
+        .play()
+        .map_err(|e| format!("Failed to start stream: {}", e))?;
 
     Ok(stream)
 }
@@ -243,16 +262,18 @@ fn save_wav(samples: &[f32], path: &PathBuf) -> Result<(), String> {
         sample_format: hound::SampleFormat::Int,
     };
 
-    let mut writer = hound::WavWriter::create(path, spec)
-        .map_err(|e| format!("Failed to create WAV: {}", e))?;
+    let mut writer =
+        hound::WavWriter::create(path, spec).map_err(|e| format!("Failed to create WAV: {}", e))?;
 
     for &sample in samples {
         let sample_i16 = (sample * i16::MAX as f32) as i16;
-        writer.write_sample(sample_i16)
+        writer
+            .write_sample(sample_i16)
             .map_err(|e| format!("Failed to write sample: {}", e))?;
     }
 
-    writer.finalize()
+    writer
+        .finalize()
         .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
 
     Ok(())
@@ -263,10 +284,7 @@ fn copy_file_to_clipboard_and_paste(path: &PathBuf) -> Result<(), String> {
     use std::process::Command;
 
     // Use osascript to copy file to clipboard
-    let script = format!(
-        r#"set the clipboard to POSIX file "{}""#,
-        path.display()
-    );
+    let script = format!(r#"set the clipboard to POSIX file "{}""#, path.display());
 
     let output = Command::new("osascript")
         .arg("-e")
@@ -275,8 +293,10 @@ fn copy_file_to_clipboard_and_paste(path: &PathBuf) -> Result<(), String> {
         .map_err(|e| format!("Failed to run osascript: {}", e))?;
 
     if !output.status.success() {
-        return Err(format!("osascript failed: {}",
-            String::from_utf8_lossy(&output.stderr)));
+        return Err(format!(
+            "osascript failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
 
     // Small delay
@@ -285,14 +305,16 @@ fn copy_file_to_clipboard_and_paste(path: &PathBuf) -> Result<(), String> {
     // Simulate Cmd+V
     use enigo::{Direction, Enigo, Key as EnigoKey, Keyboard, Settings};
 
-    let mut enigo = Enigo::new(&Settings::default())
-        .map_err(|e| format!("Enigo error: {}", e))?;
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| format!("Enigo error: {}", e))?;
 
-    enigo.key(EnigoKey::Meta, Direction::Press)
+    enigo
+        .key(EnigoKey::Meta, Direction::Press)
         .map_err(|e| format!("Key error: {}", e))?;
-    enigo.key(EnigoKey::Unicode('v'), Direction::Click)
+    enigo
+        .key(EnigoKey::Unicode('v'), Direction::Click)
         .map_err(|e| format!("Key error: {}", e))?;
-    enigo.key(EnigoKey::Meta, Direction::Release)
+    enigo
+        .key(EnigoKey::Meta, Direction::Release)
         .map_err(|e| format!("Key error: {}", e))?;
 
     Ok(())

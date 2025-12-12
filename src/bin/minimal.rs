@@ -86,7 +86,10 @@ fn run_macos() {
 
             // Record this tap (first tap or too slow = new first tap)
             state.0 = Some(now);
-            println!("[{}] Control released (waiting for double-tap...)", chrono_lite());
+            println!(
+                "[{}] Control released (waiting for double-tap...)",
+                chrono_lite()
+            );
         }
     };
 
@@ -101,14 +104,14 @@ fn run_macos() {
 
 /// Insert text via clipboard + Cmd+V, preserving previous clipboard content
 fn insert_text(text: &str) -> Result<(), String> {
-    let mut clipboard = Clipboard::new()
-        .map_err(|e| format!("Clipboard error: {}", e))?;
+    let mut clipboard = Clipboard::new().map_err(|e| format!("Clipboard error: {}", e))?;
 
     // Save current clipboard content
     let previous = clipboard.get_text().ok();
 
     // Set our text
-    clipboard.set_text(text.to_string())
+    clipboard
+        .set_text(text.to_string())
         .map_err(|e| format!("Failed to set clipboard: {}", e))?;
 
     // Small delay to ensure clipboard is updated
@@ -119,19 +122,22 @@ fn insert_text(text: &str) -> Result<(), String> {
     {
         use enigo::{Direction, Enigo, Key as EnigoKey, Keyboard, Settings};
 
-        let mut enigo = Enigo::new(&Settings::default())
-            .map_err(|e| format!("Enigo error: {}", e))?;
+        let mut enigo =
+            Enigo::new(&Settings::default()).map_err(|e| format!("Enigo error: {}", e))?;
 
         // Press Meta (Cmd)
-        enigo.key(EnigoKey::Meta, Direction::Press)
+        enigo
+            .key(EnigoKey::Meta, Direction::Press)
             .map_err(|e| format!("Key press error: {}", e))?;
 
         // Press and release V
-        enigo.key(EnigoKey::Unicode('v'), Direction::Click)
+        enigo
+            .key(EnigoKey::Unicode('v'), Direction::Click)
             .map_err(|e| format!("Key click error: {}", e))?;
 
         // Release Meta
-        enigo.key(EnigoKey::Meta, Direction::Release)
+        enigo
+            .key(EnigoKey::Meta, Direction::Release)
             .map_err(|e| format!("Key release error: {}", e))?;
     }
 
