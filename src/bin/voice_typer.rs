@@ -3134,7 +3134,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                         };
 
                         let resampled = resample_48k_to_16k(&phrase_samples);
-                        match transcribe(&whisper_clone, &resampled, context.as_deref()) {
+                        match transcribe_whisper_internal(&whisper_clone, &resampled, context.as_deref()) {
                             Ok(text) => {
                                 // Filter hallucinations - only for short segments
                                 if is_hallucination(&text, duration_secs) {
