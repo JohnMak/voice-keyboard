@@ -14,7 +14,9 @@
 
 use std::env;
 use std::fs::{self, File};
-use std::io::{Cursor, Write};
+use std::io::Write;
+#[cfg(not(feature = "opus"))]
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -786,7 +788,7 @@ impl Transcriber for WhisperTranscriber {
 fn transcribe_openai_internal(
     config: &OpenAIConfig,
     samples: &[f32],
-    sample_rate: u32,
+    #[cfg_attr(feature = "opus", allow(unused_variables))] sample_rate: u32,
     prompt: Option<&str>,
 ) -> Result<String, String> {
     // Encode audio data
@@ -1778,7 +1780,6 @@ fn process_continuation(text: &str) -> (String, bool) {
     }
 }
 
-#[cfg(feature = "whisper")]
 #[allow(dead_code)]
 fn should_continue(_text: &str, _prev_context: &str) -> bool {
     false
