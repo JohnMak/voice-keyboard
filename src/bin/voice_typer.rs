@@ -86,6 +86,24 @@ prompt, model, LLM, Claude, Whisper, embedding. \
 ВАЖНО: Аудио разбито на части по паузам. Если часть продолжает предыдущую мысль — \
 начни с многоточия (...). Примеры: ...и потом сделай commit, ...который мы обсуждали.";
 
+// ============================================================================
+// Transcriber Trait - unified interface for Whisper and OpenAI backends
+// ============================================================================
+
+/// Result of transcription
+struct TranscriptionResult {
+    text: String,
+}
+
+/// Unified transcription interface
+trait Transcriber: Send + Sync {
+    /// Transcribe audio samples (16kHz, mono, f32)
+    fn transcribe(&self, samples: &[f32], context: Option<&str>) -> Result<TranscriptionResult, String>;
+
+    /// Name of the backend for logging
+    fn name(&self) -> &'static str;
+}
+
 /// MIDI note frequencies for beep sounds
 #[cfg(feature = "whisper")]
 const BEEP_START_FREQ: f32 = 880.0;  // A5 - higher pitch for start
@@ -110,21 +128,14 @@ fn set_beep_volume(volume: f32) {
 const RECORDING_SAMPLE_RATE: u32 = 48000;
 
 /// VAD (Voice Activity Detection) settings
-#[cfg(feature = "whisper")]
 const VAD_SILENCE_MS: u64 = 350;
-#[cfg(feature = "whisper")]
 const VAD_MIN_SPEECH_MS: u64 = 500;
-#[cfg(feature = "whisper")]
 const VAD_WINDOW_MS: u64 = 30;
-#[cfg(feature = "whisper")]
 const VAD_ENERGY_THRESHOLD: f32 = 0.001;
-#[cfg(feature = "whisper")]
 const VAD_VOICE_RATIO_THRESHOLD: f32 = 0.15;
-#[cfg(feature = "whisper")]
 const VAD_SPEECH_CONFIRM_WINDOWS: usize = 2;
 
 /// Recording state
-#[cfg(feature = "whisper")]
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum RecordingState {
     Idle,
@@ -208,7 +219,6 @@ impl HotkeyType {
 }
 
 /// VAD-based phrase detector with spectral voice detection
-#[cfg(feature = "whisper")]
 struct VadPhraseDetector {
     window_samples: usize,
     silence_windows_threshold: usize,
@@ -225,7 +235,6 @@ struct VadPhraseDetector {
     last_transcribed_end: usize,
 }
 
-#[cfg(feature = "whisper")]
 impl VadPhraseDetector {
     fn new() -> Self {
         let window_samples = (VAD_WINDOW_MS as f32 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize;
@@ -669,8 +678,63 @@ impl OpenAIConfig {
     }
 }
 
-/// Transcribe audio using OpenAI API (gpt-4o-transcribe)
-fn transcribe_openai(config: &OpenAIConfig, samples: &[f32], sample_rate: u32, prompt: Option<&str>) -> Result<String, String> {
+/// OpenAI transcription backend
+struct OpenAITranscriber {
+    config: OpenAIConfig,
+}
+
+impl OpenAITranscriber {
+    fn new(config: OpenAIConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl Transcriber for OpenAITranscriber {
+    fn transcribe(&self, samples: &[f32], context: Option<&str>) -> Result<TranscriptionResult, String> {
+        // Build prompt with context
+        let prompt = if let Some(ctx_text) = context {
+            let last_sentence = extract_last_sentence(ctx_text);
+            format!("{} {}", PROGRAMMER_PROMPT, last_sentence)
+        } else {
+            PROGRAMMER_PROMPT.to_string()
+        };
+
+        let text = transcribe_openai_internal(&self.config, samples, WHISPER_SAMPLE_RATE, Some(&prompt))?;
+        Ok(TranscriptionResult { text })
+    }
+
+    fn name(&self) -> &'static str {
+        "OpenAI"
+    }
+}
+
+/// Whisper transcription backend (local)
+#[cfg(feature = "whisper")]
+struct WhisperTranscriber {
+    ctx: Arc<whisper_rs::WhisperContext>,
+}
+
+#[cfg(feature = "whisper")]
+impl WhisperTranscriber {
+    fn new(ctx: whisper_rs::WhisperContext) -> Self {
+        Self { ctx: Arc::new(ctx) }
+    }
+}
+
+#[cfg(feature = "whisper")]
+impl Transcriber for WhisperTranscriber {
+    fn transcribe(&self, samples: &[f32], context: Option<&str>) -> Result<TranscriptionResult, String> {
+        let text = transcribe_whisper_internal(&self.ctx, samples, context)?;
+        Ok(TranscriptionResult { text })
+    }
+
+    fn name(&self) -> &'static str {
+        "Whisper"
+    }
+}
+
+/// Internal function to transcribe audio using OpenAI API
+fn transcribe_openai_internal(config: &OpenAIConfig, samples: &[f32], sample_rate: u32, prompt: Option<&str>) -> Result<String, String> {
     // Encode audio data
     #[cfg(feature = "opus")]
     let (audio_data, filename, content_type) = {
@@ -768,32 +832,19 @@ fn transcribe_openai(config: &OpenAIConfig, samples: &[f32], sample_rate: u32, p
         return Err(format!("API error {}: {}", status, error_text));
     }
 
-    // Parse JSON response
+    // Parse JSON response using serde_json for proper escape handling
     let response_text = response.text()
         .map_err(|e| format!("Failed to read response: {}", e))?;
 
-    // Simple JSON parsing for {"text": "..."}
-    if let Some(start) = response_text.find("\"text\"") {
-        if let Some(colon) = response_text[start..].find(':') {
-            let after_colon = &response_text[start + colon + 1..];
-            let trimmed = after_colon.trim_start();
-            if trimmed.starts_with('"') {
-                if let Some(end) = trimmed[1..].find('"') {
-                    let text = &trimmed[1..end + 1];
-                    // Unescape basic JSON escapes
-                    let unescaped = text
-                        .replace("\\n", "\n")
-                        .replace("\\r", "\r")
-                        .replace("\\t", "\t")
-                        .replace("\\\"", "\"")
-                        .replace("\\\\", "\\");
-                    return Ok(unescaped);
-                }
-            }
-        }
-    }
+    // Parse as JSON object and extract "text" field
+    let json: serde_json::Value = serde_json::from_str(&response_text)
+        .map_err(|e| format!("Failed to parse JSON: {} (response: {})", e, response_text))?;
 
-    Err(format!("Failed to parse response: {}", response_text))
+    let text = json.get("text")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("No 'text' field in response: {}", response_text))?;
+
+    Ok(text.to_string())
 }
 
 fn resolve_model_path(model: &str) -> PathBuf {
@@ -1467,7 +1518,7 @@ fn load_whisper(model_path: &PathBuf) -> Result<whisper_rs::WhisperContext, Stri
 const MIN_TOKEN_DURATION_CS: i64 = 0;  // Only filter tokens with exactly 0 duration
 
 #[cfg(feature = "whisper")]
-fn transcribe(ctx: &whisper_rs::WhisperContext, samples: &[f32], context: Option<&str>) -> Result<String, String> {
+fn transcribe_whisper_internal(ctx: &whisper_rs::WhisperContext, samples: &[f32], context: Option<&str>) -> Result<String, String> {
     use whisper_rs::{FullParams, SamplingStrategy};
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
@@ -2226,7 +2277,7 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                     // Resample to 16kHz for API
                     let resampled = resample_48k_to_16k(&phrase_samples);
 
-                    match transcribe_openai(&config_clone, &resampled, WHISPER_SAMPLE_RATE, Some(&prompt)) {
+                    match transcribe_openai_internal(&config_clone, &resampled, WHISPER_SAMPLE_RATE, Some(&prompt)) {
                         Ok(text) => {
                             if text.trim().is_empty() {
                                 println!("[{}] (no speech detected)", timestamp());
@@ -2424,7 +2475,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                 };
 
                 let resampled = resample_48k_to_16k(&phrase_samples);
-                match transcribe(&whisper_for_vad, &resampled, context.as_deref()) {
+                match transcribe_whisper_internal(&whisper_for_vad, &resampled, context.as_deref()) {
                     Ok(text) => {
                         // Filter hallucinations - only for short segments
                         if is_hallucination(&text, duration_secs) {
