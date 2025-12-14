@@ -14,9 +14,9 @@
 
 use std::env;
 use std::fs::{self, File};
-use std::io::Write;
 #[cfg(not(feature = "opus"))]
 use std::io::Cursor;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -702,8 +702,59 @@ impl OpenAIConfig {
     }
 }
 
-/// Internal function to transcribe audio using OpenAI API
+/// Maximum number of retries for API errors
+const API_MAX_RETRIES: u32 = 3;
+/// Base delay between retries in milliseconds
+const API_RETRY_DELAY_MS: u64 = 1000;
+
+/// Internal function to transcribe audio using OpenAI API with retry logic
 fn transcribe_openai_internal(
+    config: &OpenAIConfig,
+    samples: &[f32],
+    #[cfg_attr(feature = "opus", allow(unused_variables))] sample_rate: u32,
+    prompt: Option<&str>,
+) -> Result<String, String> {
+    let mut last_error = String::new();
+
+    for attempt in 0..API_MAX_RETRIES {
+        if attempt > 0 {
+            let delay = API_RETRY_DELAY_MS * (1 << (attempt - 1)); // Exponential backoff
+            println!(
+                "[{}] Retry {}/{} after {}ms...",
+                timestamp(),
+                attempt + 1,
+                API_MAX_RETRIES,
+                delay
+            );
+            thread::sleep(Duration::from_millis(delay));
+        }
+
+        match transcribe_openai_single_attempt(config, samples, sample_rate, prompt) {
+            Ok(text) => return Ok(text),
+            Err(e) => {
+                last_error = e.clone();
+                // Don't retry on certain errors
+                if e.contains("Invalid file format") || e.contains("audio too short") {
+                    return Err(e);
+                }
+                eprintln!(
+                    "[{}] API error (attempt {}): {}",
+                    timestamp(),
+                    attempt + 1,
+                    e
+                );
+            }
+        }
+    }
+
+    Err(format!(
+        "Failed after {} retries: {}",
+        API_MAX_RETRIES, last_error
+    ))
+}
+
+/// Single attempt to transcribe audio using OpenAI API
+fn transcribe_openai_single_attempt(
     config: &OpenAIConfig,
     samples: &[f32],
     #[cfg_attr(feature = "opus", allow(unused_variables))] sample_rate: u32,
@@ -2287,8 +2338,22 @@ fn timestamp() -> String {
 // Main Run Loop (OpenAI Mode)
 // ============================================================================
 
+/// Pending transcription job
+struct TranscriptionJob {
+    samples: Vec<f32>,
+    sequence_num: u64,
+}
+
+/// Completed transcription result
+struct TranscriptionOutput {
+    text: String,
+    is_continuation: bool,
+    sequence_num: u64,
+}
+
 fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: HotkeyType) {
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::mpsc;
 
     let config = Arc::new(openai_config);
     let target_key = hotkey.to_rdev_key();
@@ -2301,21 +2366,191 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     // Atomic flag for recording state - used by audio stream
     let is_recording = Arc::new(AtomicBool::new(false));
 
+    // Sequence number for ordering transcription results
+    let next_sequence = Arc::new(AtomicU64::new(0));
+
+    // Channel for sending transcription jobs to worker
+    let (job_tx, job_rx) = mpsc::channel::<TranscriptionJob>();
+
+    // Channel for sending completed results to output thread
+    let (result_tx, result_rx) = mpsc::channel::<TranscriptionOutput>();
+
+    // Flag to track if processing is in progress (prevents clearing samples too early)
+    let processing_count = Arc::new(AtomicU64::new(0));
+
     // VAD for phrase detection
     let vad: Arc<Mutex<VadPhraseDetector>> = Arc::new(Mutex::new(VadPhraseDetector::new()));
 
     let stream = start_recording_persistent(Arc::clone(&samples), Arc::clone(&is_recording))
         .expect("Failed to start audio recording");
 
-    // VAD monitoring thread - detects phrases by pauses
-    let state_for_vad = Arc::clone(&state);
-    let samples_for_vad = Arc::clone(&samples);
-    let config_for_vad = Arc::clone(&config);
-    let vad_for_thread = Arc::clone(&vad);
-    let last_phrase_for_vad = Arc::clone(&last_phrase);
-    let input_method_for_vad = input_method;
+    // Transcription worker thread - processes jobs from queue
+    let config_for_worker = Arc::clone(&config);
+    let last_phrase_for_worker = Arc::clone(&last_phrase);
+    let processing_count_worker = Arc::clone(&processing_count);
 
     thread::spawn(move || {
+        use std::sync::atomic::Ordering;
+
+        for job in job_rx {
+            let duration_secs = job.samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
+            println!(
+                "[{}] Processing phrase #{} ({:.1}s)...",
+                timestamp(),
+                job.sequence_num,
+                duration_secs
+            );
+
+            let context = {
+                let ctx = last_phrase_for_worker.lock().unwrap();
+                if ctx.is_empty() {
+                    None
+                } else {
+                    Some(ctx.clone())
+                }
+            };
+
+            let prompt = if let Some(ref ctx_text) = context {
+                let last_sentence = extract_last_sentence(ctx_text);
+                format!("{} {}", PROGRAMMER_PROMPT, last_sentence)
+            } else {
+                PROGRAMMER_PROMPT.to_string()
+            };
+
+            let resampled = resample_48k_to_16k(&job.samples);
+            match transcribe_openai_internal(
+                &config_for_worker,
+                &resampled,
+                WHISPER_SAMPLE_RATE,
+                Some(&prompt),
+            ) {
+                Ok(text) => {
+                    if !text.trim().is_empty() {
+                        // Save audio for analysis
+                        let _audio_file = save_audio_segment(&job.samples, RECORDING_SAMPLE_RATE);
+
+                        let (processed_text, marker_continuation) = process_continuation(&text);
+                        let is_first_phrase = context.is_none();
+
+                        let is_continuation = if is_first_phrase {
+                            false
+                        } else {
+                            marker_continuation
+                                || should_continue(
+                                    &processed_text,
+                                    context.as_deref().unwrap_or(""),
+                                )
+                        };
+
+                        let _ = result_tx.send(TranscriptionOutput {
+                            text: processed_text,
+                            is_continuation,
+                            sequence_num: job.sequence_num,
+                        });
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[{}] Transcription error for #{}: {}",
+                        timestamp(),
+                        job.sequence_num,
+                        e
+                    );
+                }
+            }
+
+            processing_count_worker.fetch_sub(1, Ordering::SeqCst);
+        }
+    });
+
+    // Output thread - outputs results in order
+    let last_phrase_for_output = Arc::clone(&last_phrase);
+    let input_method_for_output = input_method;
+
+    thread::spawn(move || {
+        use std::collections::BTreeMap;
+
+        let mut pending_outputs: BTreeMap<u64, TranscriptionOutput> = BTreeMap::new();
+        let mut next_output_seq: u64 = 0;
+
+        for result in result_rx {
+            pending_outputs.insert(result.sequence_num, result);
+
+            // Output all consecutive results starting from next_output_seq
+            while let Some(output) = pending_outputs.remove(&next_output_seq) {
+                let context = {
+                    let ctx = last_phrase_for_output.lock().unwrap();
+                    ctx.clone()
+                };
+                let is_first_phrase = context.is_empty();
+
+                if output.is_continuation && !is_first_phrase {
+                    let (chars_to_delete, deleted_chars) = {
+                        let ctx = last_phrase_for_output.lock().unwrap();
+                        let count = count_chars_to_delete(&ctx);
+                        let deleted: String = ctx
+                            .chars()
+                            .rev()
+                            .take(count)
+                            .collect::<String>()
+                            .chars()
+                            .rev()
+                            .collect();
+                        (count, deleted)
+                    };
+
+                    println!(
+                        "[{}] <{} (deleting \"{}\")",
+                        timestamp(),
+                        chars_to_delete,
+                        deleted_chars
+                    );
+
+                    if let Err(e) = delete_chars(chars_to_delete) {
+                        eprintln!("Failed to delete chars: {}", e);
+                    }
+                    let text_with_space = format!(" {} ", output.text);
+                    if let Err(e) = insert_text(&text_with_space, input_method_for_output) {
+                        eprintln!("Failed to insert text: {}", e);
+                    } else {
+                        println!("[{}] +\"{}\"", timestamp(), output.text);
+                    }
+                    let mut ctx = last_phrase_for_output.lock().unwrap();
+                    let old_ctx = ctx.clone();
+                    *ctx = format!("{} {}", remove_trailing_punctuation(&old_ctx), output.text);
+                    println!("[{}] ctx: \"{}\" -> \"{}\"", timestamp(), old_ctx, *ctx);
+                } else {
+                    let final_text = if is_first_phrase {
+                        capitalize_first(&output.text)
+                    } else {
+                        output.text.clone()
+                    };
+
+                    let text_with_space = format!("{} ", final_text);
+                    if let Err(e) = insert_text(&text_with_space, input_method_for_output) {
+                        eprintln!("Failed to insert text: {}", e);
+                    } else {
+                        println!("[{}] \"{}\"", timestamp(), final_text);
+                    }
+                    *last_phrase_for_output.lock().unwrap() = final_text;
+                }
+
+                next_output_seq += 1;
+            }
+        }
+    });
+
+    // VAD monitoring thread - detects phrases by pauses and sends to worker
+    let state_for_vad = Arc::clone(&state);
+    let samples_for_vad = Arc::clone(&samples);
+    let vad_for_thread = Arc::clone(&vad);
+    let next_sequence_vad = Arc::clone(&next_sequence);
+    let processing_count_vad = Arc::clone(&processing_count);
+    let job_tx_vad = job_tx.clone();
+
+    thread::spawn(move || {
+        use std::sync::atomic::Ordering;
+
         let mut last_sample_count = 0usize;
 
         loop {
@@ -2373,130 +2608,21 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
             }
 
             if let Some(phrase_samples) = phrase {
+                let seq = next_sequence_vad.fetch_add(1, Ordering::SeqCst);
+                processing_count_vad.fetch_add(1, Ordering::SeqCst);
+
                 let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
                 println!(
-                    "[{}] Phrase detected ({:.1}s), transcribing via OpenAI...",
+                    "[{}] Phrase #{} detected ({:.1}s), queuing for transcription...",
                     timestamp(),
+                    seq,
                     duration_secs
                 );
 
-                let context = {
-                    let ctx = last_phrase_for_vad.lock().unwrap();
-                    if ctx.is_empty() {
-                        None
-                    } else {
-                        Some(ctx.clone())
-                    }
-                };
-
-                // Build prompt with context
-                let prompt = if let Some(ref ctx_text) = context {
-                    let last_sentence = extract_last_sentence(ctx_text);
-                    format!("{} {}", PROGRAMMER_PROMPT, last_sentence)
-                } else {
-                    PROGRAMMER_PROMPT.to_string()
-                };
-
-                let resampled = resample_48k_to_16k(&phrase_samples);
-                match transcribe_openai_internal(
-                    &config_for_vad,
-                    &resampled,
-                    WHISPER_SAMPLE_RATE,
-                    Some(&prompt),
-                ) {
-                    Ok(text) => {
-                        if !text.trim().is_empty() {
-                            // Save audio for analysis
-                            let audio_file =
-                                save_audio_segment(&phrase_samples, RECORDING_SAMPLE_RATE);
-
-                            let (processed_text, marker_continuation) = process_continuation(&text);
-                            let is_first_phrase = context.is_none();
-
-                            let is_continuation = if is_first_phrase {
-                                false
-                            } else {
-                                marker_continuation
-                                    || should_continue(
-                                        &processed_text,
-                                        context.as_deref().unwrap_or(""),
-                                    )
-                            };
-
-                            if is_continuation {
-                                let (chars_to_delete, deleted_chars) = {
-                                    let ctx = last_phrase_for_vad.lock().unwrap();
-                                    let count = count_chars_to_delete(&ctx);
-                                    let deleted: String = ctx
-                                        .chars()
-                                        .rev()
-                                        .take(count)
-                                        .collect::<String>()
-                                        .chars()
-                                        .rev()
-                                        .collect();
-                                    (count, deleted)
-                                };
-
-                                println!(
-                                    "[{}] <{} (deleting \"{}\")",
-                                    timestamp(),
-                                    chars_to_delete,
-                                    deleted_chars
-                                );
-
-                                if let Err(e) = delete_chars(chars_to_delete) {
-                                    eprintln!("Failed to delete chars: {}", e);
-                                }
-                                let text_with_space = format!(" {} ", processed_text);
-                                if let Err(e) = insert_text(&text_with_space, input_method_for_vad)
-                                {
-                                    eprintln!("Failed to insert text: {}", e);
-                                } else {
-                                    println!("[{}] +\"{}\"", timestamp(), processed_text);
-                                    log_transcription_with_audio(
-                                        &text,
-                                        &processed_text,
-                                        true,
-                                        audio_file.as_deref(),
-                                    );
-                                }
-                                let mut ctx = last_phrase_for_vad.lock().unwrap();
-                                let old_ctx = ctx.clone();
-                                *ctx = format!(
-                                    "{} {}",
-                                    remove_trailing_punctuation(&old_ctx),
-                                    processed_text
-                                );
-                                println!("[{}] ctx: \"{}\" -> \"{}\"", timestamp(), old_ctx, *ctx);
-                            } else {
-                                let final_text = if is_first_phrase {
-                                    capitalize_first(&processed_text)
-                                } else {
-                                    processed_text.clone()
-                                };
-
-                                let text_with_space = format!("{} ", final_text);
-                                if let Err(e) = insert_text(&text_with_space, input_method_for_vad)
-                                {
-                                    eprintln!("Failed to insert text: {}", e);
-                                } else {
-                                    println!("[{}] \"{}\"", timestamp(), final_text);
-                                    log_transcription_with_audio(
-                                        &text,
-                                        &final_text,
-                                        false,
-                                        audio_file.as_deref(),
-                                    );
-                                }
-                                *last_phrase_for_vad.lock().unwrap() = final_text;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Transcription error: {}", e);
-                    }
-                }
+                let _ = job_tx_vad.send(TranscriptionJob {
+                    samples: phrase_samples,
+                    sequence_num: seq,
+                });
             }
         }
     });
@@ -2505,9 +2631,10 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     let is_recording_clone = Arc::clone(&is_recording);
     let samples_clone = Arc::clone(&samples);
     let recording_start_clone = Arc::clone(&recording_start);
-    let last_phrase_clone = Arc::clone(&last_phrase);
-    let config_clone = Arc::clone(&config);
     let vad_clone = Arc::clone(&vad);
+    let next_sequence_clone = Arc::clone(&next_sequence);
+    let processing_count_clone = Arc::clone(&processing_count);
+    let job_tx_callback = job_tx;
 
     // Debounce state
     let key_debounce = Arc::new(AtomicBool::new(false));
@@ -2525,7 +2652,18 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                 // Check if not already recording
                 let mut rec_state = state_clone.lock().unwrap();
                 if *rec_state == RecordingState::Idle {
-                    samples_clone.lock().unwrap().clear();
+                    // Wait for any pending processing to complete before clearing
+                    let pending = processing_count_clone.load(Ordering::SeqCst);
+                    if pending > 0 {
+                        println!(
+                            "[{}] Waiting for {} pending transcriptions...",
+                            timestamp(),
+                            pending
+                        );
+                        // Don't clear samples, just reset VAD position
+                    } else {
+                        samples_clone.lock().unwrap().clear();
+                    }
                     vad_clone.lock().unwrap().reset();
                     *recording_start_clone.lock().unwrap() = Some(Instant::now());
                     is_recording_clone.store(true, Ordering::SeqCst);
@@ -2553,7 +2691,6 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
 
                     if recording_duration < Duration::from_millis(MIN_RECORDING_MS) {
                         println!("[{}] Recording too short, ignoring", timestamp());
-                        samples_clone.lock().unwrap().clear();
                         return;
                     }
 
@@ -2566,147 +2703,30 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
 
                     drop(rec_state);
 
+                    // Queue final phrase for transcription
                     if let Some(phrase_samples) = remaining {
+                        let seq = next_sequence_clone.fetch_add(1, Ordering::SeqCst);
+                        processing_count_clone.fetch_add(1, Ordering::SeqCst);
+
                         let duration_secs =
                             phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
                         println!(
-                            "[{}] Final phrase ({:.1}s), transcribing via OpenAI...",
+                            "[{}] Final phrase #{} ({:.1}s), queuing for transcription...",
                             timestamp(),
+                            seq,
                             duration_secs
                         );
 
-                        let context = {
-                            let ctx = last_phrase_clone.lock().unwrap();
-                            if ctx.is_empty() {
-                                None
-                            } else {
-                                Some(ctx.clone())
-                            }
-                        };
-
-                        // Build prompt with context
-                        let prompt = if let Some(ref ctx_text) = context {
-                            let last_sentence = extract_last_sentence(ctx_text);
-                            format!("{} {}", PROGRAMMER_PROMPT, last_sentence)
-                        } else {
-                            PROGRAMMER_PROMPT.to_string()
-                        };
-
-                        // Resample to 16kHz for API
-                        let resampled = resample_48k_to_16k(&phrase_samples);
-
-                        match transcribe_openai_internal(
-                            &config_clone,
-                            &resampled,
-                            WHISPER_SAMPLE_RATE,
-                            Some(&prompt),
-                        ) {
-                            Ok(text) => {
-                                if text.trim().is_empty() {
-                                    println!("[{}] (no speech detected)", timestamp());
-                                } else {
-                                    // Save audio for analysis
-                                    let audio_file =
-                                        save_audio_segment(&phrase_samples, RECORDING_SAMPLE_RATE);
-
-                                    let (processed_text, marker_continuation) =
-                                        process_continuation(&text);
-                                    let is_first_phrase = context.is_none();
-
-                                    let is_continuation = if is_first_phrase {
-                                        false
-                                    } else {
-                                        marker_continuation
-                                            || should_continue(
-                                                &processed_text,
-                                                context.as_deref().unwrap_or(""),
-                                            )
-                                    };
-
-                                    if is_continuation {
-                                        let (chars_to_delete, deleted_chars) = {
-                                            let ctx = last_phrase_clone.lock().unwrap();
-                                            let count = count_chars_to_delete(&ctx);
-                                            let deleted: String = ctx
-                                                .chars()
-                                                .rev()
-                                                .take(count)
-                                                .collect::<String>()
-                                                .chars()
-                                                .rev()
-                                                .collect();
-                                            (count, deleted)
-                                        };
-
-                                        println!(
-                                            "[{}] <{} (deleting \"{}\")",
-                                            timestamp(),
-                                            chars_to_delete,
-                                            deleted_chars
-                                        );
-
-                                        if let Err(e) = delete_chars(chars_to_delete) {
-                                            eprintln!("Failed to delete chars: {}", e);
-                                        }
-                                        let text_with_space = format!(" {} ", processed_text);
-                                        if let Err(e) = insert_text(&text_with_space, input_method)
-                                        {
-                                            eprintln!("Failed to insert text: {}", e);
-                                        } else {
-                                            println!("[{}] +\"{}\"", timestamp(), processed_text);
-                                            log_transcription_with_audio(
-                                                &text,
-                                                &processed_text,
-                                                true,
-                                                audio_file.as_deref(),
-                                            );
-                                        }
-                                        let mut ctx = last_phrase_clone.lock().unwrap();
-                                        let old_ctx = ctx.clone();
-                                        *ctx = format!(
-                                            "{} {}",
-                                            remove_trailing_punctuation(&old_ctx),
-                                            processed_text
-                                        );
-                                        println!(
-                                            "[{}] ctx: \"{}\" -> \"{}\"",
-                                            timestamp(),
-                                            old_ctx,
-                                            *ctx
-                                        );
-                                    } else {
-                                        let final_text = if is_first_phrase {
-                                            capitalize_first(&processed_text)
-                                        } else {
-                                            processed_text.clone()
-                                        };
-
-                                        let text_with_space = format!("{} ", final_text);
-                                        if let Err(e) = insert_text(&text_with_space, input_method)
-                                        {
-                                            eprintln!("Failed to insert text: {}", e);
-                                        } else {
-                                            println!("[{}] \"{}\"", timestamp(), final_text);
-                                            log_transcription_with_audio(
-                                                &text,
-                                                &final_text,
-                                                false,
-                                                audio_file.as_deref(),
-                                            );
-                                        }
-                                        *last_phrase_clone.lock().unwrap() = final_text;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("[{}] Transcription error: {}", timestamp(), e);
-                            }
-                        }
+                        let _ = job_tx_callback.send(TranscriptionJob {
+                            samples: phrase_samples,
+                            sequence_num: seq,
+                        });
                     } else {
                         println!("[{}] No remaining audio to transcribe", timestamp());
                     }
 
-                    samples_clone.lock().unwrap().clear();
+                    // Don't clear samples here - worker thread may still need them
+                    // Samples will be cleared on next key press when no processing is pending
                 }
             }
             _ => {}
@@ -3053,7 +3073,11 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                         };
 
                         let resampled = resample_48k_to_16k(&phrase_samples);
-                        match transcribe_whisper_internal(&whisper_clone, &resampled, context.as_deref()) {
+                        match transcribe_whisper_internal(
+                            &whisper_clone,
+                            &resampled,
+                            context.as_deref(),
+                        ) {
                             Ok(text) => {
                                 // Filter hallucinations - only for short segments
                                 if is_hallucination(&text, duration_secs) {
