@@ -399,7 +399,9 @@ impl VadPhraseDetector {
     }
 
     fn get_remaining(&self, all_samples: &[f32]) -> Option<Vec<f32>> {
-        let min_final_samples = self.window_samples * 6;
+        // Minimum samples for final segment - shorter than mid-recording threshold
+        // because user explicitly released key = they finished speaking
+        let min_final_samples = self.window_samples * 3; // ~90ms at 48kHz
 
         // Start from the position after the last transcribed phrase
         // This prevents double transcription when VAD and key release happen simultaneously
@@ -419,9 +421,14 @@ impl VadPhraseDetector {
         let remaining_len = remaining.len();
 
         if remaining_len < min_final_samples {
+            println!(
+                "[VAD] Final segment too short: {} samples (min {})",
+                remaining_len, min_final_samples
+            );
             return None;
         }
 
+        // For final segment, use lower voice threshold - user released key intentionally
         let mut voice_windows = 0;
         let mut total_windows = 0;
 
@@ -434,7 +441,10 @@ impl VadPhraseDetector {
             let voice_ratio = self.calculate_voice_ratio(chunk);
             let energy = self.calculate_energy(chunk);
 
-            if energy >= VAD_ENERGY_THRESHOLD && voice_ratio >= VAD_VOICE_RATIO_THRESHOLD {
+            // Lower threshold for final segment
+            if energy >= VAD_ENERGY_THRESHOLD * 0.5
+                && voice_ratio >= VAD_VOICE_RATIO_THRESHOLD * 0.5
+            {
                 voice_windows += 1;
             }
         }
@@ -445,7 +455,8 @@ impl VadPhraseDetector {
             0.0
         };
 
-        if voice_percent < 0.3 {
+        // Lower threshold for final - 15% voice is enough (user released key)
+        if voice_percent < 0.15 {
             println!(
                 "[VAD] Discarding final segment: only {:.0}% voice ({} of {} windows)",
                 voice_percent * 100.0,
@@ -1952,19 +1963,31 @@ fn capitalize_first(text: &str) -> String {
 fn count_chars_to_delete(text: &str) -> usize {
     let trimmed = text.trim_end();
 
+    // Only delete trailing punctuation + space, never letters
+    // Returns (chars_to_delete, includes_space)
+
+    // "text... " -> delete 4 (... + space)
     if trimmed.ends_with("...") {
-        return 4;
+        return 4; // "... "
     }
 
+    // "text… " -> delete 2 (… + space)
     if trimmed.ends_with("…") {
         return 2;
     }
 
+    // "text. " or "text! " or "text? " -> delete 2
     if trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?') {
         return 2;
     }
 
-    1
+    // "text, " -> delete 2
+    if trimmed.ends_with(',') || trimmed.ends_with(';') || trimmed.ends_with(':') {
+        return 2;
+    }
+
+    // No punctuation to delete - just need to add space before continuation
+    0
 }
 
 // ============================================================================
@@ -2499,25 +2522,30 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                         (count, deleted)
                     };
 
-                    println!(
-                        "[{}] <{} (deleting \"{}\")",
-                        timestamp(),
-                        chars_to_delete,
-                        deleted_chars
-                    );
+                    // Only delete if there's punctuation to delete
+                    if chars_to_delete > 0 {
+                        println!(
+                            "[{}] <{} (deleting \"{}\")",
+                            timestamp(),
+                            chars_to_delete,
+                            deleted_chars
+                        );
 
-                    if let Err(e) = delete_chars(chars_to_delete) {
-                        eprintln!("Failed to delete chars: {}", e);
+                        if let Err(e) = delete_chars(chars_to_delete) {
+                            eprintln!("Failed to delete chars: {}", e);
+                        }
                     }
-                    let text_with_space = format!(" {} ", output.text);
-                    if let Err(e) = insert_text(&text_with_space, input_method_for_output) {
+
+                    // Insert with comma for continuation (more natural than just space)
+                    let text_with_punct = format!(", {} ", output.text);
+                    if let Err(e) = insert_text(&text_with_punct, input_method_for_output) {
                         eprintln!("Failed to insert text: {}", e);
                     } else {
                         println!("[{}] +\"{}\"", timestamp(), output.text);
                     }
                     let mut ctx = last_phrase_for_output.lock().unwrap();
                     let old_ctx = ctx.clone();
-                    *ctx = format!("{} {}", remove_trailing_punctuation(&old_ctx), output.text);
+                    *ctx = format!("{}, {}", remove_trailing_punctuation(&old_ctx), output.text);
                     println!("[{}] ctx: \"{}\" -> \"{}\"", timestamp(), old_ctx, *ctx);
                 } else {
                     let final_text = if is_first_phrase {
@@ -2936,18 +2964,23 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                     (count, deleted)
                                 };
 
-                                println!(
-                                    "[{}] <{} (deleting \"{}\")",
-                                    timestamp(),
-                                    chars_to_delete,
-                                    deleted_chars
-                                );
+                                // Only delete if there's punctuation to delete
+                                if chars_to_delete > 0 {
+                                    println!(
+                                        "[{}] <{} (deleting \"{}\")",
+                                        timestamp(),
+                                        chars_to_delete,
+                                        deleted_chars
+                                    );
 
-                                if let Err(e) = delete_chars(chars_to_delete) {
-                                    eprintln!("Failed to delete chars: {}", e);
+                                    if let Err(e) = delete_chars(chars_to_delete) {
+                                        eprintln!("Failed to delete chars: {}", e);
+                                    }
                                 }
-                                let text_with_space = format!(" {} ", processed_text);
-                                if let Err(e) = insert_text(&text_with_space, input_method_for_vad)
+
+                                // Insert with comma for continuation
+                                let text_with_punct = format!(", {} ", processed_text);
+                                if let Err(e) = insert_text(&text_with_punct, input_method_for_vad)
                                 {
                                     eprintln!("Failed to insert text: {}", e);
                                 } else {
@@ -2962,7 +2995,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                 let mut ctx = last_phrase_for_vad.lock().unwrap();
                                 let old_ctx = ctx.clone();
                                 *ctx = format!(
-                                    "{} {}",
+                                    "{}, {}",
                                     remove_trailing_punctuation(&old_ctx),
                                     processed_text
                                 );
@@ -3123,19 +3156,24 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                             (count, deleted)
                                         };
 
-                                        println!(
-                                            "[{}] <{} (deleting \"{}\")",
-                                            timestamp(),
-                                            chars_to_delete,
-                                            deleted_chars
-                                        );
+                                        // Only delete if there's punctuation to delete
+                                        if chars_to_delete > 0 {
+                                            println!(
+                                                "[{}] <{} (deleting \"{}\")",
+                                                timestamp(),
+                                                chars_to_delete,
+                                                deleted_chars
+                                            );
 
-                                        if let Err(e) = delete_chars(chars_to_delete) {
-                                            eprintln!("Failed to delete chars: {}", e);
+                                            if let Err(e) = delete_chars(chars_to_delete) {
+                                                eprintln!("Failed to delete chars: {}", e);
+                                            }
                                         }
-                                        let text_with_space = format!(" {} ", processed_text);
+
+                                        // Insert with comma for continuation
+                                        let text_with_punct = format!(", {} ", processed_text);
                                         if let Err(e) =
-                                            insert_text(&text_with_space, input_method_for_callback)
+                                            insert_text(&text_with_punct, input_method_for_callback)
                                         {
                                             eprintln!("Failed to insert text: {}", e);
                                         } else {
