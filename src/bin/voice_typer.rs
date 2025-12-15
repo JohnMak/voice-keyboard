@@ -29,9 +29,20 @@ use enigo::{Direction, Enigo, Key as EnigoKey, Keyboard, Settings};
 use indicatif::{ProgressBar, ProgressStyle};
 use rdev::{listen, Event, EventType, Key};
 use reqwest::blocking::Client;
+use std::process::Command;
 
 /// Minimum recording duration to process (avoid accidental taps)
 const MIN_RECORDING_MS: u64 = 300;
+
+/// Dev mode: collect reports for analysis
+/// Set VOICE_KEYBOARD_DEV=1 to enable
+fn is_dev_mode() -> bool {
+    env::var("VOICE_KEYBOARD_DEV").map(|v| v == "1").unwrap_or(false)
+}
+
+/// Remote server for dev reports (SCP destination)
+const DEV_REPORT_SERVER: &str = "alexmak@robobobr.ru";
+const DEV_REPORT_PATH: &str = "~/voice-keyboard/reports";
 
 /// Whisper sample rate (16kHz)
 #[allow(dead_code)]
@@ -317,7 +328,8 @@ impl VadPhraseDetector {
         self.voice_ratio >= VAD_VOICE_RATIO_THRESHOLD
     }
 
-    fn detect_phrase(&mut self, all_samples: &[f32]) -> Option<Vec<f32>> {
+    /// Returns (samples, start_pos, end_pos) if phrase detected
+    fn detect_phrase(&mut self, all_samples: &[f32]) -> Option<(Vec<f32>, usize, usize)> {
         while self.processed_pos + self.window_samples <= all_samples.len() {
             let window_start = self.processed_pos;
             let window_end = window_start + self.window_samples;
@@ -364,7 +376,9 @@ impl VadPhraseDetector {
                         if phrase_len >= self.min_speech_windows * self.window_samples
                             && has_enough_voice
                         {
-                            let phrase = all_samples[self.phrase_start..phrase_end].to_vec();
+                            let start_pos = self.phrase_start;
+                            let end_pos = phrase_end;
+                            let phrase = all_samples[start_pos..end_pos].to_vec();
                             self.in_speech = false;
                             self.silent_windows = 0;
                             self.voice_windows_count = 0;
@@ -372,7 +386,7 @@ impl VadPhraseDetector {
                             self.last_transcribed_end = phrase_end; // Mark as transcribed
                             self.phrase_start = window_end;
                             self.processed_pos = window_end;
-                            return Some(phrase);
+                            return Some((phrase, start_pos, end_pos));
                         } else {
                             if !has_enough_voice
                                 && phrase_len >= self.min_speech_windows * self.window_samples
@@ -398,7 +412,8 @@ impl VadPhraseDetector {
         None
     }
 
-    fn get_remaining(&self, all_samples: &[f32]) -> Option<Vec<f32>> {
+    /// Returns (samples, start_pos, end_pos) for remaining audio
+    fn get_remaining(&self, all_samples: &[f32]) -> Option<(Vec<f32>, usize, usize)> {
         // Minimum samples for final segment - shorter than mid-recording threshold
         // because user explicitly released key = they finished speaking
         let min_final_samples = self.window_samples * 3; // ~90ms at 48kHz
@@ -419,6 +434,7 @@ impl VadPhraseDetector {
 
         let remaining = &all_samples[start_pos..];
         let remaining_len = remaining.len();
+        let end_pos = all_samples.len();
 
         if remaining_len < min_final_samples {
             println!(
@@ -466,7 +482,7 @@ impl VadPhraseDetector {
             return None;
         }
 
-        Some(remaining.to_vec())
+        Some((remaining.to_vec(), start_pos, end_pos))
     }
 
     fn reset(&mut self) {
@@ -2365,6 +2381,10 @@ fn timestamp() -> String {
 struct TranscriptionJob {
     samples: Vec<f32>,
     sequence_num: u64,
+    /// Start sample position in full recording (for dev mode)
+    start_sample: usize,
+    /// End sample position in full recording (for dev mode)
+    end_sample: usize,
 }
 
 /// Completed transcription result
@@ -2374,9 +2394,217 @@ struct TranscriptionOutput {
     sequence_num: u64,
 }
 
+/// Dev mode: Fragment info for report
+#[derive(Clone)]
+struct FragmentInfo {
+    index: u64,
+    start_sample: usize,
+    end_sample: usize,
+    transcription: String,
+}
+
+/// Dev mode: Typing event (insert or delete)
+#[derive(Clone)]
+struct TypingEvent {
+    timestamp: String,
+    event_type: String, // "insert" or "delete"
+    text: String,       // text inserted or description of delete
+    char_count: usize,  // number of chars affected
+    sequence_num: u64,  // which phrase triggered this
+}
+
+/// Dev mode: Session report
+struct DevReport {
+    session_id: String,
+    report_dir: PathBuf,
+    full_samples: Vec<f32>,
+    fragments: Vec<FragmentInfo>,
+    typing_events: Vec<TypingEvent>,
+}
+
+impl DevReport {
+    fn new() -> Self {
+        let session_id = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+        // Use ./reports/ relative to current working directory
+        let report_dir = PathBuf::from("reports").join(&session_id);
+        Self {
+            session_id,
+            report_dir,
+            full_samples: Vec::new(),
+            fragments: Vec::new(),
+            typing_events: Vec::new(),
+        }
+    }
+
+    fn add_fragment(&mut self, index: u64, start: usize, end: usize, text: String) {
+        self.fragments.push(FragmentInfo {
+            index,
+            start_sample: start,
+            end_sample: end,
+            transcription: text,
+        });
+    }
+
+    fn add_typing_event(&mut self, event_type: &str, text: &str, char_count: usize, sequence_num: u64) {
+        self.typing_events.push(TypingEvent {
+            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+            event_type: event_type.to_string(),
+            text: text.to_string(),
+            char_count,
+            sequence_num,
+        });
+    }
+
+    fn save_and_upload(&self, config: &OpenAIConfig) {
+        if self.full_samples.is_empty() {
+            return;
+        }
+
+        // Create directory
+        if let Err(e) = fs::create_dir_all(&self.report_dir) {
+            eprintln!("[DEV] Failed to create report dir: {}", e);
+            return;
+        }
+        let fragments_dir = self.report_dir.join("fragments");
+        let _ = fs::create_dir_all(&fragments_dir);
+
+        println!("[DEV] Saving report to {:?}", self.report_dir);
+
+        // Save full audio
+        let full_audio_path = self.report_dir.join("full_audio.wav");
+        save_wav_file(&full_audio_path, &self.full_samples, RECORDING_SAMPLE_RATE);
+
+        // Save fragment audios
+        for frag in &self.fragments {
+            let frag_path = fragments_dir.join(format!(
+                "{:03}_{}-{}.wav",
+                frag.index, frag.start_sample, frag.end_sample
+            ));
+            if frag.end_sample <= self.full_samples.len() && frag.start_sample < frag.end_sample {
+                let frag_samples = &self.full_samples[frag.start_sample..frag.end_sample];
+                save_wav_file(&frag_path, frag_samples, RECORDING_SAMPLE_RATE);
+            }
+
+            // Save fragment transcription
+            let txt_path = fragments_dir.join(format!("{:03}_transcription.txt", frag.index));
+            let _ = fs::write(&txt_path, &frag.transcription);
+        }
+
+        // Transcribe full audio
+        println!("[DEV] Transcribing full audio...");
+        let resampled = resample_48k_to_16k(&self.full_samples);
+        let full_transcription = match transcribe_openai_internal(
+            config,
+            &resampled,
+            WHISPER_SAMPLE_RATE,
+            Some(PROGRAMMER_PROMPT),
+        ) {
+            Ok(text) => text,
+            Err(e) => format!("ERROR: {}", e),
+        };
+
+        // Save full transcription
+        let full_txt_path = self.report_dir.join("full_transcription.txt");
+        let _ = fs::write(&full_txt_path, &full_transcription);
+
+        // Create JSON report
+        let combined_fragments: String = self
+            .fragments
+            .iter()
+            .map(|f| f.transcription.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let report_json = serde_json::json!({
+            "session_id": self.session_id,
+            "full_duration_secs": self.full_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32,
+            "full_transcription": full_transcription,
+            "combined_fragments": combined_fragments,
+            "fragment_count": self.fragments.len(),
+            "fragments": self.fragments.iter().map(|f| {
+                serde_json::json!({
+                    "index": f.index,
+                    "start_sample": f.start_sample,
+                    "end_sample": f.end_sample,
+                    "duration_secs": (f.end_sample - f.start_sample) as f32 / RECORDING_SAMPLE_RATE as f32,
+                    "transcription": f.transcription,
+                })
+            }).collect::<Vec<_>>(),
+            "typing_events_count": self.typing_events.len(),
+            "typing_events": self.typing_events.iter().map(|e| {
+                serde_json::json!({
+                    "timestamp": e.timestamp,
+                    "type": e.event_type,
+                    "text": e.text,
+                    "char_count": e.char_count,
+                    "sequence_num": e.sequence_num,
+                })
+            }).collect::<Vec<_>>(),
+        });
+
+        let json_path = self.report_dir.join("report.json");
+        if let Ok(json_str) = serde_json::to_string_pretty(&report_json) {
+            let _ = fs::write(&json_path, json_str);
+        }
+
+        println!("[DEV] Report saved: {}", self.session_id);
+
+        // Upload via SCP
+        self.upload_to_server();
+    }
+
+    fn upload_to_server(&self) {
+        println!("[DEV] Uploading to {}...", DEV_REPORT_SERVER);
+
+        let dest = format!("{}:{}/{}", DEV_REPORT_SERVER, DEV_REPORT_PATH, self.session_id);
+
+        match Command::new("scp")
+            .arg("-r")
+            .arg(&self.report_dir)
+            .arg(&dest)
+            .output()
+        {
+            Ok(output) => {
+                if output.status.success() {
+                    println!("[DEV] Upload complete!");
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    eprintln!("[DEV] Upload failed: {}", stderr);
+                }
+            }
+            Err(e) => {
+                eprintln!("[DEV] SCP error: {}", e);
+            }
+        }
+    }
+}
+
+/// Save samples to WAV file
+fn save_wav_file(path: &PathBuf, samples: &[f32], sample_rate: u32) {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+
+    if let Ok(mut writer) = hound::WavWriter::create(path, spec) {
+        for &sample in samples {
+            let sample_i16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
+            let _ = writer.write_sample(sample_i16);
+        }
+        let _ = writer.finalize();
+    }
+}
+
 fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: HotkeyType) {
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::mpsc;
+
+    let dev_mode = is_dev_mode();
+    if dev_mode {
+        println!("[DEV] Development mode enabled - collecting reports");
+    }
 
     let config = Arc::new(openai_config);
     let target_key = hotkey.to_rdev_key();
@@ -2401,6 +2629,15 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     // Flag to track if processing is in progress (prevents clearing samples too early)
     let processing_count = Arc::new(AtomicU64::new(0));
 
+    // Dev mode: report collection
+    let dev_report: Arc<Mutex<Option<DevReport>>> = Arc::new(Mutex::new(None));
+
+    // Channel for dev mode fragment info (sequence_num, start, end, text)
+    let (dev_frag_tx, dev_frag_rx) = mpsc::channel::<(u64, usize, usize, String)>();
+
+    // Channel for dev mode typing events (event_type, text, char_count, sequence_num)
+    let (dev_typing_tx, dev_typing_rx) = mpsc::channel::<(String, String, usize, u64)>();
+
     // VAD for phrase detection
     let vad: Arc<Mutex<VadPhraseDetector>> = Arc::new(Mutex::new(VadPhraseDetector::new()));
 
@@ -2411,6 +2648,7 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     let config_for_worker = Arc::clone(&config);
     let last_phrase_for_worker = Arc::clone(&last_phrase);
     let processing_count_worker = Arc::clone(&processing_count);
+    let dev_frag_tx_worker = dev_frag_tx;
 
     thread::spawn(move || {
         use std::sync::atomic::Ordering;
@@ -2466,10 +2704,18 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                         };
 
                         let _ = result_tx.send(TranscriptionOutput {
-                            text: processed_text,
+                            text: processed_text.clone(),
                             is_continuation,
                             sequence_num: job.sequence_num,
                         });
+
+                        // Send fragment info for dev report
+                        let _ = dev_frag_tx_worker.send((
+                            job.sequence_num,
+                            job.start_sample,
+                            job.end_sample,
+                            processed_text,
+                        ));
                     }
                 }
                 Err(e) => {
@@ -2489,6 +2735,7 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     // Output thread - outputs results in order
     let last_phrase_for_output = Arc::clone(&last_phrase);
     let input_method_for_output = input_method;
+    let dev_typing_tx_output = dev_typing_tx;
 
     thread::spawn(move || {
         use std::collections::BTreeMap;
@@ -2531,6 +2778,14 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                             deleted_chars
                         );
 
+                        // Log typing event: delete
+                        let _ = dev_typing_tx_output.send((
+                            "delete".to_string(),
+                            deleted_chars.clone(),
+                            chars_to_delete,
+                            output.sequence_num,
+                        ));
+
                         if let Err(e) = delete_chars(chars_to_delete) {
                             eprintln!("Failed to delete chars: {}", e);
                         }
@@ -2538,6 +2793,15 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
 
                     // Insert with comma for continuation (more natural than just space)
                     let text_with_punct = format!(", {} ", output.text);
+
+                    // Log typing event: insert
+                    let _ = dev_typing_tx_output.send((
+                        "insert".to_string(),
+                        text_with_punct.clone(),
+                        text_with_punct.chars().count(),
+                        output.sequence_num,
+                    ));
+
                     if let Err(e) = insert_text(&text_with_punct, input_method_for_output) {
                         eprintln!("Failed to insert text: {}", e);
                     } else {
@@ -2555,6 +2819,15 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                     };
 
                     let text_with_space = format!("{} ", final_text);
+
+                    // Log typing event: insert
+                    let _ = dev_typing_tx_output.send((
+                        "insert".to_string(),
+                        text_with_space.clone(),
+                        text_with_space.chars().count(),
+                        output.sequence_num,
+                    ));
+
                     if let Err(e) = insert_text(&text_with_space, input_method_for_output) {
                         eprintln!("Failed to insert text: {}", e);
                     } else {
@@ -2564,6 +2837,28 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                 }
 
                 next_output_seq += 1;
+            }
+        }
+    });
+
+    // Dev mode: Fragment collector thread
+    let dev_report_for_collector = Arc::clone(&dev_report);
+    thread::spawn(move || {
+        for (seq, start, end, text) in dev_frag_rx {
+            let mut report_guard = dev_report_for_collector.lock().unwrap();
+            if let Some(ref mut report) = *report_guard {
+                report.add_fragment(seq, start, end, text);
+            }
+        }
+    });
+
+    // Dev mode: Typing events collector thread
+    let dev_report_for_typing = Arc::clone(&dev_report);
+    thread::spawn(move || {
+        for (event_type, text, char_count, seq) in dev_typing_rx {
+            let mut report_guard = dev_report_for_typing.lock().unwrap();
+            if let Some(ref mut report) = *report_guard {
+                report.add_typing_event(&event_type, &text, char_count, seq);
             }
         }
     });
@@ -2635,7 +2930,7 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                 last_sample_count = sample_count;
             }
 
-            if let Some(phrase_samples) = phrase {
+            if let Some((phrase_samples, start_pos, end_pos)) = phrase {
                 let seq = next_sequence_vad.fetch_add(1, Ordering::SeqCst);
                 processing_count_vad.fetch_add(1, Ordering::SeqCst);
 
@@ -2650,6 +2945,8 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                 let _ = job_tx_vad.send(TranscriptionJob {
                     samples: phrase_samples,
                     sequence_num: seq,
+                    start_sample: start_pos,
+                    end_sample: end_pos,
                 });
             }
         }
@@ -2663,6 +2960,8 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     let next_sequence_clone = Arc::clone(&next_sequence);
     let processing_count_clone = Arc::clone(&processing_count);
     let job_tx_callback = job_tx;
+    let dev_report_callback = Arc::clone(&dev_report);
+    let config_callback = Arc::clone(&config);
 
     // Debounce state
     let key_debounce = Arc::new(AtomicBool::new(false));
@@ -2696,6 +2995,11 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                     *recording_start_clone.lock().unwrap() = Some(Instant::now());
                     is_recording_clone.store(true, Ordering::SeqCst);
                     *rec_state = RecordingState::Recording;
+
+                    // Dev mode: create new report for this session
+                    if dev_mode {
+                        *dev_report_callback.lock().unwrap() = Some(DevReport::new());
+                    }
 
                     println!("[{}] Recording...", timestamp());
                     // No start beep - it would be captured in the recording
@@ -2732,7 +3036,7 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                     drop(rec_state);
 
                     // Queue final phrase for transcription
-                    if let Some(phrase_samples) = remaining {
+                    if let Some((phrase_samples, start_pos, end_pos)) = remaining {
                         let seq = next_sequence_clone.fetch_add(1, Ordering::SeqCst);
                         processing_count_clone.fetch_add(1, Ordering::SeqCst);
 
@@ -2748,9 +3052,34 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                         let _ = job_tx_callback.send(TranscriptionJob {
                             samples: phrase_samples,
                             sequence_num: seq,
+                            start_sample: start_pos,
+                            end_sample: end_pos,
                         });
                     } else {
                         println!("[{}] No remaining audio to transcribe", timestamp());
+                    }
+
+                    // Dev mode: save full audio and upload report
+                    if dev_mode {
+                        let samples_for_report = samples_clone.lock().unwrap().clone();
+                        let mut report_guard = dev_report_callback.lock().unwrap();
+                        if let Some(ref mut report) = *report_guard {
+                            report.full_samples = samples_for_report;
+                            // Spawn thread to save and upload (don't block callback)
+                            let report_copy = DevReport {
+                                session_id: report.session_id.clone(),
+                                report_dir: report.report_dir.clone(),
+                                full_samples: report.full_samples.clone(),
+                                fragments: report.fragments.clone(),
+                                typing_events: report.typing_events.clone(),
+                            };
+                            let config_for_report = Arc::clone(&config_callback);
+                            thread::spawn(move || {
+                                // Wait a bit for all fragments and typing events to be collected
+                                thread::sleep(Duration::from_secs(3));
+                                report_copy.save_and_upload(&config_for_report);
+                            });
+                        }
                     }
 
                     // Don't clear samples here - worker thread may still need them
@@ -2893,7 +3222,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                 last_sample_count = sample_count;
             }
 
-            if let Some(phrase_samples) = phrase {
+            if let Some((phrase_samples, _start_pos, _end_pos)) = phrase {
                 let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
                 println!(
                     "[{}] Phrase detected ({:.1}s), transcribing...",
@@ -3087,7 +3416,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
 
                     drop(rec_state);
 
-                    if let Some(phrase_samples) = remaining {
+                    if let Some((phrase_samples, _start_pos, _end_pos)) = remaining {
                         let duration_secs =
                             phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
                         println!(

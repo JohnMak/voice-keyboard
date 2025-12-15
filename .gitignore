@@ -30,4 +30,6 @@ test-assets/*.wav
 .env
 .env.local
 src-tauri/target/
-.env
+
+# Dev reports (audio + transcriptions for analysis)
+reports/
