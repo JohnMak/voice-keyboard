@@ -2739,6 +2739,11 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
         }
     });
 
+    // Shared counter for output ordering (reset on each new recording)
+    let next_output_seq = Arc::new(AtomicU64::new(0));
+    let next_output_seq_for_output = Arc::clone(&next_output_seq);
+    let next_output_seq_for_callback = Arc::clone(&next_output_seq);
+
     // Output thread - outputs results in order
     let last_phrase_for_output = Arc::clone(&last_phrase);
     let input_method_for_output = input_method;
@@ -2748,13 +2753,13 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
         use std::collections::BTreeMap;
 
         let mut pending_outputs: BTreeMap<u64, TranscriptionOutput> = BTreeMap::new();
-        let mut next_output_seq: u64 = 0;
 
         for result in result_rx {
             pending_outputs.insert(result.sequence_num, result);
 
             // Output all consecutive results starting from next_output_seq
-            while let Some(output) = pending_outputs.remove(&next_output_seq) {
+            let mut current_seq = next_output_seq_for_output.load(Ordering::SeqCst);
+            while let Some(output) = pending_outputs.remove(&current_seq) {
                 let context = {
                     let ctx = last_phrase_for_output.lock().unwrap();
                     ctx.clone()
@@ -2867,7 +2872,8 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                     *last_phrase_for_output.lock().unwrap() = final_text;
                 }
 
-                next_output_seq += 1;
+                next_output_seq_for_output.fetch_add(1, Ordering::SeqCst);
+                current_seq += 1;
             }
         }
     });
@@ -3023,6 +3029,8 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                         samples_clone.lock().unwrap().clear();
                     }
                     vad_clone.lock().unwrap().reset();
+                    next_sequence_clone.store(0, Ordering::SeqCst); // Reset sequence for new session
+                    next_output_seq_for_callback.store(0, Ordering::SeqCst); // Reset output sequence too
                     *recording_start_clone.lock().unwrap() = Some(Instant::now());
                     is_recording_clone.store(true, Ordering::SeqCst);
                     *rec_state = RecordingState::Recording;
