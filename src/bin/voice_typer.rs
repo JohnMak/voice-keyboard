@@ -2751,6 +2751,7 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
 
     thread::spawn(move || {
         use std::collections::BTreeMap;
+        use std::sync::atomic::Ordering;
 
         let mut pending_outputs: BTreeMap<u64, TranscriptionOutput> = BTreeMap::new();
 
