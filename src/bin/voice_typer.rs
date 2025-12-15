@@ -2411,6 +2411,8 @@ struct TypingEvent {
     text: String,       // text inserted or description of delete
     char_count: usize,  // number of chars affected
     sequence_num: u64,  // which phrase triggered this
+    success: bool,      // whether operation succeeded
+    error: Option<String>, // error message if failed
 }
 
 /// Dev mode: Session report
@@ -2445,13 +2447,15 @@ impl DevReport {
         });
     }
 
-    fn add_typing_event(&mut self, event_type: &str, text: &str, char_count: usize, sequence_num: u64) {
+    fn add_typing_event(&mut self, event_type: &str, text: &str, char_count: usize, sequence_num: u64, success: bool, error: Option<String>) {
         self.typing_events.push(TypingEvent {
             timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
             event_type: event_type.to_string(),
             text: text.to_string(),
             char_count,
             sequence_num,
+            success,
+            error,
         });
     }
 
@@ -2538,6 +2542,8 @@ impl DevReport {
                     "text": e.text,
                     "char_count": e.char_count,
                     "sequence_num": e.sequence_num,
+                    "success": e.success,
+                    "error": e.error,
                 })
             }).collect::<Vec<_>>(),
         });
@@ -2635,8 +2641,8 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     // Channel for dev mode fragment info (sequence_num, start, end, text)
     let (dev_frag_tx, dev_frag_rx) = mpsc::channel::<(u64, usize, usize, String)>();
 
-    // Channel for dev mode typing events (event_type, text, char_count, sequence_num)
-    let (dev_typing_tx, dev_typing_rx) = mpsc::channel::<(String, String, usize, u64)>();
+    // Channel for dev mode typing events (event_type, text, char_count, sequence_num, success, error)
+    let (dev_typing_tx, dev_typing_rx) = mpsc::channel::<(String, String, usize, u64, bool, Option<String>)>();
 
     // VAD for phrase detection
     let vad: Arc<Mutex<VadPhraseDetector>> = Arc::new(Mutex::new(VadPhraseDetector::new()));
@@ -2778,21 +2784,40 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                             deleted_chars
                         );
 
+                        let delete_result = delete_chars(chars_to_delete);
+                        let (success, error) = match &delete_result {
+                            Ok(_) => (true, None),
+                            Err(e) => {
+                                eprintln!("Failed to delete chars: {}", e);
+                                (false, Some(e.to_string()))
+                            }
+                        };
+
                         // Log typing event: delete
                         let _ = dev_typing_tx_output.send((
                             "delete".to_string(),
                             deleted_chars.clone(),
                             chars_to_delete,
                             output.sequence_num,
+                            success,
+                            error,
                         ));
-
-                        if let Err(e) = delete_chars(chars_to_delete) {
-                            eprintln!("Failed to delete chars: {}", e);
-                        }
                     }
 
                     // Insert with comma for continuation (more natural than just space)
                     let text_with_punct = format!(", {} ", output.text);
+
+                    let insert_result = insert_text(&text_with_punct, input_method_for_output);
+                    let (success, error) = match &insert_result {
+                        Ok(_) => {
+                            println!("[{}] +\"{}\"", timestamp(), output.text);
+                            (true, None)
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to insert text: {}", e);
+                            (false, Some(e.to_string()))
+                        }
+                    };
 
                     // Log typing event: insert
                     let _ = dev_typing_tx_output.send((
@@ -2800,13 +2825,9 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                         text_with_punct.clone(),
                         text_with_punct.chars().count(),
                         output.sequence_num,
+                        success,
+                        error,
                     ));
-
-                    if let Err(e) = insert_text(&text_with_punct, input_method_for_output) {
-                        eprintln!("Failed to insert text: {}", e);
-                    } else {
-                        println!("[{}] +\"{}\"", timestamp(), output.text);
-                    }
                     let mut ctx = last_phrase_for_output.lock().unwrap();
                     let old_ctx = ctx.clone();
                     *ctx = format!("{}, {}", remove_trailing_punctuation(&old_ctx), output.text);
@@ -2820,19 +2841,28 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
 
                     let text_with_space = format!("{} ", final_text);
 
+                    let insert_result = insert_text(&text_with_space, input_method_for_output);
+                    let (success, error) = match &insert_result {
+                        Ok(_) => {
+                            println!("[{}] \"{}\"", timestamp(), final_text);
+                            (true, None)
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to insert text: {}", e);
+                            (false, Some(e.to_string()))
+                        }
+                    };
+
                     // Log typing event: insert
                     let _ = dev_typing_tx_output.send((
                         "insert".to_string(),
                         text_with_space.clone(),
                         text_with_space.chars().count(),
                         output.sequence_num,
+                        success,
+                        error,
                     ));
 
-                    if let Err(e) = insert_text(&text_with_space, input_method_for_output) {
-                        eprintln!("Failed to insert text: {}", e);
-                    } else {
-                        println!("[{}] \"{}\"", timestamp(), final_text);
-                    }
                     *last_phrase_for_output.lock().unwrap() = final_text;
                 }
 
@@ -2855,10 +2885,10 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     // Dev mode: Typing events collector thread
     let dev_report_for_typing = Arc::clone(&dev_report);
     thread::spawn(move || {
-        for (event_type, text, char_count, seq) in dev_typing_rx {
+        for (event_type, text, char_count, seq, success, error) in dev_typing_rx {
             let mut report_guard = dev_report_for_typing.lock().unwrap();
             if let Some(ref mut report) = *report_guard {
-                report.add_typing_event(&event_type, &text, char_count, seq);
+                report.add_typing_event(&event_type, &text, char_count, seq, success, error);
             }
         }
     });
