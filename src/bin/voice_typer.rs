@@ -3062,24 +3062,35 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                     // Dev mode: save full audio and upload report
                     if dev_mode {
                         let samples_for_report = samples_clone.lock().unwrap().clone();
-                        let mut report_guard = dev_report_callback.lock().unwrap();
-                        if let Some(ref mut report) = *report_guard {
-                            report.full_samples = samples_for_report;
-                            // Spawn thread to save and upload (don't block callback)
-                            let report_copy = DevReport {
-                                session_id: report.session_id.clone(),
-                                report_dir: report.report_dir.clone(),
-                                full_samples: report.full_samples.clone(),
-                                fragments: report.fragments.clone(),
-                                typing_events: report.typing_events.clone(),
-                            };
-                            let config_for_report = Arc::clone(&config_callback);
-                            thread::spawn(move || {
-                                // Wait a bit for all fragments and typing events to be collected
-                                thread::sleep(Duration::from_secs(3));
-                                report_copy.save_and_upload(&config_for_report);
-                            });
+                        let dev_report_for_save = Arc::clone(&dev_report_callback);
+                        let config_for_report = Arc::clone(&config_callback);
+
+                        // Set full_samples now, but copy report later after fragments arrive
+                        {
+                            let mut report_guard = dev_report_callback.lock().unwrap();
+                            if let Some(ref mut report) = *report_guard {
+                                report.full_samples = samples_for_report;
+                            }
                         }
+
+                        thread::spawn(move || {
+                            // Wait for all fragments and typing events to be collected
+                            thread::sleep(Duration::from_secs(5));
+
+                            // Now copy the report with all data
+                            let report_guard = dev_report_for_save.lock().unwrap();
+                            if let Some(ref report) = *report_guard {
+                                let report_copy = DevReport {
+                                    session_id: report.session_id.clone(),
+                                    report_dir: report.report_dir.clone(),
+                                    full_samples: report.full_samples.clone(),
+                                    fragments: report.fragments.clone(),
+                                    typing_events: report.typing_events.clone(),
+                                };
+                                drop(report_guard); // Release lock before slow operations
+                                report_copy.save_and_upload(&config_for_report);
+                            }
+                        });
                     }
 
                     // Don't clear samples here - worker thread may still need them
