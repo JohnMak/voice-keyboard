@@ -609,6 +609,7 @@ fn get_data_dir() -> PathBuf {
 
 /// Log transcribed text with optional audio file reference
 /// Format: ISO timestamp | audio_file | raw whisper output | processed text | [cont]
+#[allow(dead_code)]
 fn log_transcription_with_audio(
     raw_text: &str,
     processed_text: &str,
