@@ -127,8 +127,8 @@ fn set_beep_volume(volume: f32) {
 const RECORDING_SAMPLE_RATE: u32 = 48000;
 
 /// VAD (Voice Activity Detection) settings
-const VAD_SILENCE_MS: u64 = 200; // Reduced from 350 - faster phrase detection on short pauses
-const VAD_MIN_SPEECH_MS: u64 = 500; // Min 500ms to avoid GPT-4o hallucinations on very short fragments
+const VAD_SILENCE_MS: u64 = 150; // Short pause = new phrase (was 200, orig 350)
+const VAD_MIN_SPEECH_MS: u64 = 400; // Min 400ms - balance between responsiveness and avoiding hallucinations
 const VAD_WINDOW_MS: u64 = 30;
 const VAD_ENERGY_THRESHOLD: f32 = 0.001;
 const VAD_VOICE_RATIO_THRESHOLD: f32 = 0.15;
@@ -406,35 +406,21 @@ impl VadPhraseDetector {
                                 format!("low voice ({:.0}% < 20% threshold)", voice_ratio * 100.0)
                             };
 
-                            // If too short but has voice, DON'T reset phrase_start -
-                            // let it concatenate with next speech segment
-                            if phrase_len < self.min_speech_windows * self.window_samples && has_enough_voice {
-                                println!(
-                                    "[VAD] ⏳ Phrase DEFERRED (will concat): {} - {:.0}ms, {:.0}% voice",
-                                    reject_reason,
-                                    duration_ms,
-                                    voice_ratio * 100.0
-                                );
-                                // Keep phrase_start, reset other state, wait for more speech
-                                self.in_speech = false;
-                                self.silent_windows = 0;
-                                // DON'T reset phrase_start - audio will be included in next phrase
-                            } else {
-                                // Low voice = noise, discard completely
-                                println!(
-                                    "[VAD] ✗ Phrase REJECTED: {} - {:.0}ms, {:.0}% voice ({}/{} windows)",
-                                    reject_reason,
-                                    duration_ms,
-                                    voice_ratio * 100.0,
-                                    self.voice_windows_count,
-                                    self.phrase_windows_count
-                                );
-                                self.in_speech = false;
-                                self.silent_windows = 0;
-                                self.voice_windows_count = 0;
-                                self.phrase_windows_count = 0;
-                                self.phrase_start = window_end;
-                            }
+                            // Short fragment - just discard and move on
+                            // The audio will be picked up by get_remaining at the end
+                            println!(
+                                "[VAD] ✗ Phrase REJECTED: {} - {:.0}ms, {:.0}% voice ({}/{} windows)",
+                                reject_reason,
+                                duration_ms,
+                                voice_ratio * 100.0,
+                                self.voice_windows_count,
+                                self.phrase_windows_count
+                            );
+                            self.in_speech = false;
+                            self.silent_windows = 0;
+                            self.voice_windows_count = 0;
+                            self.phrase_windows_count = 0;
+                            self.phrase_start = window_end;
                         }
                     }
                 }
