@@ -2511,19 +2511,19 @@ impl DevReport {
 
         println!("[DEV] Saving report to {:?}", self.report_dir);
 
-        // Save full audio
-        let full_audio_path = self.report_dir.join("full_audio.wav");
-        save_wav_file(&full_audio_path, &self.full_samples, RECORDING_SAMPLE_RATE);
+        // Save full audio as OGG/Opus (much smaller than WAV)
+        let full_audio_path = self.report_dir.join("full_audio");
+        save_audio_file(&full_audio_path, &self.full_samples, RECORDING_SAMPLE_RATE);
 
-        // Save fragment audios
+        // Save fragment audios as OGG/Opus
         for frag in &self.fragments {
             let frag_path = fragments_dir.join(format!(
-                "{:03}_{}-{}.wav",
+                "{:03}_{}-{}",
                 frag.index, frag.start_sample, frag.end_sample
             ));
             if frag.end_sample <= self.full_samples.len() && frag.start_sample < frag.end_sample {
                 let frag_samples = &self.full_samples[frag.start_sample..frag.end_sample];
-                save_wav_file(&frag_path, frag_samples, RECORDING_SAMPLE_RATE);
+                save_audio_file(&frag_path, frag_samples, RECORDING_SAMPLE_RATE);
             }
 
             // Save fragment transcription
@@ -2622,8 +2622,36 @@ impl DevReport {
     }
 }
 
-/// Save samples to WAV file
-fn save_wav_file(path: &PathBuf, samples: &[f32], sample_rate: u32) {
+/// Save samples to OGG/Opus file (preferred) or WAV fallback
+#[cfg(feature = "opus")]
+fn save_audio_file(path: &PathBuf, samples: &[f32], _sample_rate: u32) {
+    // Resample to 16kHz for Opus encoding
+    let resampled = resample_48k_to_16k(samples);
+    let samples_i16: Vec<i16> = resampled
+        .iter()
+        .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+        .collect();
+
+    match ogg_opus::encode::<16000, 1>(&samples_i16) {
+        Ok(ogg_data) => {
+            let ogg_path = path.with_extension("ogg");
+            if let Err(e) = fs::write(&ogg_path, &ogg_data) {
+                eprintln!("[DEV] Failed to save OGG: {}", e);
+            }
+        }
+        Err(e) => {
+            eprintln!("[DEV] Opus encoding failed: {:?}, falling back to WAV", e);
+            save_wav_file_internal(path, samples, _sample_rate);
+        }
+    }
+}
+
+#[cfg(not(feature = "opus"))]
+fn save_audio_file(path: &PathBuf, samples: &[f32], sample_rate: u32) {
+    save_wav_file_internal(path, samples, sample_rate);
+}
+
+fn save_wav_file_internal(path: &PathBuf, samples: &[f32], sample_rate: u32) {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate,
