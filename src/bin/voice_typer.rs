@@ -2463,6 +2463,14 @@ struct DevReport {
     full_samples: Vec<f32>,
     fragments: Vec<FragmentInfo>,
     typing_events: Vec<TypingEvent>,
+    vad_logs: Vec<VadLogEntry>,
+}
+
+#[derive(Clone)]
+struct VadLogEntry {
+    timestamp: String,
+    event: String,    // "phrase_detected", "phrase_rejected", "final_segment", "final_rejected"
+    details: String,  // detailed message
 }
 
 impl DevReport {
@@ -2476,6 +2484,7 @@ impl DevReport {
             full_samples: Vec::new(),
             fragments: Vec::new(),
             typing_events: Vec::new(),
+            vad_logs: Vec::new(),
         }
     }
 
@@ -2497,6 +2506,14 @@ impl DevReport {
             sequence_num,
             success,
             error,
+        });
+    }
+
+    fn add_vad_log(&mut self, event: &str, details: &str) {
+        self.vad_logs.push(VadLogEntry {
+            timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+            event: event.to_string(),
+            details: details.to_string(),
         });
     }
 
@@ -2583,6 +2600,13 @@ impl DevReport {
                     "sequence_num": e.sequence_num,
                     "success": e.success,
                     "error": e.error,
+                })
+            }).collect::<Vec<_>>(),
+            "vad_logs": self.vad_logs.iter().map(|l| {
+                serde_json::json!({
+                    "timestamp": l.timestamp,
+                    "event": l.event,
+                    "details": l.details,
                 })
             }).collect::<Vec<_>>(),
         });
@@ -2721,6 +2745,9 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
 
     // Channel for dev mode typing events (session_id, event_type, text, char_count, sequence_num, success, error)
     let (dev_typing_tx, dev_typing_rx) = mpsc::channel::<(String, String, String, usize, u64, bool, Option<String>)>();
+
+    // Channel for dev mode VAD logs (session_id, event, details)
+    let (dev_vad_tx, dev_vad_rx) = mpsc::channel::<(String, String, String)>();
 
     // VAD for phrase detection
     let vad: Arc<Mutex<VadPhraseDetector>> = Arc::new(Mutex::new(VadPhraseDetector::new()));
@@ -3060,6 +3087,19 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
         }
     });
 
+    // Dev mode: VAD logs collector thread (filters by session_id)
+    let dev_report_for_vad_logs = Arc::clone(&dev_report);
+    thread::spawn(move || {
+        for (msg_session_id, event, details) in dev_vad_rx {
+            let mut report_guard = dev_report_for_vad_logs.lock().unwrap();
+            if let Some(ref mut report) = *report_guard {
+                if report.session_id == msg_session_id {
+                    report.add_vad_log(&event, &details);
+                }
+            }
+        }
+    });
+
     // VAD monitoring thread - detects phrases by pauses and sends to worker
     let state_for_vad = Arc::clone(&state);
     let samples_for_vad = Arc::clone(&samples);
@@ -3067,6 +3107,8 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     let next_sequence_vad = Arc::clone(&next_sequence);
     let processing_count_vad = Arc::clone(&processing_count);
     let job_tx_vad = job_tx.clone();
+    let dev_vad_tx_for_vad = dev_vad_tx.clone();
+    let session_id_for_vad = Arc::clone(&current_session_id);
 
     thread::spawn(move || {
         use std::sync::atomic::Ordering;
@@ -3132,12 +3174,20 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                 processing_count_vad.fetch_add(1, Ordering::SeqCst);
 
                 let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
+                let log_details = format!(
+                    "seq={}, duration={:.2}s, start={}, end={}",
+                    seq, duration_secs, start_pos, end_pos
+                );
                 println!(
                     "[{}] Phrase #{} detected ({:.1}s), queuing for transcription...",
                     timestamp(),
                     seq,
                     duration_secs
                 );
+
+                // Log to dev report
+                let sid = session_id_for_vad.lock().unwrap().clone();
+                let _ = dev_vad_tx_for_vad.send((sid, "phrase_detected".to_string(), log_details));
 
                 let _ = job_tx_vad.send(TranscriptionJob {
                     samples: phrase_samples,
@@ -3161,6 +3211,7 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     let config_callback = Arc::clone(&config);
     let session_id_callback = Arc::clone(&current_session_id);
     let last_phrase_callback = Arc::clone(&last_phrase);
+    let dev_vad_tx_callback = dev_vad_tx;
 
     // Debounce state
     let key_debounce = Arc::new(AtomicBool::new(false));
@@ -3256,10 +3307,14 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                     }
 
                     // Get remaining audio from VAD (audio after last detected phrase)
-                    let remaining = {
+                    let (remaining, vad_info) = {
                         let samples = samples_clone.lock().unwrap();
                         let vad = vad_clone.lock().unwrap();
-                        vad.get_remaining(&samples)
+                        let info = format!(
+                            "total_samples={}, in_speech={}, phrase_start={}, processed_pos={}, last_transcribed_end={}",
+                            samples.len(), vad.in_speech, vad.phrase_start, vad.processed_pos, vad.last_transcribed_end
+                        );
+                        (vad.get_remaining(&samples), info)
                     };
 
                     drop(rec_state);
@@ -3278,6 +3333,14 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                             duration_secs
                         );
 
+                        // Log final segment to dev report
+                        let log_details = format!(
+                            "seq={}, duration={:.2}s, start={}, end={}, vad_state: {}",
+                            seq, duration_secs, start_pos, end_pos, vad_info
+                        );
+                        let sid = session_id_callback.lock().unwrap().clone();
+                        let _ = dev_vad_tx_callback.send((sid, "final_segment".to_string(), log_details));
+
                         let _ = job_tx_callback.send(TranscriptionJob {
                             samples: phrase_samples,
                             sequence_num: seq,
@@ -3286,6 +3349,10 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                         });
                     } else {
                         println!("[{}] No remaining audio to transcribe", timestamp());
+                        // Log rejection to dev report
+                        let log_details = format!("no_remaining_audio, vad_state: {}", vad_info);
+                        let sid = session_id_callback.lock().unwrap().clone();
+                        let _ = dev_vad_tx_callback.send((sid, "final_rejected".to_string(), log_details));
                     }
 
                     // Dev mode: save full audio and upload report
@@ -3315,6 +3382,7 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                                     full_samples: report.full_samples.clone(),
                                     fragments: report.fragments.clone(),
                                     typing_events: report.typing_events.clone(),
+                                    vad_logs: report.vad_logs.clone(),
                                 };
                                 drop(report_guard); // Release lock before slow operations
                                 report_copy.save_and_upload(&config_for_report);
