@@ -371,7 +371,11 @@ impl VadPhraseDetector {
                         } else {
                             0.0
                         };
-                        let has_enough_voice = voice_ratio >= 0.3;
+                        // Lowered from 0.3 to 0.2 - less strict voice requirement
+                        let has_enough_voice = voice_ratio >= 0.2;
+
+                        let duration_ms = phrase_len as f32 / RECORDING_SAMPLE_RATE as f32 * 1000.0;
+                        let min_duration_ms = (self.min_speech_windows * self.window_samples) as f32 / RECORDING_SAMPLE_RATE as f32 * 1000.0;
 
                         if phrase_len >= self.min_speech_windows * self.window_samples
                             && has_enough_voice
@@ -379,6 +383,13 @@ impl VadPhraseDetector {
                             let start_pos = self.phrase_start;
                             let end_pos = phrase_end;
                             let phrase = all_samples[start_pos..end_pos].to_vec();
+                            println!(
+                                "[VAD] ✓ Phrase ACCEPTED: {:.0}ms, {:.0}% voice ({}/{} windows)",
+                                duration_ms,
+                                voice_ratio * 100.0,
+                                self.voice_windows_count,
+                                self.phrase_windows_count
+                            );
                             self.in_speech = false;
                             self.silent_windows = 0;
                             self.voice_windows_count = 0;
@@ -388,14 +399,20 @@ impl VadPhraseDetector {
                             self.processed_pos = window_end;
                             return Some((phrase, start_pos, end_pos));
                         } else {
-                            if !has_enough_voice
-                                && phrase_len >= self.min_speech_windows * self.window_samples
-                            {
-                                println!(
-                                    "[VAD] Discarding noise-only phrase ({:.0}% voice)",
-                                    voice_ratio * 100.0
-                                );
-                            }
+                            // Log all rejections with details
+                            let reject_reason = if phrase_len < self.min_speech_windows * self.window_samples {
+                                format!("too short ({:.0}ms < {:.0}ms min)", duration_ms, min_duration_ms)
+                            } else {
+                                format!("low voice ({:.0}% < 20% threshold)", voice_ratio * 100.0)
+                            };
+                            println!(
+                                "[VAD] ✗ Phrase REJECTED: {} - {:.0}ms, {:.0}% voice ({}/{} windows)",
+                                reject_reason,
+                                duration_ms,
+                                voice_ratio * 100.0,
+                                self.voice_windows_count,
+                                self.phrase_windows_count
+                            );
                             self.in_speech = false;
                             self.silent_windows = 0;
                             self.voice_windows_count = 0;
@@ -428,18 +445,29 @@ impl VadPhraseDetector {
             self.processed_pos.max(self.last_transcribed_end)
         };
 
+        let total_samples = all_samples.len();
+        let duration_total_ms = total_samples as f32 / RECORDING_SAMPLE_RATE as f32 * 1000.0;
+
+        println!(
+            "[VAD] get_remaining: total={} samples ({:.0}ms), in_speech={}, phrase_start={}, processed_pos={}, last_transcribed_end={}, start_pos={}",
+            total_samples, duration_total_ms, self.in_speech, self.phrase_start, self.processed_pos, self.last_transcribed_end, start_pos
+        );
+
         if start_pos >= all_samples.len() {
+            println!("[VAD] ✗ Final REJECTED: start_pos >= total_samples (no remaining audio)");
             return None;
         }
 
         let remaining = &all_samples[start_pos..];
         let remaining_len = remaining.len();
         let end_pos = all_samples.len();
+        let remaining_ms = remaining_len as f32 / RECORDING_SAMPLE_RATE as f32 * 1000.0;
+        let min_final_ms = min_final_samples as f32 / RECORDING_SAMPLE_RATE as f32 * 1000.0;
 
         if remaining_len < min_final_samples {
             println!(
-                "[VAD] Final segment too short: {} samples (min {})",
-                remaining_len, min_final_samples
+                "[VAD] ✗ Final REJECTED: too short ({:.0}ms < {:.0}ms min)",
+                remaining_ms, min_final_ms
             );
             return None;
         }
@@ -471,17 +499,25 @@ impl VadPhraseDetector {
             0.0
         };
 
-        // Lower threshold for final - 15% voice is enough (user released key)
-        if voice_percent < 0.15 {
+        // Lowered from 0.15 to 0.10 - less strict for final segment
+        if voice_percent < 0.10 {
             println!(
-                "[VAD] Discarding final segment: only {:.0}% voice ({} of {} windows)",
+                "[VAD] ✗ Final REJECTED: low voice ({:.0}% < 10% threshold) - {:.0}ms, {}/{} windows",
                 voice_percent * 100.0,
+                remaining_ms,
                 voice_windows,
                 total_windows
             );
             return None;
         }
 
+        println!(
+            "[VAD] ✓ Final ACCEPTED: {:.0}ms, {:.0}% voice ({}/{} windows)",
+            remaining_ms,
+            voice_percent * 100.0,
+            voice_windows,
+            total_windows
+        );
         Some((remaining.to_vec(), start_pos, end_pos))
     }
 
@@ -2686,6 +2722,13 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
             };
 
             let resampled = resample_48k_to_16k(&job.samples);
+            println!(
+                "[{}] [WORKER] Sending phrase #{} to Whisper API ({} resampled samples)...",
+                timestamp(),
+                job.sequence_num,
+                resampled.len()
+            );
+
             match transcribe_openai_internal(
                 &config_for_worker,
                 &resampled,
@@ -2693,6 +2736,14 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                 Some(&prompt),
             ) {
                 Ok(text) => {
+                    println!(
+                        "[{}] [WORKER] Whisper returned for #{}: \"{}\" ({}chars)",
+                        timestamp(),
+                        job.sequence_num,
+                        if text.len() > 80 { &text[..80] } else { &text },
+                        text.len()
+                    );
+
                     if !text.trim().is_empty() {
                         // Save audio for analysis
                         let _audio_file = save_audio_segment(&job.samples, RECORDING_SAMPLE_RATE);
@@ -2710,6 +2761,13 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                                 )
                         };
 
+                        println!(
+                            "[{}] [WORKER] ✓ Sending result #{} to output thread: \"{}\"",
+                            timestamp(),
+                            job.sequence_num,
+                            if processed_text.len() > 60 { &processed_text[..60] } else { &processed_text }
+                        );
+
                         let _ = result_tx.send(TranscriptionOutput {
                             text: processed_text.clone(),
                             is_continuation,
@@ -2723,11 +2781,17 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                             job.end_sample,
                             processed_text,
                         ));
+                    } else {
+                        println!(
+                            "[{}] [WORKER] ✗ Empty/whitespace result for #{}, not sending",
+                            timestamp(),
+                            job.sequence_num
+                        );
                     }
                 }
                 Err(e) => {
                     eprintln!(
-                        "[{}] Transcription error for #{}: {}",
+                        "[{}] [WORKER] ✗ Transcription error for #{}: {}",
                         timestamp(),
                         job.sequence_num,
                         e
@@ -2756,11 +2820,28 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
         let mut pending_outputs: BTreeMap<u64, TranscriptionOutput> = BTreeMap::new();
 
         for result in result_rx {
+            println!(
+                "[{}] [OUTPUT] Received result #{} from worker: \"{}\"",
+                timestamp(),
+                result.sequence_num,
+                if result.text.len() > 50 { &result.text[..50] } else { &result.text }
+            );
             pending_outputs.insert(result.sequence_num, result);
 
             // Output all consecutive results starting from next_output_seq
             let mut current_seq = next_output_seq_for_output.load(Ordering::SeqCst);
+            println!(
+                "[{}] [OUTPUT] Current seq={}, pending={:?}",
+                timestamp(),
+                current_seq,
+                pending_outputs.keys().collect::<Vec<_>>()
+            );
             while let Some(output) = pending_outputs.remove(&current_seq) {
+                println!(
+                    "[{}] [OUTPUT] ✓ Processing seq #{} for typing",
+                    timestamp(),
+                    current_seq
+                );
                 let context = {
                     let ctx = last_phrase_for_output.lock().unwrap();
                     ctx.clone()
