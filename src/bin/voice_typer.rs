@@ -434,9 +434,10 @@ impl VadPhraseDetector {
 
     /// Returns (samples, start_pos, end_pos) for remaining audio
     fn get_remaining(&self, all_samples: &[f32]) -> Option<(Vec<f32>, usize, usize)> {
-        // Minimum samples for final segment - same as mid-recording threshold
-        // to prevent GPT-4o hallucinations on tiny fragments
-        let min_final_samples = (VAD_MIN_SPEECH_MS as f32 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize; // 400ms
+        // Minimum samples for final segment - lower than mid-recording threshold
+        // because user explicitly released key = they finished speaking
+        // 200ms is a compromise: short enough to catch final words, long enough to avoid noise
+        let min_final_samples = (200.0 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize; // 200ms
 
         // Start from the position after the last transcribed phrase
         // This prevents double transcription when VAD and key release happen simultaneously
