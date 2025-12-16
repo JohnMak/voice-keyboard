@@ -6,22 +6,28 @@
 //!   voice-keyboard --transcribe <file.wav>  # Transcribe a file (for testing)
 
 use anyhow::Result;
+#[cfg(feature = "whisper")]
 use std::path::PathBuf;
-use tracing::{error, info, Level};
+#[cfg(feature = "whisper")]
+use tracing::{error, info};
+use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 #[cfg(feature = "whisper")]
 use voice_keyboard::transcribe::Transcriber;
+#[cfg(feature = "whisper")]
 use voice_keyboard::{
     audio::AudioRecorder,
     config::Config,
     hotkey::{HotkeyAction, HotkeyConfig, HotkeyListener},
     inject::TextInjector,
 };
+#[cfg(not(feature = "whisper"))]
+use voice_keyboard::config::Config;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
-    let subscriber = FmtSubscriber::builder()
+    let _subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .with_target(false)
         .init();
