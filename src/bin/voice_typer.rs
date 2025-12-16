@@ -128,7 +128,7 @@ const RECORDING_SAMPLE_RATE: u32 = 48000;
 
 /// VAD (Voice Activity Detection) settings
 const VAD_SILENCE_MS: u64 = 200; // Reduced from 350 - faster phrase detection on short pauses
-const VAD_MIN_SPEECH_MS: u64 = 300; // Reduced from 500 - accept shorter phrases (~5 words)
+const VAD_MIN_SPEECH_MS: u64 = 500; // Min 500ms to avoid GPT-4o hallucinations on very short fragments
 const VAD_WINDOW_MS: u64 = 30;
 const VAD_ENERGY_THRESHOLD: f32 = 0.001;
 const VAD_VOICE_RATIO_THRESHOLD: f32 = 0.15;
@@ -2544,9 +2544,7 @@ impl DevReport {
             Err(e) => format!("ERROR: {}", e),
         };
 
-        // Save full transcription
-        let full_txt_path = self.report_dir.join("full_transcription.txt");
-        let _ = fs::write(&full_txt_path, &full_transcription);
+        // full_transcription is included in report.json, no need for separate file
 
         // Create JSON report
         let combined_fragments: String = self
@@ -2599,24 +2597,32 @@ impl DevReport {
     fn upload_to_server(&self) {
         println!("[DEV] Uploading to {}...", DEV_REPORT_SERVER);
 
-        let dest = format!("{}:{}/{}", DEV_REPORT_SERVER, DEV_REPORT_PATH, self.session_id);
+        // Create remote directory
+        let mkdir_dest = format!("{}:{}/{}", DEV_REPORT_SERVER, DEV_REPORT_PATH, self.session_id);
+        let _ = Command::new("ssh")
+            .arg(DEV_REPORT_SERVER)
+            .arg(format!("mkdir -p {}/{}", DEV_REPORT_PATH, self.session_id))
+            .output();
 
-        match Command::new("scp")
-            .arg("-r")
-            .arg(&self.report_dir)
-            .arg(&dest)
-            .output()
-        {
-            Ok(output) => {
-                if output.status.success() {
-                    println!("[DEV] Upload complete!");
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    eprintln!("[DEV] Upload failed: {}", stderr);
+        // Upload only JSON report (no audio files - they stay local)
+        let json_path = self.report_dir.join("report.json");
+        if json_path.exists() {
+            match Command::new("scp")
+                .arg(&json_path)
+                .arg(&mkdir_dest)
+                .output()
+            {
+                Ok(output) => {
+                    if output.status.success() {
+                        println!("[DEV] Upload complete!");
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        eprintln!("[DEV] Upload failed: {}", stderr);
+                    }
                 }
-            }
-            Err(e) => {
-                eprintln!("[DEV] SCP error: {}", e);
+                Err(e) => {
+                    eprintln!("[DEV] SCP error: {}", e);
+                }
             }
         }
     }
