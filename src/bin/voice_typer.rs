@@ -2736,11 +2736,12 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                 Some(&prompt),
             ) {
                 Ok(text) => {
+                    let text_preview: String = text.chars().take(80).collect();
                     println!(
                         "[{}] [WORKER] Whisper returned for #{}: \"{}\" ({}chars)",
                         timestamp(),
                         job.sequence_num,
-                        if text.len() > 80 { &text[..80] } else { &text },
+                        text_preview,
                         text.len()
                     );
 
@@ -2761,11 +2762,12 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                                 )
                         };
 
+                        let send_preview: String = processed_text.chars().take(60).collect();
                         println!(
                             "[{}] [WORKER] ✓ Sending result #{} to output thread: \"{}\"",
                             timestamp(),
                             job.sequence_num,
-                            if processed_text.len() > 60 { &processed_text[..60] } else { &processed_text }
+                            send_preview
                         );
 
                         if let Err(e) = result_tx.send(TranscriptionOutput {
@@ -2828,11 +2830,12 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
         let mut pending_outputs: BTreeMap<u64, TranscriptionOutput> = BTreeMap::new();
 
         for result in result_rx {
+            let preview: String = result.text.chars().take(50).collect();
             println!(
                 "[{}] [OUTPUT] Received result #{} from worker: \"{}\"",
                 timestamp(),
                 result.sequence_num,
-                if result.text.len() > 50 { &result.text[..50] } else { &result.text }
+                preview
             );
             pending_outputs.insert(result.sequence_num, result);
 
