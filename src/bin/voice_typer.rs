@@ -2565,7 +2565,10 @@ impl DevReport {
             Err(e) => format!("ERROR: {}", e),
         };
 
-        // full_transcription is included in report.json, no need for separate file
+        // Print full transcription to console for comparison with fragments
+        println!("[DEV] ═══════════════════════════════════════════════════════════");
+        println!("[DEV] FULL TEXT: {}", full_transcription);
+        println!("[DEV] ═══════════════════════════════════════════════════════════");
 
         // Create JSON report
         let combined_fragments: String = self
