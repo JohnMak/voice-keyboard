@@ -434,9 +434,9 @@ impl VadPhraseDetector {
 
     /// Returns (samples, start_pos, end_pos) for remaining audio
     fn get_remaining(&self, all_samples: &[f32]) -> Option<(Vec<f32>, usize, usize)> {
-        // Minimum samples for final segment - shorter than mid-recording threshold
-        // because user explicitly released key = they finished speaking
-        let min_final_samples = self.window_samples * 3; // ~90ms at 48kHz
+        // Minimum samples for final segment - same as mid-recording threshold
+        // to prevent GPT-4o hallucinations on tiny fragments
+        let min_final_samples = (VAD_MIN_SPEECH_MS as f32 * RECORDING_SAMPLE_RATE as f32 / 1000.0) as usize; // 400ms
 
         // Start from the position after the last transcribed phrase
         // This prevents double transcription when VAD and key release happen simultaneously
@@ -3146,18 +3146,40 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                 // Check if not already recording
                 let mut rec_state = state_clone.lock().unwrap();
                 if *rec_state == RecordingState::Idle {
-                    // Wait for any pending processing to complete before clearing
+                    // Wait for any pending processing to complete before starting new session
                     let pending = processing_count_clone.load(Ordering::SeqCst);
-                    if pending > 0 {
+                    let job_seq = next_sequence_clone.load(Ordering::SeqCst);
+                    let output_seq = next_output_seq_for_callback.load(Ordering::SeqCst);
+
+                    if pending > 0 || output_seq < job_seq {
                         println!(
-                            "[{}] Waiting for {} pending transcriptions...",
+                            "[{}] Waiting for previous session: {} pending transcriptions, output_seq={} job_seq={}",
                             timestamp(),
-                            pending
+                            pending,
+                            output_seq,
+                            job_seq
                         );
-                        // Don't clear samples, just reset VAD position
-                    } else {
-                        samples_clone.lock().unwrap().clear();
+                        drop(rec_state); // Release lock while waiting
+
+                        // Wait for both: transcriptions to finish AND output to process all results
+                        loop {
+                            thread::sleep(Duration::from_millis(50));
+                            let p = processing_count_clone.load(Ordering::SeqCst);
+                            let j = next_sequence_clone.load(Ordering::SeqCst);
+                            let o = next_output_seq_for_callback.load(Ordering::SeqCst);
+                            if p == 0 && o >= j {
+                                break;
+                            }
+                        }
+                        // Small delay to let typing events channel flush
+                        thread::sleep(Duration::from_millis(100));
+                        rec_state = state_clone.lock().unwrap();
+                        // Re-check state after waiting
+                        if *rec_state != RecordingState::Idle {
+                            continue;
+                        }
                     }
+                    samples_clone.lock().unwrap().clear();
                     vad_clone.lock().unwrap().reset();
                     next_sequence_clone.store(0, Ordering::SeqCst); // Reset sequence for new session
                     next_output_seq_for_callback.store(0, Ordering::SeqCst); // Reset output sequence too
