@@ -3207,7 +3207,7 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                         rec_state = state_clone.lock().unwrap();
                         // Re-check state after waiting
                         if *rec_state != RecordingState::Idle {
-                            continue;
+                            return; // State changed while waiting, abort
                         }
                     }
                     samples_clone.lock().unwrap().clear();
