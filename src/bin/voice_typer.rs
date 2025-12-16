@@ -2768,11 +2768,17 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                             if processed_text.len() > 60 { &processed_text[..60] } else { &processed_text }
                         );
 
-                        let _ = result_tx.send(TranscriptionOutput {
+                        if let Err(e) = result_tx.send(TranscriptionOutput {
                             text: processed_text.clone(),
                             is_continuation,
                             sequence_num: job.sequence_num,
-                        });
+                        }) {
+                            eprintln!(
+                                "[{}] [WORKER] ✗ Failed to send to output thread: {} (channel closed?)",
+                                timestamp(),
+                                e
+                            );
+                        }
 
                         // Send fragment info for dev report
                         let _ = dev_frag_tx_worker.send((
@@ -2816,6 +2822,8 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     thread::spawn(move || {
         use std::collections::BTreeMap;
         use std::sync::atomic::Ordering;
+
+        println!("[{}] [OUTPUT] Output thread started, waiting for results...", timestamp());
 
         let mut pending_outputs: BTreeMap<u64, TranscriptionOutput> = BTreeMap::new();
 
