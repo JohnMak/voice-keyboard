@@ -2712,11 +2712,14 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     // Dev mode: report collection
     let dev_report: Arc<Mutex<Option<DevReport>>> = Arc::new(Mutex::new(None));
 
-    // Channel for dev mode fragment info (sequence_num, start, end, text)
-    let (dev_frag_tx, dev_frag_rx) = mpsc::channel::<(u64, usize, usize, String)>();
+    // Current session ID (shared with worker/output threads for tagging messages)
+    let current_session_id: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 
-    // Channel for dev mode typing events (event_type, text, char_count, sequence_num, success, error)
-    let (dev_typing_tx, dev_typing_rx) = mpsc::channel::<(String, String, usize, u64, bool, Option<String>)>();
+    // Channel for dev mode fragment info (session_id, sequence_num, start, end, text)
+    let (dev_frag_tx, dev_frag_rx) = mpsc::channel::<(String, u64, usize, usize, String)>();
+
+    // Channel for dev mode typing events (session_id, event_type, text, char_count, sequence_num, success, error)
+    let (dev_typing_tx, dev_typing_rx) = mpsc::channel::<(String, String, String, usize, u64, bool, Option<String>)>();
 
     // VAD for phrase detection
     let vad: Arc<Mutex<VadPhraseDetector>> = Arc::new(Mutex::new(VadPhraseDetector::new()));
@@ -2729,6 +2732,7 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     let last_phrase_for_worker = Arc::clone(&last_phrase);
     let processing_count_worker = Arc::clone(&processing_count);
     let dev_frag_tx_worker = dev_frag_tx;
+    let session_id_for_worker = Arc::clone(&current_session_id);
 
     thread::spawn(move || {
         use std::sync::atomic::Ordering;
@@ -2819,8 +2823,10 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                             );
                         }
 
-                        // Send fragment info for dev report
+                        // Send fragment info for dev report (with session_id for filtering)
+                        let sid = session_id_for_worker.lock().unwrap().clone();
                         let _ = dev_frag_tx_worker.send((
+                            sid,
                             job.sequence_num,
                             job.start_sample,
                             job.end_sample,
@@ -2857,6 +2863,7 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     let last_phrase_for_output = Arc::clone(&last_phrase);
     let input_method_for_output = input_method;
     let dev_typing_tx_output = dev_typing_tx;
+    let session_id_for_output = Arc::clone(&current_session_id);
 
     thread::spawn(move || {
         use std::collections::BTreeMap;
@@ -2929,8 +2936,10 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                             }
                         };
 
-                        // Log typing event: delete
+                        // Log typing event: delete (with session_id for filtering)
+                        let sid = session_id_for_output.lock().unwrap().clone();
                         let _ = dev_typing_tx_output.send((
+                            sid,
                             "delete".to_string(),
                             deleted_chars.clone(),
                             chars_to_delete,
@@ -2955,8 +2964,10 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                         }
                     };
 
-                    // Log typing event: insert
+                    // Log typing event: insert (with session_id for filtering)
+                    let sid = session_id_for_output.lock().unwrap().clone();
                     let _ = dev_typing_tx_output.send((
+                        sid,
                         "insert".to_string(),
                         text_with_punct.clone(),
                         text_with_punct.chars().count(),
@@ -2989,8 +3000,10 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                         }
                     };
 
-                    // Log typing event: insert
+                    // Log typing event: insert (with session_id for filtering)
+                    let sid = session_id_for_output.lock().unwrap().clone();
                     let _ = dev_typing_tx_output.send((
+                        sid,
                         "insert".to_string(),
                         text_with_space.clone(),
                         text_with_space.chars().count(),
@@ -3008,24 +3021,40 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
         }
     });
 
-    // Dev mode: Fragment collector thread
+    // Dev mode: Fragment collector thread (filters by session_id)
     let dev_report_for_collector = Arc::clone(&dev_report);
     thread::spawn(move || {
-        for (seq, start, end, text) in dev_frag_rx {
+        for (msg_session_id, seq, start, end, text) in dev_frag_rx {
             let mut report_guard = dev_report_for_collector.lock().unwrap();
             if let Some(ref mut report) = *report_guard {
-                report.add_fragment(seq, start, end, text);
+                // Only add fragment if it belongs to current session
+                if report.session_id == msg_session_id {
+                    report.add_fragment(seq, start, end, text);
+                } else {
+                    println!(
+                        "[DEV] Dropping stale fragment from session {} (current: {})",
+                        msg_session_id, report.session_id
+                    );
+                }
             }
         }
     });
 
-    // Dev mode: Typing events collector thread
+    // Dev mode: Typing events collector thread (filters by session_id)
     let dev_report_for_typing = Arc::clone(&dev_report);
     thread::spawn(move || {
-        for (event_type, text, char_count, seq, success, error) in dev_typing_rx {
+        for (msg_session_id, event_type, text, char_count, seq, success, error) in dev_typing_rx {
             let mut report_guard = dev_report_for_typing.lock().unwrap();
             if let Some(ref mut report) = *report_guard {
-                report.add_typing_event(&event_type, &text, char_count, seq, success, error);
+                // Only add typing event if it belongs to current session
+                if report.session_id == msg_session_id {
+                    report.add_typing_event(&event_type, &text, char_count, seq, success, error);
+                } else {
+                    println!(
+                        "[DEV] Dropping stale typing event from session {} (current: {})",
+                        msg_session_id, report.session_id
+                    );
+                }
             }
         }
     });
@@ -3129,6 +3158,8 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     let job_tx_callback = job_tx;
     let dev_report_callback = Arc::clone(&dev_report);
     let config_callback = Arc::clone(&config);
+    let session_id_callback = Arc::clone(&current_session_id);
+    let last_phrase_callback = Arc::clone(&last_phrase);
 
     // Debounce state
     let key_debounce = Arc::new(AtomicBool::new(false));
@@ -3187,9 +3218,15 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                     is_recording_clone.store(true, Ordering::SeqCst);
                     *rec_state = RecordingState::Recording;
 
+                    // Clear context from previous session - new recording = new context
+                    last_phrase_callback.lock().unwrap().clear();
+
                     // Dev mode: create new report for this session
                     if dev_mode {
-                        *dev_report_callback.lock().unwrap() = Some(DevReport::new());
+                        let new_report = DevReport::new();
+                        // Update shared session_id so worker/output threads tag messages correctly
+                        *session_id_callback.lock().unwrap() = new_report.session_id.clone();
+                        *dev_report_callback.lock().unwrap() = Some(new_report);
                     }
 
                     println!("[{}] Recording...", timestamp());
