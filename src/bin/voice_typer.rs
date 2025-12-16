@@ -399,25 +399,42 @@ impl VadPhraseDetector {
                             self.processed_pos = window_end;
                             return Some((phrase, start_pos, end_pos));
                         } else {
-                            // Log all rejections with details
+                            // Log rejection reason
                             let reject_reason = if phrase_len < self.min_speech_windows * self.window_samples {
                                 format!("too short ({:.0}ms < {:.0}ms min)", duration_ms, min_duration_ms)
                             } else {
                                 format!("low voice ({:.0}% < 20% threshold)", voice_ratio * 100.0)
                             };
-                            println!(
-                                "[VAD] ✗ Phrase REJECTED: {} - {:.0}ms, {:.0}% voice ({}/{} windows)",
-                                reject_reason,
-                                duration_ms,
-                                voice_ratio * 100.0,
-                                self.voice_windows_count,
-                                self.phrase_windows_count
-                            );
-                            self.in_speech = false;
-                            self.silent_windows = 0;
-                            self.voice_windows_count = 0;
-                            self.phrase_windows_count = 0;
-                            self.phrase_start = window_end;
+
+                            // If too short but has voice, DON'T reset phrase_start -
+                            // let it concatenate with next speech segment
+                            if phrase_len < self.min_speech_windows * self.window_samples && has_enough_voice {
+                                println!(
+                                    "[VAD] ⏳ Phrase DEFERRED (will concat): {} - {:.0}ms, {:.0}% voice",
+                                    reject_reason,
+                                    duration_ms,
+                                    voice_ratio * 100.0
+                                );
+                                // Keep phrase_start, reset other state, wait for more speech
+                                self.in_speech = false;
+                                self.silent_windows = 0;
+                                // DON'T reset phrase_start - audio will be included in next phrase
+                            } else {
+                                // Low voice = noise, discard completely
+                                println!(
+                                    "[VAD] ✗ Phrase REJECTED: {} - {:.0}ms, {:.0}% voice ({}/{} windows)",
+                                    reject_reason,
+                                    duration_ms,
+                                    voice_ratio * 100.0,
+                                    self.voice_windows_count,
+                                    self.phrase_windows_count
+                                );
+                                self.in_speech = false;
+                                self.silent_windows = 0;
+                                self.voice_windows_count = 0;
+                                self.phrase_windows_count = 0;
+                                self.phrase_start = window_end;
+                            }
                         }
                     }
                 }
