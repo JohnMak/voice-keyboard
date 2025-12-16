@@ -127,8 +127,8 @@ fn set_beep_volume(volume: f32) {
 const RECORDING_SAMPLE_RATE: u32 = 48000;
 
 /// VAD (Voice Activity Detection) settings
-const VAD_SILENCE_MS: u64 = 350;
-const VAD_MIN_SPEECH_MS: u64 = 500;
+const VAD_SILENCE_MS: u64 = 200; // Reduced from 350 - faster phrase detection on short pauses
+const VAD_MIN_SPEECH_MS: u64 = 300; // Reduced from 500 - accept shorter phrases (~5 words)
 const VAD_WINDOW_MS: u64 = 30;
 const VAD_ENERGY_THRESHOLD: f32 = 0.001;
 const VAD_VOICE_RATIO_THRESHOLD: f32 = 0.15;
