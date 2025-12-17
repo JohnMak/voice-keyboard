@@ -128,7 +128,7 @@ fn set_beep_volume(volume: f32) {
 const RECORDING_SAMPLE_RATE: u32 = 48000;
 
 /// VAD (Voice Activity Detection) settings
-const VAD_SILENCE_MS: u64 = 150; // Short pause = new phrase (was 200, orig 350)
+const VAD_SILENCE_MS: u64 = 100; // Very short pause = new phrase (lower = more fragments, less lost endings)
 const VAD_MIN_SPEECH_MS: u64 = 400; // Min 400ms - balance between responsiveness and avoiding hallucinations
 const VAD_WINDOW_MS: u64 = 30;
 const VAD_ENERGY_THRESHOLD: f32 = 0.001;
