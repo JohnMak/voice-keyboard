@@ -446,16 +446,23 @@ impl VadPhraseDetector {
                                 format!("low voice ({:.0}% < 20% threshold)", voice_ratio * 100.0)
                             };
 
-                            // Short fragment - just discard and move on
-                            // The audio will be picked up by get_remaining at the end
-                            println!(
-                                "[VAD] ✗ Phrase REJECTED: {} - {:.0}ms, {:.0}% voice ({}/{} windows)",
-                                reject_reason,
-                                duration_ms,
-                                voice_ratio * 100.0,
-                                self.voice_windows_count,
-                                self.phrase_windows_count
-                            );
+                            // Even rejected phrases should be buffered if we have existing buffer
+                            // This ensures pauses between fragments don't lose audio
+                            if self.buffered_start.is_some() {
+                                println!(
+                                    "[VAD] ⏳ Phrase REJECTED but keeping buffer: {} - {:.0}ms",
+                                    reject_reason, duration_ms
+                                );
+                            } else {
+                                println!(
+                                    "[VAD] ✗ Phrase REJECTED: {} - {:.0}ms, {:.0}% voice ({}/{} windows)",
+                                    reject_reason,
+                                    duration_ms,
+                                    voice_ratio * 100.0,
+                                    self.voice_windows_count,
+                                    self.phrase_windows_count
+                                );
+                            }
                             self.in_speech = false;
                             self.silent_windows = 0;
                             self.voice_windows_count = 0;
@@ -547,7 +554,8 @@ impl VadPhraseDetector {
         };
 
         // Lowered from 0.15 to 0.10 - less strict for final segment
-        if voice_percent < 0.10 {
+        // BUT: if we have buffered audio, always send it (user spoke something earlier)
+        if voice_percent < 0.10 && self.buffered_start.is_none() {
             println!(
                 "[VAD] ✗ Final REJECTED: low voice ({:.0}% < 10% threshold) - {:.0}ms, {}/{} windows",
                 voice_percent * 100.0,
@@ -558,13 +566,23 @@ impl VadPhraseDetector {
             return None;
         }
 
-        println!(
-            "[VAD] ✓ Final ACCEPTED: {:.0}ms, {:.0}% voice ({}/{} windows)",
-            remaining_ms,
-            voice_percent * 100.0,
-            voice_windows,
-            total_windows
-        );
+        if self.buffered_start.is_some() {
+            println!(
+                "[VAD] ✓ Final ACCEPTED (with buffer): {:.0}ms, {:.0}% voice ({}/{} windows)",
+                remaining_ms,
+                voice_percent * 100.0,
+                voice_windows,
+                total_windows
+            );
+        } else {
+            println!(
+                "[VAD] ✓ Final ACCEPTED: {:.0}ms, {:.0}% voice ({}/{} windows)",
+                remaining_ms,
+                voice_percent * 100.0,
+                voice_windows,
+                total_windows
+            );
+        }
         Some((remaining.to_vec(), start_pos, end_pos))
     }
 
