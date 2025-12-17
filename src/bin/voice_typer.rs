@@ -37,7 +37,9 @@ const MIN_RECORDING_MS: u64 = 300;
 /// Dev mode: collect reports for analysis
 /// Set VOICE_KEYBOARD_DEV=1 to enable
 fn is_dev_mode() -> bool {
-    env::var("VOICE_KEYBOARD_DEV").map(|v| v == "1").unwrap_or(false)
+    env::var("VOICE_KEYBOARD_DEV")
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
 /// Remote server for dev reports (SCP destination)
@@ -79,26 +81,12 @@ const MODEL_SIZES: &[(&str, u64)] = &[
 
 /// Initial prompt for Whisper to help with code-switching (Russian + English tech terms)
 const PROGRAMMER_PROMPT: &str = "\
-Голосовые команды и вопросы программиста для ИИ-ассистента на русском языке. \
-Человек диктует команды роботу или задаёт вопросы. НЕ описывает свои действия. \
-Команды — глаголы в повелительном наклонении: реализуй, создай, добавь, исправь, открой, запусти, удали, покажи, найди. \
-Вопросы — распознавай по интонации и ставь знак вопроса: «сервер перезагружен?», «тесты прошли?», «это работает?». \
-Строй связные осмысленные предложения, избегай обрывочных фраз. \
-IT-термины пиши на английском: \
-Git, pull, push, commit, merge, branch, rebase, stash, checkout, clone, fetch, reset, diff, status, \
-pull request, merge request, code review, cherry-pick, squash, \
-Docker, container, image, Kubernetes, pod, deploy, CI/CD, pipeline, \
-API, REST, GraphQL, endpoint, request, response, callback, webhook, WebSocket, \
-frontend, backend, fullstack, server, client, database, cache, Redis, PostgreSQL, MongoDB, \
-React, Vue, Node, TypeScript, JavaScript, Python, Rust, Go, \
-npm, yarn, pnpm, pip, cargo, build, test, debug, lint, format, \
-config, env, .env, token, session, auth, OAuth, JWT, \
-file, folder, directory, path, URL, JSON, XML, CSV, \
-function, class, method, variable, const, import, export, async, await, \
-prompt, model, LLM, Claude, Whisper, embedding. \
-КРИТИЧЕСКИ ВАЖНО: Распознавай ТОЛЬКО то, что реально слышно в аудио. \
-НИКОГДА не повторяй и не копируй текст из контекста. Если аудио слишком короткое или неразборчивое — верни пустую строку. \
-Контекст дан только для понимания темы разговора, а не для копирования.";
+Голосовые команды программиста на русском. Команды роботу в повелительном наклонении. \
+IT-термины на английском: Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper. \
+КРИТИЧЕСКИ ВАЖНО: Распознавай ТОЛЬКО реально слышимое в аудио. \
+НИКОГДА не повторяй текст из контекста — контекст только для понимания темы. \
+Если аудио неразборчиво, тишина или шум — ответь ровно одним символом: - \
+Не выдумывай слова, которых нет в аудио.";
 
 // ============================================================================
 // Audio feedback and constants
@@ -222,6 +210,9 @@ impl HotkeyType {
     }
 }
 
+/// Minimum duration to send fragment immediately (shorter ones are buffered)
+const MIN_FRAGMENT_DURATION_MS: u64 = 1000; // 1 second
+
 /// VAD-based phrase detector with spectral voice detection
 struct VadPhraseDetector {
     window_samples: usize,
@@ -237,6 +228,8 @@ struct VadPhraseDetector {
     phrase_windows_count: usize,
     /// Position where last transcribed phrase ended (to avoid double transcription)
     last_transcribed_end: usize,
+    /// Buffered short fragment start position (for merging with next)
+    buffered_start: Option<usize>,
 }
 
 impl VadPhraseDetector {
@@ -259,6 +252,7 @@ impl VadPhraseDetector {
             voice_windows_count: 0,
             phrase_windows_count: 0,
             last_transcribed_end: 0,
+            buffered_start: None,
         }
     }
 
@@ -376,33 +370,78 @@ impl VadPhraseDetector {
                         let has_enough_voice = voice_ratio >= 0.2;
 
                         let duration_ms = phrase_len as f32 / RECORDING_SAMPLE_RATE as f32 * 1000.0;
-                        let min_duration_ms = (self.min_speech_windows * self.window_samples) as f32 / RECORDING_SAMPLE_RATE as f32 * 1000.0;
+                        let min_duration_ms = (self.min_speech_windows * self.window_samples)
+                            as f32
+                            / RECORDING_SAMPLE_RATE as f32
+                            * 1000.0;
 
                         if phrase_len >= self.min_speech_windows * self.window_samples
                             && has_enough_voice
                         {
-                            let start_pos = self.phrase_start;
+                            // Use buffered start if we have a short fragment waiting
+                            let start_pos = self.buffered_start.unwrap_or(self.phrase_start);
                             let end_pos = phrase_end;
-                            let phrase = all_samples[start_pos..end_pos].to_vec();
-                            println!(
-                                "[VAD] ✓ Phrase ACCEPTED: {:.0}ms, {:.0}% voice ({}/{} windows)",
-                                duration_ms,
-                                voice_ratio * 100.0,
-                                self.voice_windows_count,
-                                self.phrase_windows_count
-                            );
-                            self.in_speech = false;
-                            self.silent_windows = 0;
-                            self.voice_windows_count = 0;
-                            self.phrase_windows_count = 0;
-                            self.last_transcribed_end = phrase_end; // Mark as transcribed
-                            self.phrase_start = window_end;
-                            self.processed_pos = window_end;
-                            return Some((phrase, start_pos, end_pos));
+                            let combined_len = end_pos.saturating_sub(start_pos);
+                            let combined_duration_ms =
+                                combined_len as f32 / RECORDING_SAMPLE_RATE as f32 * 1000.0;
+                            let min_fragment_samples =
+                                (MIN_FRAGMENT_DURATION_MS as f32 * RECORDING_SAMPLE_RATE as f32
+                                    / 1000.0) as usize;
+
+                            // Check if combined fragment is long enough to send
+                            if combined_len >= min_fragment_samples {
+                                let phrase = all_samples[start_pos..end_pos].to_vec();
+                                if self.buffered_start.is_some() {
+                                    println!(
+                                        "[VAD] ✓ Phrase ACCEPTED (merged): {:.0}ms, {:.0}% voice",
+                                        combined_duration_ms,
+                                        voice_ratio * 100.0
+                                    );
+                                } else {
+                                    println!(
+                                        "[VAD] ✓ Phrase ACCEPTED: {:.0}ms, {:.0}% voice ({}/{} windows)",
+                                        duration_ms,
+                                        voice_ratio * 100.0,
+                                        self.voice_windows_count,
+                                        self.phrase_windows_count
+                                    );
+                                }
+                                self.in_speech = false;
+                                self.silent_windows = 0;
+                                self.voice_windows_count = 0;
+                                self.phrase_windows_count = 0;
+                                self.last_transcribed_end = end_pos;
+                                self.phrase_start = window_end;
+                                self.processed_pos = window_end;
+                                self.buffered_start = None; // Clear buffer
+                                return Some((phrase, start_pos, end_pos));
+                            } else {
+                                // Fragment too short - buffer it for merging with next
+                                if self.buffered_start.is_none() {
+                                    self.buffered_start = Some(start_pos);
+                                }
+                                println!(
+                                    "[VAD] ⏳ Phrase BUFFERED: {:.0}ms < {}ms min, waiting for next",
+                                    combined_duration_ms,
+                                    MIN_FRAGMENT_DURATION_MS
+                                );
+                                self.in_speech = false;
+                                self.silent_windows = 0;
+                                self.voice_windows_count = 0;
+                                self.phrase_windows_count = 0;
+                                self.phrase_start = window_end;
+                                self.processed_pos = window_end;
+                                // Don't return - continue to next iteration
+                            }
                         } else {
                             // Log rejection reason
-                            let reject_reason = if phrase_len < self.min_speech_windows * self.window_samples {
-                                format!("too short ({:.0}ms < {:.0}ms min)", duration_ms, min_duration_ms)
+                            let reject_reason = if phrase_len
+                                < self.min_speech_windows * self.window_samples
+                            {
+                                format!(
+                                    "too short ({:.0}ms < {:.0}ms min)",
+                                    duration_ms, min_duration_ms
+                                )
                             } else {
                                 format!("low voice ({:.0}% < 20% threshold)", voice_ratio * 100.0)
                             };
@@ -442,7 +481,10 @@ impl VadPhraseDetector {
 
         // Start from the position after the last transcribed phrase
         // This prevents double transcription when VAD and key release happen simultaneously
-        let start_pos = if self.in_speech {
+        // If we have a buffered short fragment, use its start position
+        let start_pos = if let Some(buffered) = self.buffered_start {
+            buffered
+        } else if self.in_speech {
             self.phrase_start
         } else {
             // Use the maximum of processed_pos and last_transcribed_end
@@ -536,6 +578,7 @@ impl VadPhraseDetector {
         self.voice_windows_count = 0;
         self.phrase_windows_count = 0;
         self.last_transcribed_end = 0;
+        self.buffered_start = None;
     }
 }
 
@@ -2449,11 +2492,11 @@ struct FragmentInfo {
 #[derive(Clone)]
 struct TypingEvent {
     timestamp: String,
-    event_type: String, // "insert" or "delete"
-    text: String,       // text inserted or description of delete
-    char_count: usize,  // number of chars affected
-    sequence_num: u64,  // which phrase triggered this
-    success: bool,      // whether operation succeeded
+    event_type: String,    // "insert" or "delete"
+    text: String,          // text inserted or description of delete
+    char_count: usize,     // number of chars affected
+    sequence_num: u64,     // which phrase triggered this
+    success: bool,         // whether operation succeeded
     error: Option<String>, // error message if failed
 }
 
@@ -2470,8 +2513,8 @@ struct DevReport {
 #[derive(Clone)]
 struct VadLogEntry {
     timestamp: String,
-    event: String,    // "phrase_detected", "phrase_rejected", "final_segment", "final_rejected"
-    details: String,  // detailed message
+    event: String, // "phrase_detected", "phrase_rejected", "final_segment", "final_rejected"
+    details: String, // detailed message
 }
 
 impl DevReport {
@@ -2498,7 +2541,15 @@ impl DevReport {
         });
     }
 
-    fn add_typing_event(&mut self, event_type: &str, text: &str, char_count: usize, sequence_num: u64, success: bool, error: Option<String>) {
+    fn add_typing_event(
+        &mut self,
+        event_type: &str,
+        text: &str,
+        char_count: usize,
+        sequence_num: u64,
+        success: bool,
+        error: Option<String>,
+    ) {
         self.typing_events.push(TypingEvent {
             timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
             event_type: event_type.to_string(),
@@ -2630,7 +2681,10 @@ impl DevReport {
         println!("[DEV] Uploading to {}...", DEV_REPORT_SERVER);
 
         // Create remote directory
-        let mkdir_dest = format!("{}:{}/{}", DEV_REPORT_SERVER, DEV_REPORT_PATH, self.session_id);
+        let mkdir_dest = format!(
+            "{}:{}/{}",
+            DEV_REPORT_SERVER, DEV_REPORT_PATH, self.session_id
+        );
         let _ = Command::new("ssh")
             .arg(DEV_REPORT_SERVER)
             .arg(format!("mkdir -p {}/{}", DEV_REPORT_PATH, self.session_id))
@@ -2748,7 +2802,8 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     let (dev_frag_tx, dev_frag_rx) = mpsc::channel::<(String, u64, usize, usize, String)>();
 
     // Channel for dev mode typing events (session_id, event_type, text, char_count, sequence_num, success, error)
-    let (dev_typing_tx, dev_typing_rx) = mpsc::channel::<(String, String, String, usize, u64, bool, Option<String>)>();
+    let (dev_typing_tx, dev_typing_rx) =
+        mpsc::channel::<(String, String, String, usize, u64, bool, Option<String>)>();
 
     // Channel for dev mode VAD logs (session_id, event, details)
     let (dev_vad_tx, dev_vad_rx) = mpsc::channel::<(String, String, String)>();
@@ -2818,7 +2873,9 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                         text.len()
                     );
 
-                    if !text.trim().is_empty() {
+                    // Check for silence marker "-" or empty result
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() && trimmed != "-" {
                         // Save audio for analysis
                         let _audio_file = save_audio_segment(&job.samples, RECORDING_SAMPLE_RATE);
 
@@ -2865,10 +2922,17 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                             processed_text,
                         ));
                     } else {
+                        let reason = if trimmed == "-" {
+                            "silence marker"
+                        } else {
+                            "empty/whitespace"
+                        };
                         println!(
-                            "[{}] [WORKER] ✗ Empty/whitespace result for #{}, not sending",
+                            "[{}] [WORKER] ✗ Skipping #{}: {} (\"{}\")",
                             timestamp(),
-                            job.sequence_num
+                            job.sequence_num,
+                            reason,
+                            trimmed
                         );
                     }
                 }
@@ -2901,7 +2965,10 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
         use std::collections::BTreeMap;
         use std::sync::atomic::Ordering;
 
-        println!("[{}] [OUTPUT] Output thread started, waiting for results...", timestamp());
+        println!(
+            "[{}] [OUTPUT] Output thread started, waiting for results...",
+            timestamp()
+        );
 
         let mut pending_outputs: BTreeMap<u64, TranscriptionOutput> = BTreeMap::new();
 
@@ -3343,7 +3410,11 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                             seq, duration_secs, start_pos, end_pos, vad_info
                         );
                         let sid = session_id_callback.lock().unwrap().clone();
-                        let _ = dev_vad_tx_callback.send((sid, "final_segment".to_string(), log_details));
+                        let _ = dev_vad_tx_callback.send((
+                            sid,
+                            "final_segment".to_string(),
+                            log_details,
+                        ));
 
                         let _ = job_tx_callback.send(TranscriptionJob {
                             samples: phrase_samples,
@@ -3356,7 +3427,11 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                         // Log rejection to dev report
                         let log_details = format!("no_remaining_audio, vad_state: {}", vad_info);
                         let sid = session_id_callback.lock().unwrap().clone();
-                        let _ = dev_vad_tx_callback.send((sid, "final_rejected".to_string(), log_details));
+                        let _ = dev_vad_tx_callback.send((
+                            sid,
+                            "final_rejected".to_string(),
+                            log_details,
+                        ));
                     }
 
                     // Dev mode: save full audio and upload report
