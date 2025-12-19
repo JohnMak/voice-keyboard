@@ -608,6 +608,9 @@ struct Config {
     model: Option<String>,
     hotkey: Option<String>,
     input_method: Option<String>,
+    /// Enable streaming/fragmentary recognition (send phrases as they are detected)
+    /// Default: false (wait for full message before transcription)
+    streaming: bool,
 }
 
 impl Config {
@@ -616,6 +619,7 @@ impl Config {
             model: None,
             hotkey: None,
             input_method: None,
+            streaming: false, // Default: wait for full message
         }
     }
 }
@@ -654,6 +658,7 @@ fn load_config() -> Config {
                 "model" => config.model = Some(value.to_string()),
                 "hotkey" => config.hotkey = Some(value.to_string()),
                 "method" => config.input_method = Some(value.to_string()),
+                "streaming" => config.streaming = value == "true" || value == "1" || value == "yes",
                 _ => {}
             }
         }
@@ -1675,7 +1680,7 @@ fn main() {
 
                 if openai_config.test_connection() {
                     println!("OK\n");
-                    run_openai(openai_config, input_method, hotkey);
+                    run_openai(openai_config, input_method, hotkey, config.streaming);
                 } else {
                     println!("FAILED");
                     eprintln!("\nCannot connect to OpenAI API.");
@@ -2778,7 +2783,12 @@ fn save_wav_file_internal(path: &PathBuf, samples: &[f32], sample_rate: u32) {
     }
 }
 
-fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: HotkeyType) {
+fn run_openai(
+    openai_config: OpenAIConfig,
+    input_method: InputMethod,
+    hotkey: HotkeyType,
+    streaming: bool,
+) {
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::mpsc;
 
@@ -2786,6 +2796,16 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     if dev_mode {
         println!("[DEV] Development mode enabled - collecting reports");
     }
+
+    println!(
+        "[MODE] {} mode (streaming={})",
+        if streaming {
+            "Streaming"
+        } else {
+            "Full message"
+        },
+        streaming
+    );
 
     let config = Arc::new(openai_config);
     let target_key = hotkey.to_rdev_key();
@@ -3190,6 +3210,7 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
     });
 
     // VAD monitoring thread - detects phrases by pauses and sends to worker
+    // Only active when streaming mode is enabled
     let state_for_vad = Arc::clone(&state);
     let samples_for_vad = Arc::clone(&samples);
     let vad_for_thread = Arc::clone(&vad);
@@ -3206,6 +3227,12 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
 
         loop {
             thread::sleep(Duration::from_millis(50));
+
+            // Skip VAD phrase detection if streaming is disabled
+            // Audio will be transcribed as a whole when key is released
+            if !streaming {
+                continue;
+            }
 
             let is_recording = {
                 let s = state_for_vad.lock().unwrap();
@@ -3395,7 +3422,9 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                         return;
                     }
 
-                    // Get remaining audio from VAD (audio after last detected phrase)
+                    // Get audio to transcribe
+                    // If streaming=false, send ALL audio as single segment
+                    // If streaming=true, send only remaining audio after last detected phrase
                     let (remaining, vad_info) = {
                         let samples = samples_clone.lock().unwrap();
                         let vad = vad_clone.lock().unwrap();
@@ -3403,7 +3432,24 @@ fn run_openai(openai_config: OpenAIConfig, input_method: InputMethod, hotkey: Ho
                             "total_samples={}, in_speech={}, phrase_start={}, processed_pos={}, last_transcribed_end={}",
                             samples.len(), vad.in_speech, vad.phrase_start, vad.processed_pos, vad.last_transcribed_end
                         );
-                        (vad.get_remaining(&samples), info)
+
+                        if streaming {
+                            // Streaming mode: get remaining audio after last VAD-detected phrase
+                            (vad.get_remaining(&samples), info)
+                        } else {
+                            // Non-streaming mode: send entire recording as single segment
+                            if samples.len() > 0 {
+                                let duration_ms =
+                                    samples.len() as f32 / RECORDING_SAMPLE_RATE as f32 * 1000.0;
+                                println!(
+                                    "[VAD] Non-streaming mode: sending full audio ({:.0}ms)",
+                                    duration_ms
+                                );
+                                (Some((samples.clone(), 0, samples.len())), info)
+                            } else {
+                                (None, info)
+                            }
+                        }
                     };
 
                     drop(rec_state);
