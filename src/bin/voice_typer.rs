@@ -2913,7 +2913,56 @@ fn run_openai(
 
                     // Check for silence marker "-" or empty result
                     let trimmed = text.trim();
-                    if !trimmed.is_empty() && trimmed != "-" {
+                    let duration_secs = job.samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
+
+                    // For long audio (>3s), silence marker is suspicious - retry once
+                    let is_long_segment = duration_secs > 3.0;
+                    let (final_text, should_skip) = if trimmed == "-" && is_long_segment {
+                        println!(
+                            "[{}] [WORKER] ⚠ Long segment ({:.1}s) returned '-', retrying...",
+                            timestamp(),
+                            duration_secs
+                        );
+                        // Retry without context to avoid model confusion
+                        match transcribe_openai_internal(
+                            &config_for_worker,
+                            &resampled,
+                            WHISPER_SAMPLE_RATE,
+                            Some(PROGRAMMER_PROMPT),
+                        ) {
+                            Ok(retry_text) => {
+                                let retry_trimmed = retry_text.trim();
+                                if retry_trimmed.is_empty() || retry_trimmed == "-" {
+                                    println!(
+                                        "[{}] [WORKER] ⚠ Retry also returned '{}', skipping",
+                                        timestamp(),
+                                        retry_trimmed
+                                    );
+                                    (text.clone(), true)
+                                } else {
+                                    println!(
+                                        "[{}] [WORKER] ✓ Retry succeeded: \"{}\"",
+                                        timestamp(),
+                                        retry_text.chars().take(60).collect::<String>()
+                                    );
+                                    (retry_text, false)
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[{}] [WORKER] ✗ Retry failed: {}, skipping",
+                                    timestamp(),
+                                    e
+                                );
+                                (text.clone(), true)
+                            }
+                        }
+                    } else {
+                        (text.clone(), trimmed.is_empty() || trimmed == "-")
+                    };
+
+                    if !should_skip {
+                        let text = final_text;
                         // Save audio for analysis
                         let _audio_file = save_audio_segment(&job.samples, RECORDING_SAMPLE_RATE);
 
@@ -2961,9 +3010,9 @@ fn run_openai(
                         ));
                     } else {
                         let reason = if trimmed == "-" {
-                            "silence marker"
+                            format!("silence marker (short segment {:.1}s)", duration_secs)
                         } else {
-                            "empty/whitespace"
+                            "empty/whitespace".to_string()
                         };
                         println!(
                             "[{}] [WORKER] ✗ Skipping #{}: {} (\"{}\")",
