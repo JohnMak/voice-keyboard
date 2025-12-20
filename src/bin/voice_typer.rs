@@ -2627,25 +2627,9 @@ impl DevReport {
             let _ = fs::write(&txt_path, &frag.transcription);
         }
 
-        // Transcribe full audio
-        println!("[DEV] Transcribing full audio...");
-        let resampled = resample_48k_to_16k(&self.full_samples);
-        let full_transcription = match transcribe_openai_internal(
-            config,
-            &resampled,
-            WHISPER_SAMPLE_RATE,
-            Some(PROGRAMMER_PROMPT),
-        ) {
-            Ok(text) => text,
-            Err(e) => format!("ERROR: {}", e),
-        };
-
-        // Print full transcription to console for comparison with fragments
-        println!("[DEV] ═══════════════════════════════════════════════════════════");
-        println!("[DEV] FULL TEXT: {}", full_transcription);
-        println!("[DEV] ═══════════════════════════════════════════════════════════");
-
         // Create JSON report
+        // Use combined_fragments as full_transcription (no separate API call needed)
+        // This avoids GPT-4o returning different results for the same audio
         let combined_fragments: String = self
             .fragments
             .iter()
@@ -2653,10 +2637,15 @@ impl DevReport {
             .collect::<Vec<_>>()
             .join(" ");
 
+        // Print transcription to console
+        println!("[DEV] ═══════════════════════════════════════════════════════════");
+        println!("[DEV] TRANSCRIPTION: {}", combined_fragments);
+        println!("[DEV] ═══════════════════════════════════════════════════════════");
+
         let report_json = serde_json::json!({
             "session_id": self.session_id,
             "full_duration_secs": self.full_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32,
-            "full_transcription": full_transcription,
+            "full_transcription": combined_fragments.clone(),
             "combined_fragments": combined_fragments,
             "fragment_count": self.fragments.len(),
             "fragments": self.fragments.iter().map(|f| {
