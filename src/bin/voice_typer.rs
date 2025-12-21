@@ -93,10 +93,6 @@ IT-термины на английском: Git, Docker, API, React, TypeScript
 // ============================================================================
 
 /// MIDI note frequencies for beep sounds
-#[cfg(feature = "whisper")]
-const BEEP_START_FREQ: f32 = 880.0; // A5 - higher pitch for start
-#[cfg(feature = "whisper")]
-const BEEP_START_DURATION_MS: u64 = 50; // Short chirp for start
 const BEEP_STOP_FREQ: f32 = 440.0; // A4 - lower pitch for stop
 const BEEP_STOP_DURATION_MS: u64 = 100; // Normal length for end beep
 const BEEP_DEFAULT_VOLUME: f32 = 0.1; // 10% volume (0.0 - 1.0)
@@ -2456,11 +2452,6 @@ fn play_beep_blocking(frequency: f32, duration_ms: u64) {
     std::thread::sleep(Duration::from_millis(20));
 }
 
-#[cfg(feature = "whisper")]
-fn play_start_beep() {
-    play_beep(BEEP_START_FREQ, BEEP_START_DURATION_MS);
-}
-
 fn play_stop_beep() {
     play_beep(BEEP_STOP_FREQ, BEEP_STOP_DURATION_MS);
 }
@@ -2532,6 +2523,7 @@ struct DevReport {
     typing_events: Vec<TypingEvent>,
     vad_logs: Vec<VadLogEntry>,
     /// Local Whisper transcription for comparison (set during save)
+    #[allow(dead_code)]
     whisper_transcription: Option<String>,
 }
 
