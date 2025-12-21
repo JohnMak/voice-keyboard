@@ -2531,6 +2531,8 @@ struct DevReport {
     fragments: Vec<FragmentInfo>,
     typing_events: Vec<TypingEvent>,
     vad_logs: Vec<VadLogEntry>,
+    /// Local Whisper transcription for comparison (set during save)
+    whisper_transcription: Option<String>,
 }
 
 #[derive(Clone)]
@@ -2552,6 +2554,7 @@ impl DevReport {
             fragments: Vec::new(),
             typing_events: Vec::new(),
             vad_logs: Vec::new(),
+            whisper_transcription: None,
         }
     }
 
@@ -2592,6 +2595,7 @@ impl DevReport {
         });
     }
 
+    #[allow(unused_variables)]
     fn save_and_upload(&self, config: &OpenAIConfig) {
         if self.full_samples.is_empty() {
             return;
@@ -2627,6 +2631,44 @@ impl DevReport {
             let _ = fs::write(&txt_path, &frag.transcription);
         }
 
+        // Run local Whisper transcription for comparison (if whisper feature enabled)
+        #[cfg(feature = "whisper")]
+        let whisper_transcription: Option<String> = {
+            println!("[DEV] Running local Whisper transcription...");
+            let model_path = get_model_path(None); // Use default model (base)
+            if model_path.exists() {
+                match load_whisper(&model_path) {
+                    Ok(ctx) => {
+                        // Resample from 48kHz to 16kHz for Whisper
+                        let resampled = resample_48k_to_16k(&self.full_samples);
+                        match transcribe_whisper_internal(&ctx, &resampled, None) {
+                            Ok(text) => {
+                                println!(
+                                    "[DEV] Whisper: {}",
+                                    text.chars().take(100).collect::<String>()
+                                );
+                                Some(text)
+                            }
+                            Err(e) => {
+                                eprintln!("[DEV] Whisper transcription failed: {}", e);
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[DEV] Failed to load Whisper model: {}", e);
+                        None
+                    }
+                }
+            } else {
+                eprintln!("[DEV] Whisper model not found: {:?}", model_path);
+                None
+            }
+        };
+
+        #[cfg(not(feature = "whisper"))]
+        let whisper_transcription: Option<String> = None;
+
         // Create JSON report
         // Use combined_fragments as full_transcription (no separate API call needed)
         // This avoids GPT-4o returning different results for the same audio
@@ -2639,13 +2681,17 @@ impl DevReport {
 
         // Print transcription to console
         println!("[DEV] ═══════════════════════════════════════════════════════════");
-        println!("[DEV] TRANSCRIPTION: {}", combined_fragments);
+        println!("[DEV] GPT-4o: {}", combined_fragments);
+        if let Some(ref whisper) = whisper_transcription {
+            println!("[DEV] Whisper: {}", whisper);
+        }
         println!("[DEV] ═══════════════════════════════════════════════════════════");
 
         let report_json = serde_json::json!({
             "session_id": self.session_id,
             "full_duration_secs": self.full_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32,
             "full_transcription": combined_fragments.clone(),
+            "whisper_transcription": whisper_transcription,
             "combined_fragments": combined_fragments,
             "fragment_count": self.fragments.len(),
             "fragments": self.fragments.iter().map(|f| {
@@ -3564,6 +3610,7 @@ fn run_openai(
                                     fragments: report.fragments.clone(),
                                     typing_events: report.typing_events.clone(),
                                     vad_logs: report.vad_logs.clone(),
+                                    whisper_transcription: None, // Will be set during save
                                 };
                                 drop(report_guard); // Release lock before slow operations
                                 report_copy.save_and_upload(&config_for_report);
