@@ -12,6 +12,8 @@
 //!   cargo run --bin voice-typer --features whisper -- --model tiny
 //!   cargo run --bin voice-typer --features whisper -- --model /path/to/model.bin
 
+mod whisper_enhance;
+
 use std::env;
 use std::fs::{self, File};
 #[cfg(not(feature = "opus"))]
@@ -56,6 +58,8 @@ const MODEL_PRESETS: &[(&str, &str)] = &[
     ("base", "ggml-base.bin"),
     ("small", "ggml-small.bin"),
     ("medium", "ggml-medium.bin"),
+    ("large", "ggml-large-v3.bin"),
+    ("large-v3", "ggml-large-v3.bin"),
     ("large-v3-turbo", "ggml-large-v3-turbo.bin"),
     ("turbo", "ggml-large-v3-turbo.bin"), // alias
 ];
@@ -76,6 +80,7 @@ const MODEL_SIZES: &[(&str, u64)] = &[
     ("ggml-base.bin", 148_000_000),
     ("ggml-small.bin", 488_000_000),
     ("ggml-medium.bin", 1_530_000_000),
+    ("ggml-large-v3.bin", 3_100_000_000),
     ("ggml-large-v3-turbo.bin", 1_620_000_000),
 ];
 
@@ -1703,13 +1708,31 @@ fn main() {
         std::process::exit(1);
     }
 
-    println!("Loading Whisper model: {}", model_path.display());
+    // Extract model name for display
+    let model_name = model_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .trim_start_matches("ggml-")
+        .trim_end_matches(".bin");
+
+    println!(
+        "Loading Whisper model: {} ({})",
+        model_name,
+        model_path.display()
+    );
 
     #[cfg(feature = "whisper")]
     {
         match load_whisper(&model_path) {
             Ok(ctx) => {
-                println!("Whisper model loaded!\n");
+                println!("Whisper model loaded: {}", model_name);
+                println!("  Sampling: BeamSearch (beam_size=5, temperature=0.0)");
+                let enhance_config = whisper_enhance::WhisperEnhanceConfig::from_env();
+                println!("  Audio enhance: normalize={}, noise_reduction={}, dc_offset={}, pre_emphasis={}",
+                    enhance_config.normalize, enhance_config.noise_reduction,
+                    enhance_config.remove_dc_offset, enhance_config.pre_emphasis);
+                println!();
                 run(ctx, input_method, hotkey);
             }
             Err(e) => {
@@ -1755,7 +1778,12 @@ fn transcribe_whisper_internal(
 ) -> Result<String, String> {
     use whisper_rs::{FullParams, SamplingStrategy};
 
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    // Use BeamSearch with beam_size=5 for better accuracy (slower but more reliable)
+    // Patience -1.0 means no early stopping
+    let mut params = FullParams::new(SamplingStrategy::BeamSearch {
+        beam_size: 5,
+        patience: -1.0,
+    });
 
     params.set_print_special(false);
     params.set_print_progress(false);
@@ -1765,6 +1793,11 @@ fn transcribe_whisper_internal(
     params.set_no_context(true);
     params.set_single_segment(false);
     params.set_token_timestamps(true); // Enable token-level timestamps for hallucination filtering
+
+    // Temperature 0 = deterministic output, reduces variability
+    params.set_temperature(0.0);
+    // Disable temperature increment (don't retry with higher temp on failure)
+    params.set_temperature_inc(0.0);
 
     params.set_language(Some("ru"));
 
@@ -2625,41 +2658,91 @@ impl DevReport {
 
         // Run local Whisper transcription for comparison (if whisper feature enabled)
         #[cfg(feature = "whisper")]
-        let whisper_transcription: Option<String> = {
+        let (whisper_transcription, whisper_config_json): (
+            Option<String>,
+            Option<serde_json::Value>,
+        ) = {
             println!("[DEV] Running local Whisper transcription...");
-            let model_path = get_model_path(None); // Use default model (base)
+            // Use large-v3 model for dev comparison if available, fallback to turbo
+            let model_path = {
+                let large_path = get_model_path(Some("large-v3".to_string()));
+                if large_path.exists() {
+                    large_path
+                } else {
+                    get_model_path(None) // fallback to default (base)
+                }
+            };
+
+            // Extract model name from path
+            let model_name = model_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .trim_start_matches("ggml-")
+                .trim_end_matches(".bin")
+                .to_string();
+
+            println!("[DEV] Using Whisper model: {}", model_name);
+
             if model_path.exists() {
                 match load_whisper(&model_path) {
                     Ok(ctx) => {
                         // Resample from 48kHz to 16kHz for Whisper
                         let resampled = resample_48k_to_16k(&self.full_samples);
-                        match transcribe_whisper_internal(&ctx, &resampled, None) {
+                        // Apply audio enhancements for better Whisper quality
+                        let enhance_config = whisper_enhance::WhisperEnhanceConfig::from_env();
+                        let enhanced = whisper_enhance::enhance_audio(&resampled, &enhance_config);
+                        println!("[DEV] Audio enhanced: normalize={}, noise_reduction={}, dc_offset={}, pre_emphasis={}",
+                            enhance_config.normalize, enhance_config.noise_reduction,
+                            enhance_config.remove_dc_offset, enhance_config.pre_emphasis);
+
+                        // Build config JSON for report
+                        let config_json = serde_json::json!({
+                            "model": model_name,
+                            "model_path": model_path.display().to_string(),
+                            "sampling_strategy": "beam_search",
+                            "beam_size": 5,
+                            "temperature": 0.0,
+                            "enhance": {
+                                "normalize": enhance_config.normalize,
+                                "noise_reduction": enhance_config.noise_reduction,
+                                "remove_dc_offset": enhance_config.remove_dc_offset,
+                                "pre_emphasis": enhance_config.pre_emphasis,
+                                "pre_emphasis_coeff": enhance_config.pre_emphasis_coeff,
+                                "noise_gate_threshold": enhance_config.noise_gate_threshold,
+                            }
+                        });
+
+                        match transcribe_whisper_internal(&ctx, &enhanced, None) {
                             Ok(text) => {
                                 println!(
                                     "[DEV] Whisper: {}",
                                     text.chars().take(100).collect::<String>()
                                 );
-                                Some(text)
+                                (Some(text), Some(config_json))
                             }
                             Err(e) => {
                                 eprintln!("[DEV] Whisper transcription failed: {}", e);
-                                None
+                                (None, Some(config_json))
                             }
                         }
                     }
                     Err(e) => {
                         eprintln!("[DEV] Failed to load Whisper model: {}", e);
-                        None
+                        (None, None)
                     }
                 }
             } else {
                 eprintln!("[DEV] Whisper model not found: {:?}", model_path);
-                None
+                (None, None)
             }
         };
 
         #[cfg(not(feature = "whisper"))]
-        let whisper_transcription: Option<String> = None;
+        let (whisper_transcription, whisper_config_json): (
+            Option<String>,
+            Option<serde_json::Value>,
+        ) = (None, None);
 
         // Create JSON report
         // Use combined_fragments as full_transcription (no separate API call needed)
@@ -2684,6 +2767,7 @@ impl DevReport {
             "full_duration_secs": self.full_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32,
             "full_transcription": combined_fragments.clone(),
             "whisper_transcription": whisper_transcription,
+            "whisper_config": whisper_config_json,
             "combined_fragments": combined_fragments,
             "fragment_count": self.fragments.len(),
             "fragments": self.fragments.iter().map(|f| {
