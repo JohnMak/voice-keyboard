@@ -840,62 +840,168 @@ impl OpenAIConfig {
 
 /// Maximum number of retries for API errors
 const API_MAX_RETRIES: u32 = 3;
+/// Maximum number of retries for network errors (longer, to wait for connection restore)
+const API_NETWORK_MAX_RETRIES: u32 = 30;
 /// Base delay between retries in milliseconds
 const API_RETRY_DELAY_MS: u64 = 1000;
+/// Delay between network retries (longer)
+const API_NETWORK_RETRY_DELAY_MS: u64 = 2000;
+
+/// Check if error is a network connectivity error
+fn is_network_error(error: &str) -> bool {
+    error.contains("connection")
+        || error.contains("timeout")
+        || error.contains("timed out")
+        || error.contains("network")
+        || error.contains("dns")
+        || error.contains("resolve")
+        || error.contains("unreachable")
+        || error.contains("reset")
+        || error.contains("broken pipe")
+        || error.contains("Connection refused")
+        || error.contains("No route to host")
+}
 
 /// Internal function to transcribe audio using OpenAI API with retry logic
+/// Returns (transcribed_text, raw_json_response)
 fn transcribe_openai_internal(
     config: &OpenAIConfig,
     samples: &[f32],
     #[cfg_attr(feature = "opus", allow(unused_variables))] sample_rate: u32,
     prompt: Option<&str>,
-) -> Result<String, String> {
+) -> Result<(String, String), String> {
     let mut last_error = String::new();
+    let mut network_retry_count = 0u32;
 
-    for attempt in 0..API_MAX_RETRIES {
+    loop {
+        let attempt = if network_retry_count > 0 {
+            network_retry_count
+        } else {
+            0
+        };
+
         if attempt > 0 {
-            let delay = API_RETRY_DELAY_MS * (1 << (attempt - 1)); // Exponential backoff
+            let delay = API_NETWORK_RETRY_DELAY_MS;
             println!(
-                "[{}] Retry {}/{} after {}ms...",
+                "[{}] ⏳ Network retry {}/{} after {}ms (waiting for connection)...",
                 timestamp(),
-                attempt + 1,
-                API_MAX_RETRIES,
+                attempt,
+                API_NETWORK_MAX_RETRIES,
                 delay
             );
             thread::sleep(Duration::from_millis(delay));
         }
 
         match transcribe_openai_single_attempt(config, samples, sample_rate, prompt) {
-            Ok(text) => return Ok(text),
+            Ok((text, raw_response)) => {
+                if network_retry_count > 0 {
+                    println!(
+                        "[{}] ✓ Connection restored after {} retries!",
+                        timestamp(),
+                        network_retry_count
+                    );
+                }
+                return Ok((text, raw_response));
+            }
             Err(e) => {
                 last_error = e.clone();
+
                 // Don't retry on certain errors
                 if e.contains("Invalid file format") || e.contains("audio too short") {
                     return Err(e);
                 }
+
+                // Check if this is a network error - use extended retry
+                if is_network_error(&e) {
+                    network_retry_count += 1;
+                    if network_retry_count >= API_NETWORK_MAX_RETRIES {
+                        eprintln!(
+                            "[{}] ✗ Network error, giving up after {} retries: {}",
+                            timestamp(),
+                            network_retry_count,
+                            e
+                        );
+                        return Err(format!(
+                            "Network error after {} retries: {}",
+                            network_retry_count, e
+                        ));
+                    }
+                    eprintln!(
+                        "[{}] ⚠ Network error (retry {}/{}): {}",
+                        timestamp(),
+                        network_retry_count,
+                        API_NETWORK_MAX_RETRIES,
+                        e
+                    );
+                    continue;
+                }
+
+                // Regular API error - limited retries
                 eprintln!(
                     "[{}] API error (attempt {}): {}",
                     timestamp(),
                     attempt + 1,
                     e
                 );
+
+                // For non-network errors, do standard retry logic
+                let mut regular_attempts = 0u32;
+                while regular_attempts < API_MAX_RETRIES - 1 {
+                    regular_attempts += 1;
+                    let delay = API_RETRY_DELAY_MS * (1 << (regular_attempts - 1));
+                    println!(
+                        "[{}] Retry {}/{} after {}ms...",
+                        timestamp(),
+                        regular_attempts + 1,
+                        API_MAX_RETRIES,
+                        delay
+                    );
+                    thread::sleep(Duration::from_millis(delay));
+
+                    match transcribe_openai_single_attempt(config, samples, sample_rate, prompt) {
+                        Ok((text, raw_response)) => return Ok((text, raw_response)),
+                        Err(retry_e) => {
+                            last_error = retry_e.clone();
+                            if is_network_error(&retry_e) {
+                                // Switch to network retry mode
+                                network_retry_count = 1;
+                                eprintln!(
+                                    "[{}] ⚠ Switched to network retry mode: {}",
+                                    timestamp(),
+                                    retry_e
+                                );
+                                break;
+                            }
+                            eprintln!(
+                                "[{}] API error (attempt {}): {}",
+                                timestamp(),
+                                regular_attempts + 1,
+                                retry_e
+                            );
+                        }
+                    }
+                }
+
+                if network_retry_count == 0 {
+                    // Exhausted regular retries without switching to network mode
+                    return Err(format!(
+                        "Failed after {} retries: {}",
+                        API_MAX_RETRIES, last_error
+                    ));
+                }
             }
         }
     }
-
-    Err(format!(
-        "Failed after {} retries: {}",
-        API_MAX_RETRIES, last_error
-    ))
 }
 
 /// Single attempt to transcribe audio using OpenAI API
+/// Returns (transcribed_text, raw_json_response)
 fn transcribe_openai_single_attempt(
     config: &OpenAIConfig,
     samples: &[f32],
     #[cfg_attr(feature = "opus", allow(unused_variables))] sample_rate: u32,
     prompt: Option<&str>,
-) -> Result<String, String> {
+) -> Result<(String, String), String> {
     // Encode audio data
     #[cfg(feature = "opus")]
     let (audio_data, filename, content_type) = {
@@ -998,7 +1104,7 @@ fn transcribe_openai_single_attempt(
             format!("multipart/form-data; boundary={}", boundary),
         )
         .body(body)
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(60))
         .send()
         .map_err(|e| format!("Request failed: {}", e))?;
 
@@ -1022,7 +1128,7 @@ fn transcribe_openai_single_attempt(
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("No 'text' field in response: {}", response_text))?;
 
-    Ok(text.to_string())
+    Ok((text.to_string(), response_text))
 }
 
 fn resolve_model_path(model: &str) -> PathBuf {
@@ -2533,6 +2639,8 @@ struct FragmentInfo {
     start_sample: usize,
     end_sample: usize,
     transcription: String,
+    /// Raw API response JSON for debugging
+    raw_response: Option<String>,
 }
 
 /// Dev mode: Typing event (insert or delete)
@@ -2589,6 +2697,24 @@ impl DevReport {
             start_sample: start,
             end_sample: end,
             transcription: text,
+            raw_response: None,
+        });
+    }
+
+    fn add_fragment_with_raw(
+        &mut self,
+        index: u64,
+        start: usize,
+        end: usize,
+        text: String,
+        raw_response: String,
+    ) {
+        self.fragments.push(FragmentInfo {
+            index,
+            start_sample: start,
+            end_sample: end,
+            transcription: text,
+            raw_response: Some(raw_response),
         });
     }
 
@@ -2771,13 +2897,23 @@ impl DevReport {
             "combined_fragments": combined_fragments,
             "fragment_count": self.fragments.len(),
             "fragments": self.fragments.iter().map(|f| {
-                serde_json::json!({
+                let mut frag = serde_json::json!({
                     "index": f.index,
                     "start_sample": f.start_sample,
                     "end_sample": f.end_sample,
                     "duration_secs": (f.end_sample - f.start_sample) as f32 / RECORDING_SAMPLE_RATE as f32,
                     "transcription": f.transcription,
-                })
+                });
+                // Add raw_response if present (for debugging API issues)
+                if let Some(ref raw) = f.raw_response {
+                    // Try to parse as JSON to embed properly, otherwise store as string
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
+                        frag["api_response"] = parsed;
+                    } else {
+                        frag["api_response_raw"] = serde_json::json!(raw);
+                    }
+                }
+                frag
             }).collect::<Vec<_>>(),
             "typing_events_count": self.typing_events.len(),
             "typing_events": self.typing_events.iter().map(|e| {
@@ -2947,8 +3083,8 @@ fn run_openai(
     // Current session ID (shared with worker/output threads for tagging messages)
     let current_session_id: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 
-    // Channel for dev mode fragment info (session_id, sequence_num, start, end, text)
-    let (dev_frag_tx, dev_frag_rx) = mpsc::channel::<(String, u64, usize, usize, String)>();
+    // Channel for dev mode fragment info (session_id, sequence_num, start, end, text, raw_response)
+    let (dev_frag_tx, dev_frag_rx) = mpsc::channel::<(String, u64, usize, usize, String, String)>();
 
     // Channel for dev mode typing events (session_id, event_type, text, char_count, sequence_num, success, error)
     let (dev_typing_tx, dev_typing_rx) =
@@ -3012,10 +3148,10 @@ fn run_openai(
                 WHISPER_SAMPLE_RATE,
                 Some(&prompt),
             ) {
-                Ok(text) => {
+                Ok((text, raw_response)) => {
                     let text_preview: String = text.chars().take(80).collect();
                     println!(
-                        "[{}] [WORKER] Whisper returned for #{}: \"{}\" ({}chars)",
+                        "[{}] [WORKER] API returned for #{}: \"{}\" ({}chars)",
                         timestamp(),
                         job.sequence_num,
                         text_preview,
@@ -3026,13 +3162,17 @@ fn run_openai(
                     let trimmed = text.trim();
                     let duration_secs = job.samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
 
-                    // For long audio (>3s), silence marker is suspicious - retry once
+                    // For long audio (>3s), empty or silence marker is suspicious - retry once
                     let is_long_segment = duration_secs > 3.0;
-                    let (final_text, should_skip) = if trimmed == "-" && is_long_segment {
+                    let needs_retry = is_long_segment && (trimmed.is_empty() || trimmed == "-");
+
+                    let (final_text, final_raw_response, should_skip) = if needs_retry {
+                        let reason = if trimmed.is_empty() { "empty" } else { "'-'" };
                         println!(
-                            "[{}] [WORKER] ⚠ Long segment ({:.1}s) returned '-', retrying...",
+                            "[{}] [WORKER] ⚠ Long segment ({:.1}s) returned {}, retrying without context...",
                             timestamp(),
-                            duration_secs
+                            duration_secs,
+                            reason
                         );
                         // Retry without context to avoid model confusion
                         match transcribe_openai_internal(
@@ -3041,22 +3181,23 @@ fn run_openai(
                             WHISPER_SAMPLE_RATE,
                             Some(PROGRAMMER_PROMPT),
                         ) {
-                            Ok(retry_text) => {
+                            Ok((retry_text, retry_raw)) => {
                                 let retry_trimmed = retry_text.trim();
                                 if retry_trimmed.is_empty() || retry_trimmed == "-" {
                                     println!(
-                                        "[{}] [WORKER] ⚠ Retry also returned '{}', skipping",
+                                        "[{}] [WORKER] ⚠ Retry also returned '{}', skipping (raw: {})",
                                         timestamp(),
-                                        retry_trimmed
+                                        retry_trimmed,
+                                        retry_raw.chars().take(100).collect::<String>()
                                     );
-                                    (text.clone(), true)
+                                    (text.clone(), retry_raw, true)
                                 } else {
                                     println!(
                                         "[{}] [WORKER] ✓ Retry succeeded: \"{}\"",
                                         timestamp(),
                                         retry_text.chars().take(60).collect::<String>()
                                     );
-                                    (retry_text, false)
+                                    (retry_text, retry_raw, false)
                                 }
                             }
                             Err(e) => {
@@ -3065,11 +3206,12 @@ fn run_openai(
                                     timestamp(),
                                     e
                                 );
-                                (text.clone(), true)
+                                (text.clone(), raw_response.clone(), true)
                             }
                         }
                     } else {
-                        (text.clone(), trimmed.is_empty() || trimmed == "-")
+                        let skip = trimmed.is_empty() || trimmed == "-";
+                        (text.clone(), raw_response.clone(), skip)
                     };
 
                     if !should_skip {
@@ -3090,13 +3232,14 @@ fn run_openai(
                                 )
                         };
 
-                        let send_preview: String = processed_text.chars().take(60).collect();
+                        // Print full transcription for easy copy-paste from console
                         println!(
-                            "[{}] [WORKER] ✓ Sending result #{} to output thread: \"{}\"",
-                            timestamp(),
-                            job.sequence_num,
-                            send_preview
+                            "\n[{}] ═══════════════════════════════════════════════════════════",
+                            timestamp()
                         );
+                        println!("[TRANSCRIPTION #{}]", job.sequence_num);
+                        println!("{}", processed_text);
+                        println!("═══════════════════════════════════════════════════════════\n");
 
                         if let Err(e) = result_tx.send(TranscriptionOutput {
                             text: processed_text.clone(),
@@ -3118,20 +3261,31 @@ fn run_openai(
                             job.start_sample,
                             job.end_sample,
                             processed_text,
+                            final_raw_response,
                         ));
                     } else {
                         let reason = if trimmed == "-" {
-                            format!("silence marker (short segment {:.1}s)", duration_secs)
+                            format!("silence marker (segment {:.1}s)", duration_secs)
                         } else {
-                            "empty/whitespace".to_string()
+                            format!("empty/whitespace (segment {:.1}s)", duration_secs)
                         };
                         println!(
-                            "[{}] [WORKER] ✗ Skipping #{}: {} (\"{}\")",
+                            "[{}] [WORKER] ✗ Skipping #{}: {}",
                             timestamp(),
                             job.sequence_num,
-                            reason,
-                            trimmed
+                            reason
                         );
+
+                        // Still send to dev report for debugging (with empty text but raw response)
+                        let sid = session_id_for_worker.lock().unwrap().clone();
+                        let _ = dev_frag_tx_worker.send((
+                            sid,
+                            job.sequence_num,
+                            job.start_sample,
+                            job.end_sample,
+                            String::new(), // empty text (skipped)
+                            final_raw_response,
+                        ));
                     }
                 }
                 Err(e) => {
@@ -3141,6 +3295,17 @@ fn run_openai(
                         job.sequence_num,
                         e
                     );
+
+                    // Send error to dev report
+                    let sid = session_id_for_worker.lock().unwrap().clone();
+                    let _ = dev_frag_tx_worker.send((
+                        sid,
+                        job.sequence_num,
+                        job.start_sample,
+                        job.end_sample,
+                        String::new(),
+                        format!("{{\"error\": \"{}\"}}", e.replace('"', "\\\"")),
+                    ));
                 }
             }
 
@@ -3321,12 +3486,12 @@ fn run_openai(
     // Dev mode: Fragment collector thread (filters by session_id)
     let dev_report_for_collector = Arc::clone(&dev_report);
     thread::spawn(move || {
-        for (msg_session_id, seq, start, end, text) in dev_frag_rx {
+        for (msg_session_id, seq, start, end, text, raw_response) in dev_frag_rx {
             let mut report_guard = dev_report_for_collector.lock().unwrap();
             if let Some(ref mut report) = *report_guard {
                 // Only add fragment if it belongs to current session
                 if report.session_id == msg_session_id {
-                    report.add_fragment(seq, start, end, text);
+                    report.add_fragment_with_raw(seq, start, end, text, raw_response);
                 } else {
                     println!(
                         "[DEV] Dropping stale fragment from session {} (current: {})",
