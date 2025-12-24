@@ -870,7 +870,7 @@ fn transcribe_openai_internal(
     #[cfg_attr(feature = "opus", allow(unused_variables))] sample_rate: u32,
     prompt: Option<&str>,
 ) -> Result<(String, String), String> {
-    let mut last_error = String::new();
+    let mut last_error;
     let mut network_retry_count = 0u32;
 
     loop {
@@ -2689,16 +2689,6 @@ impl DevReport {
             vad_logs: Vec::new(),
             whisper_transcription: None,
         }
-    }
-
-    fn add_fragment(&mut self, index: u64, start: usize, end: usize, text: String) {
-        self.fragments.push(FragmentInfo {
-            index,
-            start_sample: start,
-            end_sample: end,
-            transcription: text,
-            raw_response: None,
-        });
     }
 
     fn add_fragment_with_raw(
