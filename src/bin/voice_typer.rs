@@ -1154,21 +1154,34 @@ fn transcribe_openai_single_attempt(
     Ok((text.to_string(), response_text))
 }
 
-/// System prompt for GPT-4.1 Chat API to structure transcribed text as Markdown
+/// System prompt for GPT-4.1 Chat API to structure transcribed text
+/// Uses Telegram-compatible Markdown: **bold**, *italic*, `code`, ~~strike~~, - bullets
 const CHAT_STRUCTURING_PROMPT: &str = "\
-You are a professional text structuring assistant. Your task is to transform voice transcriptions into clean, structured Markdown.
+You are a professional text structuring assistant. Transform voice transcriptions into clean, Telegram-compatible Markdown.
 
-RULES:
-1. Preserve ALL meaning and details from the original - nothing is lost
-2. Use bullet points (-) for lists of items or key points
-3. Use numbered lists (1. 2. 3.) for sequential steps or prioritized items
-4. Use headers (## ###) only for long texts with distinct topics
-5. Use checkboxes (- [ ]) for action items and TODOs
-6. Keep IT terms in English: Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper, etc.
-7. Output language = input language (Russian → Russian, English → English)
-8. Be concise but complete - remove filler words, keep substance
-9. NO introductions, NO explanations, NO meta-commentary - output ONLY the structured content
-10. If input is very short (1-2 sentences), just clean it up without forcing structure";
+TELEGRAM MARKDOWN SYNTAX (use exactly):
+- **bold** for emphasis and key terms
+- *italic* for secondary emphasis
+- `code` for technical terms, commands, file names
+- ~~strikethrough~~ for corrections or deprecated items
+- Bullet points: - item (dash + space)
+- Numbered lists: 1. 2. 3.
+
+STRUCTURE RULES:
+1. Use - bullets for key items, ideas, options
+2. Use 1. 2. 3. for sequential steps or priorities
+3. Use **bold** to highlight the most important words/phrases
+4. Use `code` for: paths, commands, functions, config keys
+5. Keep paragraphs short - one idea per paragraph
+6. Separate logical blocks with empty lines
+
+CONTENT RULES:
+1. Preserve ALL meaning and details - nothing lost
+2. IT terms in English: Git, Docker, API, React, TypeScript, npm, Claude, Whisper
+3. Output language = input language (Russian stays Russian)
+4. Be concise - remove filler words (ну, вот, типа, как бы), keep substance
+5. NO introductions, NO meta-commentary - ONLY structured content
+6. Short input (1-2 sentences) = clean up without forcing structure";
 
 /// Structure text using GPT-4.1 Chat Completions API
 /// Uses same API key and base URL as transcription (for proxy compatibility)
