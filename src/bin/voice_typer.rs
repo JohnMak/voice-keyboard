@@ -1159,10 +1159,21 @@ fn transcribe_openai_single_attempt(
 const CHAT_STRUCTURING_PROMPT: &str = "\
 Transform voice transcription into rich, scannable Telegram Markdown.
 
-STYLE: Ultra-concise. Telegraphic. Maximum information density.
-- Cut filler: ну, вот, типа, как бы, в общем, собственно
-- Compress phrases, one idea = one bullet
-- Reader grasps content in 5 seconds of scanning
+OUTPUT FORMAT:
+- Start with '**Вкратце:**' (Russian) or '**In short:**' (English) - match input language
+- Then newline, then structured content
+- This label helps reader know summary follows
+
+PRESERVE (critical):
+- Original message INTENT: question stays question, request stays request
+- Chronological ORDER of thoughts as author expressed them
+- ALL meaning and details - compress wording, never lose content
+- Author's narrative flow - don't reorganize, just structure better
+
+STYLE:
+- Concise, telegraphic - cut filler words (ну, вот, типа, как бы, в общем)
+- Tighter wording, same meaning
+- Reader scans in 5 seconds
 
 TELEGRAM SYNTAX:
 **bold** = headers, key terms, actions
@@ -1171,25 +1182,22 @@ TELEGRAM SYNTAX:
 - bullets for lists
 1. 2. for sequences
 
-LISTS RULES:
+LISTS:
 - Every list MUST have **bold header** above it
-- List = only homogeneous items (same type/category)
-- Don't just dump ideas as bullets - group by topic first
-- One emoji per bullet or paragraph for quick scanning
-- Use emoji as visual anchors: 📌 important, ✅ done, ⚠️ warning, 💡 idea, 🔧 fix, 📝 note
+- List = only homogeneous items (same category)
+- One emoji per bullet/paragraph for scanning
+- Emoji anchors: 📌 important, ✅ done, ⚠️ warning, 💡 idea, 🔧 fix, 📝 note
 
-TEXT RULES:
+TEXT:
 - Not everything is a list - use paragraphs for narrative
-- Use **subheaders** to break long text
-- Rich formatting for fast navigation
-- Empty line between logical blocks
+- **Subheaders** for long text
+- Empty line between blocks
 
-CONTENT RULES:
-- Preserve ALL meaning - compress, don't lose
+RULES:
 - IT terms in English: Git, Docker, API, Claude
 - Output language = input language
-- NO intro, NO meta - just structured content
-- Short input = minimal cleanup only";
+- NO intro, NO meta - just content
+- Short input = minimal cleanup";
 
 /// Structure text using GPT-4.1 Chat Completions API
 /// Uses same API key and base URL as transcription (for proxy compatibility)
@@ -3438,7 +3446,9 @@ fn run_openai(
                                         timestamp(),
                                         structured.len()
                                     );
-                                    (structured, None)
+                                    // Combine: original transcription + empty line + structured version
+                                    let combined = format!("{}\n\n{}", transcribed_text, structured);
+                                    (combined, None)
                                 }
                                 Err(e) => {
                                     eprintln!(
