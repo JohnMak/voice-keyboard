@@ -101,19 +101,6 @@ IT-термины на английском: Git, Docker, API, React, TypeScript
 Если фраза обрывается — заканчивай многоточием, но НЕ отбрасывай её. \
 Разбивай текст на абзацы (пустая строка), если меняется тема или смысловой блок.";
 
-/// Prompt for GPT-4o structured output mode - summarizes and formats as Markdown
-const OPENAI_PROMPT_STRUCTURED: &str = "\
-Ты получаешь голосовую заметку. Твоя задача — преобразовать её в структурированный Markdown. \
-IT-термины на английском: Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper. \
-ПРАВИЛА ФОРМАТИРОВАНИЯ: \
-1. Выдели ключевые пункты буллетами (- или *) \
-2. Если есть задачи или TODO — оформи как чек-лист (- [ ]) \
-3. Если есть несколько тем — раздели заголовками (## или ###) \
-4. Сохрани ВСЕ смыслы и детали из оригинала, ничего не пропускай \
-5. Язык вывода = язык говорящего \
-6. Если аудио неразборчиво или тишина — ответь: - \
-7. НЕ добавляй свои мысли, только структурируй сказанное \
-Результат должен быть компактным, легко читаемым, готовым для вставки в заметки.";
 
 // ============================================================================
 // Audio feedback and constants
@@ -1165,6 +1152,88 @@ fn transcribe_openai_single_attempt(
         .ok_or_else(|| format!("No 'text' field in response: {}", response_text))?;
 
     Ok((text.to_string(), response_text))
+}
+
+/// System prompt for GPT-4.1 Chat API to structure transcribed text as Markdown
+const CHAT_STRUCTURING_PROMPT: &str = "\
+You are a professional text structuring assistant. Your task is to transform voice transcriptions into clean, structured Markdown.
+
+RULES:
+1. Preserve ALL meaning and details from the original - nothing is lost
+2. Use bullet points (-) for lists of items or key points
+3. Use numbered lists (1. 2. 3.) for sequential steps or prioritized items
+4. Use headers (## ###) only for long texts with distinct topics
+5. Use checkboxes (- [ ]) for action items and TODOs
+6. Keep IT terms in English: Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper, etc.
+7. Output language = input language (Russian → Russian, English → English)
+8. Be concise but complete - remove filler words, keep substance
+9. NO introductions, NO explanations, NO meta-commentary - output ONLY the structured content
+10. If input is very short (1-2 sentences), just clean it up without forcing structure";
+
+/// Structure text using GPT-4.1 Chat Completions API
+/// Uses same API key and base URL as transcription (for proxy compatibility)
+fn structure_text_with_chat_api(config: &OpenAIConfig, text: &str) -> Result<String, String> {
+    let client = Client::new();
+
+    // Convert base URL from audio API to chat completions
+    // e.g., "https://api.openai.com/v1" -> "https://api.openai.com/v1/chat/completions"
+    let base_url = config.api_url.trim_end_matches('/');
+    let base_url = base_url.trim_end_matches("/audio/transcriptions");
+    let url = format!("{}/chat/completions", base_url);
+
+    // Build JSON request body
+    let request_body = serde_json::json!({
+        "model": "gpt-4.1",
+        "messages": [
+            {
+                "role": "system",
+                "content": CHAT_STRUCTURING_PROMPT
+            },
+            {
+                "role": "user",
+                "content": text
+            }
+        ],
+        "temperature": 0.3,
+        "max_tokens": 4096
+    });
+
+    println!("[{}] [STRUCT] Sending to GPT-4.1 for structuring ({} chars)...", timestamp(), text.len());
+
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("Content-Type", "application/json")
+        .json(&request_body)
+        .timeout(Duration::from_secs(60))
+        .send()
+        .map_err(|e| format!("Chat API request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().unwrap_or_default();
+        return Err(format!("Chat API error {}: {}", status, error_text));
+    }
+
+    let response_text = response
+        .text()
+        .map_err(|e| format!("Failed to read Chat API response: {}", e))?;
+
+    // Parse JSON and extract message content
+    let json: serde_json::Value = serde_json::from_str(&response_text)
+        .map_err(|e| format!("Failed to parse Chat API JSON: {}", e))?;
+
+    let content = json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("No content in Chat API response: {}", response_text))?;
+
+    println!("[{}] [STRUCT] GPT-4.1 returned {} chars", timestamp(), content.len());
+
+    Ok(content.to_string())
 }
 
 fn resolve_model_path(model: &str) -> PathBuf {
@@ -3212,22 +3281,16 @@ fn run_openai(
                 }
             };
 
-            // Choose prompt based on mode: structured (Markdown) or normal transcription
-            let base_prompt = if job.structured_mode {
-                OPENAI_PROMPT_STRUCTURED
-            } else {
-                OPENAI_PROMPT
-            };
-
+            // Always use standard transcription prompt (structured mode uses Chat API post-processing)
             let prompt = if let Some(ref ctx_text) = context {
                 let last_sentence = extract_last_sentence(ctx_text);
-                format!("{} {}", base_prompt, last_sentence)
+                format!("{} {}", OPENAI_PROMPT, last_sentence)
             } else {
-                base_prompt.to_string()
+                OPENAI_PROMPT.to_string()
             };
 
             if job.structured_mode {
-                println!("[{}] [WORKER] Structured MD mode enabled", timestamp());
+                println!("[{}] [WORKER] Structured MD mode enabled (will use GPT-4.1 Chat API)", timestamp());
             }
 
             let resampled = resample_48k_to_16k(&job.samples);
@@ -3315,15 +3378,42 @@ fn run_openai(
                         // Save audio for analysis
                         let _audio_file = save_audio_segment(&job.samples, RECORDING_SAMPLE_RATE);
 
-                        let (processed_text, marker_continuation) = process_continuation(&text);
+                        let (transcribed_text, marker_continuation) = process_continuation(&text);
+
+                        // In structured mode, send transcription to GPT-4.1 for Markdown formatting
+                        let processed_text = if job.structured_mode {
+                            match structure_text_with_chat_api(&config_for_worker, &transcribed_text) {
+                                Ok(structured) => {
+                                    println!(
+                                        "[{}] [WORKER] ✓ Structured output ready ({} chars)",
+                                        timestamp(),
+                                        structured.len()
+                                    );
+                                    structured
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[{}] [WORKER] ⚠ Chat API failed, using raw transcription: {}",
+                                        timestamp(),
+                                        e
+                                    );
+                                    // Fallback to raw transcription if Chat API fails
+                                    transcribed_text.clone()
+                                }
+                            }
+                        } else {
+                            transcribed_text.clone()
+                        };
+
                         let is_first_phrase = context.is_none();
 
                         let is_continuation = if is_first_phrase {
                             false
                         } else {
+                            // Use original transcription for continuation detection, not structured output
                             marker_continuation
                                 || should_continue(
-                                    &processed_text,
+                                    &transcribed_text,
                                     context.as_deref().unwrap_or(""),
                                 )
                         };
