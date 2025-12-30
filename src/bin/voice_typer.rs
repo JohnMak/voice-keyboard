@@ -3918,6 +3918,15 @@ fn run_openai(
                 let is_structured = target_key2 == Some(key);
                 structured_mode_clone.store(is_structured, Ordering::SeqCst);
 
+                // Debug: log which key was pressed and mode
+                println!(
+                    "[{}] [HOTKEY] Pressed: {:?}, target_key2={:?}, is_structured={}",
+                    timestamp(),
+                    key,
+                    target_key2,
+                    is_structured
+                );
+
                 // Check if not already recording
                 let mut rec_state = state_clone.lock().unwrap();
                 if *rec_state == RecordingState::Idle {
