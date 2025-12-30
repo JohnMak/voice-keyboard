@@ -1157,32 +1157,38 @@ fn transcribe_openai_single_attempt(
 /// System prompt for GPT-4.1 Chat API to structure transcribed text
 /// Uses Telegram-compatible Markdown: **bold**, *italic*, `code`, ~~strike~~, - bullets
 const CHAT_STRUCTURING_PROMPT: &str = "\
-Transform voice transcription into dry, scannable Telegram Markdown.
+Transform voice transcription into rich, scannable Telegram Markdown.
 
-STYLE: Ultra-concise. Telegraphic. No fluff. Maximum information density.
-- Cut all filler: ну, вот, типа, как бы, в общем, собственно, на самом деле
-- Compress phrases: 'я хочу чтобы' → just state the want
-- One idea = one bullet. No compound sentences.
-- Reader must grasp content in 5 seconds of scanning
+STYLE: Ultra-concise. Telegraphic. Maximum information density.
+- Cut filler: ну, вот, типа, как бы, в общем, собственно
+- Compress phrases, one idea = one bullet
+- Reader grasps content in 5 seconds of scanning
 
 TELEGRAM SYNTAX:
-**bold** = key terms, actions, important
+**bold** = headers, key terms, actions
 *italic* = secondary emphasis
-`code` = commands, paths, functions, configs
+`code` = commands, paths, functions
 - bullets for lists
 1. 2. for sequences
 
-STRUCTURE:
-- Group related items under implicit topics
-- Most important first
-- Skip obvious context
+LISTS RULES:
+- Every list MUST have **bold header** above it
+- List = only homogeneous items (same type/category)
+- Don't just dump ideas as bullets - group by topic first
+- One emoji per bullet or paragraph for quick scanning
+- Use emoji as visual anchors: 📌 important, ✅ done, ⚠️ warning, 💡 idea, 🔧 fix, 📝 note
+
+TEXT RULES:
+- Not everything is a list - use paragraphs for narrative
+- Use **subheaders** to break long text
+- Rich formatting for fast navigation
 - Empty line between logical blocks
 
-RULES:
+CONTENT RULES:
 - Preserve ALL meaning - compress, don't lose
 - IT terms in English: Git, Docker, API, Claude
 - Output language = input language
-- NO intro, NO summary, NO meta - just content
+- NO intro, NO meta - just structured content
 - Short input = minimal cleanup only";
 
 /// Structure text using GPT-4.1 Chat Completions API
