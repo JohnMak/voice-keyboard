@@ -3433,8 +3433,42 @@ fn run_openai(
 
                         let (transcribed_text, marker_continuation) = process_continuation(&text);
 
-                        // In structured mode, send transcription to GPT-4.1 for Markdown formatting
+                        let is_first_phrase = context.is_none();
+
+                        let is_continuation = if is_first_phrase {
+                            false
+                        } else {
+                            marker_continuation
+                                || should_continue(
+                                    &transcribed_text,
+                                    context.as_deref().unwrap_or(""),
+                                )
+                        };
+
+                        // Two-stage typing for structured mode, single for normal mode
                         let (processed_text, chat_api_error) = if job.structured_mode {
+                            // Stage 1: Send original transcription immediately
+                            println!(
+                                "\n[{}] ═══════════════════════════════════════════════════════════",
+                                timestamp()
+                            );
+                            println!("[TRANSCRIPTION #{} - ORIGINAL]", job.sequence_num);
+                            println!("{}", transcribed_text);
+                            println!("═══════════════════════════════════════════════════════════\n");
+
+                            if let Err(e) = result_tx.send(TranscriptionOutput {
+                                text: transcribed_text.clone(),
+                                is_continuation,
+                                sequence_num: job.sequence_num,
+                            }) {
+                                eprintln!(
+                                    "[{}] [WORKER] ✗ Failed to send original to output: {}",
+                                    timestamp(),
+                                    e
+                                );
+                            }
+
+                            // Stage 2: Call GPT-4.1 for structuring
                             println!(
                                 "[{}] [WORKER] Structured mode: calling GPT-4.1 Chat API...",
                                 timestamp()
@@ -3446,57 +3480,66 @@ fn run_openai(
                                         timestamp(),
                                         structured.len()
                                     );
-                                    // Combine: original transcription + empty line + structured version
-                                    let combined = format!("{}\n\n{}", transcribed_text, structured);
-                                    (combined, None)
+
+                                    // Print structured for console
+                                    println!(
+                                        "\n[{}] ═══════════════════════════════════════════════════════════",
+                                        timestamp()
+                                    );
+                                    println!("[TRANSCRIPTION #{} - STRUCTURED]", job.sequence_num);
+                                    println!("{}", structured);
+                                    println!("═══════════════════════════════════════════════════════════\n");
+
+                                    // Send structured output (with double newline prefix)
+                                    let structured_with_separator = format!("\n\n{}", structured);
+                                    if let Err(e) = result_tx.send(TranscriptionOutput {
+                                        text: structured_with_separator,
+                                        is_continuation: true, // Always continuation after original
+                                        sequence_num: job.sequence_num,
+                                    }) {
+                                        eprintln!(
+                                            "[{}] [WORKER] ✗ Failed to send structured to output: {}",
+                                            timestamp(),
+                                            e
+                                        );
+                                    }
+
+                                    // Combined for logging
+                                    (format!("{}\n\n{}", transcribed_text, structured), None)
                                 }
                                 Err(e) => {
                                     eprintln!(
-                                        "[{}] [WORKER] ⚠ Chat API failed, using raw transcription: {}",
+                                        "[{}] [WORKER] ⚠ Chat API failed: {}",
                                         timestamp(),
                                         e
                                     );
-                                    // Fallback to raw transcription if Chat API fails
+                                    // Original already sent, nothing more to do
                                     (transcribed_text.clone(), Some(e))
                                 }
                             }
                         } else {
+                            // Normal mode: single send
+                            println!(
+                                "\n[{}] ═══════════════════════════════════════════════════════════",
+                                timestamp()
+                            );
+                            println!("[TRANSCRIPTION #{}]", job.sequence_num);
+                            println!("{}", transcribed_text);
+                            println!("═══════════════════════════════════════════════════════════\n");
+
+                            if let Err(e) = result_tx.send(TranscriptionOutput {
+                                text: transcribed_text.clone(),
+                                is_continuation,
+                                sequence_num: job.sequence_num,
+                            }) {
+                                eprintln!(
+                                    "[{}] [WORKER] ✗ Failed to send to output thread: {}",
+                                    timestamp(),
+                                    e
+                                );
+                            }
                             (transcribed_text.clone(), None)
                         };
-
-                        let is_first_phrase = context.is_none();
-
-                        let is_continuation = if is_first_phrase {
-                            false
-                        } else {
-                            // Use original transcription for continuation detection, not structured output
-                            marker_continuation
-                                || should_continue(
-                                    &transcribed_text,
-                                    context.as_deref().unwrap_or(""),
-                                )
-                        };
-
-                        // Print full transcription for easy copy-paste from console
-                        println!(
-                            "\n[{}] ═══════════════════════════════════════════════════════════",
-                            timestamp()
-                        );
-                        println!("[TRANSCRIPTION #{}]", job.sequence_num);
-                        println!("{}", processed_text);
-                        println!("═══════════════════════════════════════════════════════════\n");
-
-                        if let Err(e) = result_tx.send(TranscriptionOutput {
-                            text: processed_text.clone(),
-                            is_continuation,
-                            sequence_num: job.sequence_num,
-                        }) {
-                            eprintln!(
-                                "[{}] [WORKER] ✗ Failed to send to output thread: {} (channel closed?)",
-                                timestamp(),
-                                e
-                            );
-                        }
 
                         // Send fragment info for dev report (with session_id for filtering)
                         let sid = session_id_for_worker.lock().unwrap().clone();
