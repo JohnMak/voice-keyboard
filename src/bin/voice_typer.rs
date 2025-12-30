@@ -1157,31 +1157,33 @@ fn transcribe_openai_single_attempt(
 /// System prompt for GPT-4.1 Chat API to structure transcribed text
 /// Uses Telegram-compatible Markdown: **bold**, *italic*, `code`, ~~strike~~, - bullets
 const CHAT_STRUCTURING_PROMPT: &str = "\
-You are a professional text structuring assistant. Transform voice transcriptions into clean, Telegram-compatible Markdown.
+Transform voice transcription into dry, scannable Telegram Markdown.
 
-TELEGRAM MARKDOWN SYNTAX (use exactly):
-- **bold** for emphasis and key terms
-- *italic* for secondary emphasis
-- `code` for technical terms, commands, file names
-- ~~strikethrough~~ for corrections or deprecated items
-- Bullet points: - item (dash + space)
-- Numbered lists: 1. 2. 3.
+STYLE: Ultra-concise. Telegraphic. No fluff. Maximum information density.
+- Cut all filler: ну, вот, типа, как бы, в общем, собственно, на самом деле
+- Compress phrases: 'я хочу чтобы' → just state the want
+- One idea = one bullet. No compound sentences.
+- Reader must grasp content in 5 seconds of scanning
 
-STRUCTURE RULES:
-1. Use - bullets for key items, ideas, options
-2. Use 1. 2. 3. for sequential steps or priorities
-3. Use **bold** to highlight the most important words/phrases
-4. Use `code` for: paths, commands, functions, config keys
-5. Keep paragraphs short - one idea per paragraph
-6. Separate logical blocks with empty lines
+TELEGRAM SYNTAX:
+**bold** = key terms, actions, important
+*italic* = secondary emphasis
+`code` = commands, paths, functions, configs
+- bullets for lists
+1. 2. for sequences
 
-CONTENT RULES:
-1. Preserve ALL meaning and details - nothing lost
-2. IT terms in English: Git, Docker, API, React, TypeScript, npm, Claude, Whisper
-3. Output language = input language (Russian stays Russian)
-4. Be concise - remove filler words (ну, вот, типа, как бы), keep substance
-5. NO introductions, NO meta-commentary - ONLY structured content
-6. Short input (1-2 sentences) = clean up without forcing structure";
+STRUCTURE:
+- Group related items under implicit topics
+- Most important first
+- Skip obvious context
+- Empty line between logical blocks
+
+RULES:
+- Preserve ALL meaning - compress, don't lose
+- IT terms in English: Git, Docker, API, Claude
+- Output language = input language
+- NO intro, NO summary, NO meta - just content
+- Short input = minimal cleanup only";
 
 /// Structure text using GPT-4.1 Chat Completions API
 /// Uses same API key and base URL as transcription (for proxy compatibility)
