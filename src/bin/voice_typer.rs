@@ -2814,6 +2814,12 @@ struct FragmentInfo {
     transcription: String,
     /// Raw API response JSON for debugging
     raw_response: Option<String>,
+    /// Whether structured mode was used for this fragment
+    structured_mode: bool,
+    /// Original transcription before Chat API structuring (if structured_mode)
+    original_transcription: Option<String>,
+    /// Chat API error if structuring failed
+    chat_api_error: Option<String>,
 }
 
 /// Dev mode: Typing event (insert or delete)
@@ -2871,6 +2877,9 @@ impl DevReport {
         end: usize,
         text: String,
         raw_response: String,
+        structured_mode: bool,
+        original_transcription: Option<String>,
+        chat_api_error: Option<String>,
     ) {
         self.fragments.push(FragmentInfo {
             index,
@@ -2878,6 +2887,9 @@ impl DevReport {
             end_sample: end,
             transcription: text,
             raw_response: Some(raw_response),
+            structured_mode,
+            original_transcription,
+            chat_api_error,
         });
     }
 
@@ -3066,6 +3078,7 @@ impl DevReport {
                     "end_sample": f.end_sample,
                     "duration_secs": (f.end_sample - f.start_sample) as f32 / RECORDING_SAMPLE_RATE as f32,
                     "transcription": f.transcription,
+                    "structured_mode": f.structured_mode,
                 });
                 // Add raw_response if present (for debugging API issues)
                 if let Some(ref raw) = f.raw_response {
@@ -3075,6 +3088,14 @@ impl DevReport {
                     } else {
                         frag["api_response_raw"] = serde_json::json!(raw);
                     }
+                }
+                // Add original transcription if structured mode was used
+                if let Some(ref orig) = f.original_transcription {
+                    frag["original_transcription"] = serde_json::json!(orig);
+                }
+                // Add Chat API error if structuring failed
+                if let Some(ref err) = f.chat_api_error {
+                    frag["chat_api_error"] = serde_json::json!(err);
                 }
                 frag
             }).collect::<Vec<_>>(),
@@ -3255,8 +3276,8 @@ fn run_openai(
     // Current session ID (shared with worker/output threads for tagging messages)
     let current_session_id: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 
-    // Channel for dev mode fragment info (session_id, sequence_num, start, end, text, raw_response)
-    let (dev_frag_tx, dev_frag_rx) = mpsc::channel::<(String, u64, usize, usize, String, String)>();
+    // Channel for dev mode fragment info (session_id, sequence_num, start, end, text, raw_response, structured_mode, original_text, chat_error)
+    let (dev_frag_tx, dev_frag_rx) = mpsc::channel::<(String, u64, usize, usize, String, String, bool, Option<String>, Option<String>)>();
 
     // Channel for dev mode typing events (session_id, event_type, text, char_count, sequence_num, success, error)
     let (dev_typing_tx, dev_typing_rx) =
@@ -3399,7 +3420,11 @@ fn run_openai(
                         let (transcribed_text, marker_continuation) = process_continuation(&text);
 
                         // In structured mode, send transcription to GPT-4.1 for Markdown formatting
-                        let processed_text = if job.structured_mode {
+                        let (processed_text, chat_api_error) = if job.structured_mode {
+                            println!(
+                                "[{}] [WORKER] Structured mode: calling GPT-4.1 Chat API...",
+                                timestamp()
+                            );
                             match structure_text_with_chat_api(&config_for_worker, &transcribed_text) {
                                 Ok(structured) => {
                                     println!(
@@ -3407,7 +3432,7 @@ fn run_openai(
                                         timestamp(),
                                         structured.len()
                                     );
-                                    structured
+                                    (structured, None)
                                 }
                                 Err(e) => {
                                     eprintln!(
@@ -3416,11 +3441,11 @@ fn run_openai(
                                         e
                                     );
                                     // Fallback to raw transcription if Chat API fails
-                                    transcribed_text.clone()
+                                    (transcribed_text.clone(), Some(e))
                                 }
                             }
                         } else {
-                            transcribed_text.clone()
+                            (transcribed_text.clone(), None)
                         };
 
                         let is_first_phrase = context.is_none();
@@ -3459,6 +3484,11 @@ fn run_openai(
 
                         // Send fragment info for dev report (with session_id for filtering)
                         let sid = session_id_for_worker.lock().unwrap().clone();
+                        let original_text = if job.structured_mode {
+                            Some(transcribed_text.clone())
+                        } else {
+                            None
+                        };
                         let _ = dev_frag_tx_worker.send((
                             sid,
                             job.sequence_num,
@@ -3466,6 +3496,9 @@ fn run_openai(
                             job.end_sample,
                             processed_text,
                             final_raw_response,
+                            job.structured_mode,
+                            original_text,
+                            chat_api_error,
                         ));
                     } else {
                         let reason = if trimmed == "-" {
@@ -3489,6 +3522,9 @@ fn run_openai(
                             job.end_sample,
                             String::new(), // empty text (skipped)
                             final_raw_response,
+                            job.structured_mode,
+                            None,
+                            None,
                         ));
                     }
                 }
@@ -3509,6 +3545,9 @@ fn run_openai(
                         job.end_sample,
                         String::new(),
                         format!("{{\"error\": \"{}\"}}", e.replace('"', "\\\"")),
+                        job.structured_mode,
+                        None,
+                        Some(e),
                     ));
                 }
             }
@@ -3690,12 +3729,12 @@ fn run_openai(
     // Dev mode: Fragment collector thread (filters by session_id)
     let dev_report_for_collector = Arc::clone(&dev_report);
     thread::spawn(move || {
-        for (msg_session_id, seq, start, end, text, raw_response) in dev_frag_rx {
+        for (msg_session_id, seq, start, end, text, raw_response, structured_mode, original_text, chat_error) in dev_frag_rx {
             let mut report_guard = dev_report_for_collector.lock().unwrap();
             if let Some(ref mut report) = *report_guard {
                 // Only add fragment if it belongs to current session
                 if report.session_id == msg_session_id {
-                    report.add_fragment_with_raw(seq, start, end, text, raw_response);
+                    report.add_fragment_with_raw(seq, start, end, text, raw_response, structured_mode, original_text, chat_error);
                 } else {
                     println!(
                         "[DEV] Dropping stale fragment from session {} (current: {})",
