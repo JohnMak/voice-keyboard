@@ -3490,18 +3490,26 @@ fn run_openai(
                                     println!("{}", structured);
                                     println!("═══════════════════════════════════════════════════════════\n");
 
-                                    // Send structured output (with double newline prefix)
+                                    // Type structured output directly (bypass channel to avoid sequence_num conflict)
+                                    // Small delay to let original finish typing
+                                    std::thread::sleep(Duration::from_millis(100));
+
                                     let structured_with_separator = format!("\n\n{}", structured);
-                                    if let Err(e) = result_tx.send(TranscriptionOutput {
-                                        text: structured_with_separator,
-                                        is_continuation: true, // Always continuation after original
-                                        sequence_num: job.sequence_num,
-                                    }) {
-                                        eprintln!(
-                                            "[{}] [WORKER] ✗ Failed to send structured to output: {}",
-                                            timestamp(),
-                                            e
-                                        );
+                                    match type_text(&structured_with_separator) {
+                                        Ok(_) => {
+                                            println!(
+                                                "[{}] [WORKER] ✓ Structured text typed ({} chars)",
+                                                timestamp(),
+                                                structured_with_separator.len()
+                                            );
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "[{}] [WORKER] ✗ Failed to type structured text: {}",
+                                                timestamp(),
+                                                e
+                                            );
+                                        }
                                     }
 
                                     // Combined for logging
