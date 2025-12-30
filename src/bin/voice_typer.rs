@@ -84,8 +84,13 @@ const MODEL_SIZES: &[(&str, u64)] = &[
     ("ggml-large-v3-turbo.bin", 1_620_000_000),
 ];
 
-/// Initial prompt for Whisper to help with code-switching (Russian + English tech terms)
-const PROGRAMMER_PROMPT: &str = "\
+/// Initial prompt for Whisper (local model) - keep it simple, Whisper is not an LLM
+const WHISPER_PROMPT: &str = "\
+Голосовые команды программиста на русском с IT-терминами на английском: \
+Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper, Claude Code.";
+
+/// Prompt for GPT-4o transcription API - can use LLM-style instructions
+const OPENAI_PROMPT: &str = "\
 Голосовые команды программиста на русском. Команды роботу в повелительном наклонении. \
 IT-термины на английском: Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper. \
 КРИТИЧЕСКИ ВАЖНО: Распознавай ТОЛЬКО реально слышимое в аудио. \
@@ -93,8 +98,8 @@ IT-термины на английском: Git, Docker, API, React, TypeScript
 Если аудио неразборчиво, тишина или шум — ответь ровно одним символом: - \
 Не выдумывай слова, которых нет в аудио. \
 ВАЖНО: Выводи ВСЕ услышанное, даже незаконченные предложения. \
-Если фраза обрывается — заканчивай двоеточием или многоточием, но НЕ отбрасывай её. \
-Пример: «открой файл» → «открой файл:» или «посмотри в» → «посмотри в...»";
+Если фраза обрывается — заканчивай многоточием, но НЕ отбрасывай её. \
+Разбивай текст на абзацы (пустая строка), если меняется тема или смысловой блок.";
 
 // ============================================================================
 // Audio feedback and constants
@@ -1005,6 +1010,20 @@ fn transcribe_openai_single_attempt(
     #[cfg_attr(feature = "opus", allow(unused_variables))] sample_rate: u32,
     prompt: Option<&str>,
 ) -> Result<(String, String), String> {
+    // Add 1 second of quiet noise at the end to prevent GPT-4o from truncating final phrases
+    // Using very low amplitude noise (not silence) to avoid being stripped by audio processing
+    const PADDING_SAMPLES: usize = 16000; // 1 second at 16kHz
+    const NOISE_AMPLITUDE: f32 = 0.0005; // Very quiet, barely audible
+
+    let mut padded_samples = samples.to_vec();
+    // Generate deterministic low-amplitude noise pattern
+    for i in 0..PADDING_SAMPLES {
+        // Simple deterministic noise using sample index
+        let noise = ((i as f32 * 0.1).sin() * 0.5 + (i as f32 * 0.23).cos() * 0.5) * NOISE_AMPLITUDE;
+        padded_samples.push(noise);
+    }
+    let samples = &padded_samples[..];
+
     // Encode audio data
     #[cfg(feature = "opus")]
     let (audio_data, filename, content_type) = {
@@ -1912,9 +1931,9 @@ fn transcribe_whisper_internal(
 
     let prompt = if let Some(ctx_text) = context {
         let last_sentence = extract_last_sentence(ctx_text);
-        format!("{} {}", PROGRAMMER_PROMPT, last_sentence)
+        format!("{} {}", WHISPER_PROMPT, last_sentence)
     } else {
-        PROGRAMMER_PROMPT.to_string()
+        WHISPER_PROMPT.to_string()
     };
 
     params.set_initial_prompt(&prompt);
@@ -3122,9 +3141,9 @@ fn run_openai(
 
             let prompt = if let Some(ref ctx_text) = context {
                 let last_sentence = extract_last_sentence(ctx_text);
-                format!("{} {}", PROGRAMMER_PROMPT, last_sentence)
+                format!("{} {}", OPENAI_PROMPT, last_sentence)
             } else {
-                PROGRAMMER_PROMPT.to_string()
+                OPENAI_PROMPT.to_string()
             };
 
             let resampled = resample_48k_to_16k(&job.samples);
@@ -3172,7 +3191,7 @@ fn run_openai(
                             &config_for_worker,
                             &resampled,
                             WHISPER_SAMPLE_RATE,
-                            Some(PROGRAMMER_PROMPT),
+                            Some(OPENAI_PROMPT),
                         ) {
                             Ok((retry_text, retry_raw)) => {
                                 let retry_trimmed = retry_text.trim();
