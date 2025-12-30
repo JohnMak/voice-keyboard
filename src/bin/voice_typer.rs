@@ -1215,11 +1215,14 @@ fn structure_text_with_chat_api(config: &OpenAIConfig, text: &str) -> Result<Str
 
     println!("[{}] [STRUCT] Sending to GPT-4.1 for structuring ({} chars)...", timestamp(), text.len());
 
+    let body = serde_json::to_string(&request_body)
+        .map_err(|e| format!("Failed to serialize request: {}", e))?;
+
     let response = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", config.api_key))
         .header("Content-Type", "application/json")
-        .json(&request_body)
+        .body(body)
         .timeout(Duration::from_secs(60))
         .send()
         .map_err(|e| format!("Chat API request failed: {}", e))?;
@@ -3353,7 +3356,7 @@ fn run_openai(
                             &config_for_worker,
                             &resampled,
                             WHISPER_SAMPLE_RATE,
-                            Some(base_prompt),
+                            Some(OPENAI_PROMPT),
                         ) {
                             Ok((retry_text, retry_raw)) => {
                                 let retry_trimmed = retry_text.trim();
