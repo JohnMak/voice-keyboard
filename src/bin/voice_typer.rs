@@ -101,6 +101,20 @@ IT-термины на английском: Git, Docker, API, React, TypeScript
 Если фраза обрывается — заканчивай многоточием, но НЕ отбрасывай её. \
 Разбивай текст на абзацы (пустая строка), если меняется тема или смысловой блок.";
 
+/// Prompt for GPT-4o structured output mode - summarizes and formats as Markdown
+const OPENAI_PROMPT_STRUCTURED: &str = "\
+Ты получаешь голосовую заметку. Твоя задача — преобразовать её в структурированный Markdown. \
+IT-термины на английском: Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper. \
+ПРАВИЛА ФОРМАТИРОВАНИЯ: \
+1. Выдели ключевые пункты буллетами (- или *) \
+2. Если есть задачи или TODO — оформи как чек-лист (- [ ]) \
+3. Если есть несколько тем — раздели заголовками (## или ###) \
+4. Сохрани ВСЕ смыслы и детали из оригинала, ничего не пропускай \
+5. Язык вывода = язык говорящего \
+6. Если аудио неразборчиво или тишина — ответь: - \
+7. НЕ добавляй свои мысли, только структурируй сказанное \
+Результат должен быть компактным, легко читаемым, готовым для вставки в заметки.";
+
 // ============================================================================
 // Audio feedback and constants
 // ============================================================================
@@ -1208,6 +1222,8 @@ fn print_usage() {
         default_key.name()
     );
     println!("                     Options: fn, ctrl, ctrlright, alt, altright, shift, cmd");
+    println!("  --key2 <KEY>       Secondary hotkey for structured Markdown output (default: cmdright)");
+    println!("                     Use 'none' to disable. Same key options as --key");
     println!("  --volume <0.0-1.0> Beep sounds volume (default: 0.1 = 10%)");
     println!("                     Use 0 to disable sounds, 1.0 for max volume");
     println!("  --silent, -q       Disable all beep sounds (same as --volume 0)");
@@ -1618,6 +1634,9 @@ fn main() {
         .and_then(|h| HotkeyType::from_str(h))
         .unwrap_or_else(HotkeyType::default_for_platform);
 
+    // Secondary hotkey for structured Markdown output (default: Right Cmd on macOS)
+    let mut hotkey2: Option<HotkeyType> = Some(HotkeyType::MetaRight);
+
     // Initialize beep volume (default 10%)
     set_beep_volume(BEEP_DEFAULT_VOLUME);
 
@@ -1727,6 +1746,46 @@ fn main() {
                     }
                 }
             }
+            "--key2" => {
+                if i + 1 < args.len() {
+                    let key_str = &args[i + 1];
+                    if key_str == "none" || key_str == "off" || key_str == "disable" {
+                        hotkey2 = None;
+                    } else {
+                        match HotkeyType::from_str(key_str) {
+                            Some(key) => hotkey2 = Some(key),
+                            None => {
+                                eprintln!(
+                                    "Error: unknown hotkey '{}'. Use --list-keys to see options.",
+                                    key_str
+                                );
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    i += 1;
+                } else {
+                    eprintln!("Error: --key2 requires an argument (or 'none' to disable)");
+                    std::process::exit(1);
+                }
+            }
+            arg if arg.starts_with("--key2=") => {
+                let key_str = arg.trim_start_matches("--key2=");
+                if key_str == "none" || key_str == "off" || key_str == "disable" {
+                    hotkey2 = None;
+                } else {
+                    match HotkeyType::from_str(key_str) {
+                        Some(key) => hotkey2 = Some(key),
+                        None => {
+                            eprintln!(
+                                "Error: unknown hotkey '{}'. Use --list-keys to see options.",
+                                key_str
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
             "--volume" => {
                 if i + 1 < args.len() {
                     match args[i + 1].parse::<f32>() {
@@ -1794,6 +1853,9 @@ fn main() {
     println!("===========");
     println!("Platform: {}", std::env::consts::OS);
     println!("Hold {} to record, release to transcribe", hotkey.name());
+    if let Some(ref key2) = hotkey2 {
+        println!("Hold {} to record → structured Markdown output", key2.name());
+    }
     println!("Input method: {}", input_mode_str);
     println!("Press Ctrl+C to exit\n");
 
@@ -1809,7 +1871,7 @@ fn main() {
 
                 if openai_config.test_connection() {
                     println!("OK\n");
-                    run_openai(openai_config, input_method, hotkey, config.streaming);
+                    run_openai(openai_config, input_method, hotkey, hotkey2, config.streaming);
                 } else {
                     println!("FAILED");
                     eprintln!("\nCannot connect to OpenAI API.");
@@ -2645,6 +2707,8 @@ struct TranscriptionJob {
     start_sample: usize,
     /// End sample position in full recording (for dev mode)
     end_sample: usize,
+    /// Use structured Markdown output mode
+    structured_mode: bool,
 }
 
 /// Completed transcription result
@@ -3046,6 +3110,7 @@ fn run_openai(
     openai_config: OpenAIConfig,
     input_method: InputMethod,
     hotkey: HotkeyType,
+    hotkey2: Option<HotkeyType>,
     streaming: bool,
 ) {
     use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -3066,8 +3131,13 @@ fn run_openai(
         streaming
     );
 
+    if let Some(ref key2) = hotkey2 {
+        println!("[HOTKEY] Primary: {} (normal), Secondary: {} (structured MD)", hotkey.name(), key2.name());
+    }
+
     let config = Arc::new(openai_config);
     let target_key = hotkey.to_rdev_key();
+    let target_key2 = hotkey2.map(|k| k.to_rdev_key());
 
     let state: Arc<Mutex<RecordingState>> = Arc::new(Mutex::new(RecordingState::Idle));
     let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3076,6 +3146,9 @@ fn run_openai(
 
     // Atomic flag for recording state - used by audio stream
     let is_recording = Arc::new(AtomicBool::new(false));
+
+    // Flag for structured Markdown output mode (activated by secondary hotkey)
+    let structured_mode = Arc::new(AtomicBool::new(false));
 
     // Sequence number for ordering transcription results
     let next_sequence = Arc::new(AtomicU64::new(0));
@@ -3139,12 +3212,23 @@ fn run_openai(
                 }
             };
 
+            // Choose prompt based on mode: structured (Markdown) or normal transcription
+            let base_prompt = if job.structured_mode {
+                OPENAI_PROMPT_STRUCTURED
+            } else {
+                OPENAI_PROMPT
+            };
+
             let prompt = if let Some(ref ctx_text) = context {
                 let last_sentence = extract_last_sentence(ctx_text);
-                format!("{} {}", OPENAI_PROMPT, last_sentence)
+                format!("{} {}", base_prompt, last_sentence)
             } else {
-                OPENAI_PROMPT.to_string()
+                base_prompt.to_string()
             };
+
+            if job.structured_mode {
+                println!("[{}] [WORKER] Structured MD mode enabled", timestamp());
+            }
 
             let resampled = resample_48k_to_16k(&job.samples);
             println!(
@@ -3191,7 +3275,7 @@ fn run_openai(
                             &config_for_worker,
                             &resampled,
                             WHISPER_SAMPLE_RATE,
-                            Some(OPENAI_PROMPT),
+                            Some(base_prompt),
                         ) {
                             Ok((retry_text, retry_raw)) => {
                                 let retry_trimmed = retry_text.trim();
@@ -3556,6 +3640,7 @@ fn run_openai(
     let job_tx_vad = job_tx.clone();
     let dev_vad_tx_for_vad = dev_vad_tx.clone();
     let session_id_for_vad = Arc::clone(&current_session_id);
+    let structured_mode_for_vad = Arc::clone(&structured_mode);
 
     thread::spawn(move || {
         use std::sync::atomic::Ordering;
@@ -3642,11 +3727,13 @@ fn run_openai(
                 let sid = session_id_for_vad.lock().unwrap().clone();
                 let _ = dev_vad_tx_for_vad.send((sid, "phrase_detected".to_string(), log_details));
 
+                let is_structured = structured_mode_for_vad.load(Ordering::SeqCst);
                 let _ = job_tx_vad.send(TranscriptionJob {
                     samples: phrase_samples,
                     sequence_num: seq,
                     start_sample: start_pos,
                     end_sample: end_pos,
+                    structured_mode: is_structured,
                 });
             }
         }
@@ -3665,6 +3752,7 @@ fn run_openai(
     let session_id_callback = Arc::clone(&current_session_id);
     let last_phrase_callback = Arc::clone(&last_phrase);
     let dev_vad_tx_callback = dev_vad_tx;
+    let structured_mode_clone = Arc::clone(&structured_mode);
 
     // Debounce state
     let key_debounce = Arc::new(AtomicBool::new(false));
@@ -3674,10 +3762,14 @@ fn run_openai(
         use std::sync::atomic::Ordering;
 
         match event.event_type {
-            EventType::KeyPress(key) if key == target_key => {
+            EventType::KeyPress(key) if key == target_key || target_key2 == Some(key) => {
                 if key_debounce_clone.swap(true, Ordering::SeqCst) {
                     return; // Already pressed, ignore repeat
                 }
+
+                // Set structured mode based on which key was pressed
+                let is_structured = target_key2 == Some(key);
+                structured_mode_clone.store(is_structured, Ordering::SeqCst);
 
                 // Check if not already recording
                 let mut rec_state = state_clone.lock().unwrap();
@@ -3738,7 +3830,7 @@ fn run_openai(
                     // No start beep - it would be captured in the recording
                 }
             }
-            EventType::KeyRelease(key) if key == target_key => {
+            EventType::KeyRelease(key) if key == target_key || target_key2 == Some(key) => {
                 key_debounce_clone.store(false, Ordering::SeqCst);
 
                 // Check if currently recording
@@ -3817,11 +3909,13 @@ fn run_openai(
                             log_details,
                         ));
 
+                        let is_structured = structured_mode_clone.load(Ordering::SeqCst);
                         let _ = job_tx_callback.send(TranscriptionJob {
                             samples: phrase_samples,
                             sequence_num: seq,
                             start_sample: start_pos,
                             end_sample: end_pos,
+                            structured_mode: is_structured,
                         });
                     } else {
                         println!("[{}] No remaining audio to transcribe", timestamp());
