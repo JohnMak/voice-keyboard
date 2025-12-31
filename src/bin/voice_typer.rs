@@ -43,6 +43,11 @@ use std::process::Command;
 /// Minimum recording duration to process (avoid accidental taps)
 const MIN_RECORDING_MS: u64 = 300;
 
+/// Output modes for transcription
+const OUTPUT_MODE_PLAIN: u8 = 0;      // Normal transcription only
+const OUTPUT_MODE_STRUCTURED: u8 = 1; // Original + Summary + Structure (same language)
+const OUTPUT_MODE_TRANSLATE: u8 = 2;  // Original + Translation + Summary + Structure (English)
+
 /// Dev mode: collect reports for analysis
 /// Set VOICE_KEYBOARD_DEV=1 to enable
 fn is_dev_mode() -> bool {
@@ -1161,56 +1166,106 @@ fn transcribe_openai_single_attempt(
     Ok((text.to_string(), response_text))
 }
 
-/// System prompt for GPT-4.1 Chat API to structure transcribed text
-/// Uses Telegram-compatible Markdown: **bold**, *italic*, `code`, ~~strike~~, - bullets
-const CHAT_STRUCTURING_PROMPT: &str = "\
-Transform voice transcription into rich, scannable Telegram Markdown.
+/// System prompt for simple translation to English
+const CHAT_TRANSLATION_PROMPT: &str = "\
+Translate the following text to English.
 
-OUTPUT FORMAT:
-- Start with '**Вкратце:**' (Russian) or '**In short:**' (English) - match input language
-- Then newline, then structured content
-- This label helps reader know summary follows
+RULES:
+- Preserve original meaning, tone, and structure
+- Keep questions as questions, exclamations as exclamations
+- Maintain paragraph breaks
+- IT terms stay in English: Git, Docker, API, Claude
+- Just translate, no formatting changes, no additions
+- Output ONLY the translation, nothing else";
 
-PRESERVE (critical):
-- Original message INTENT: question stays question, request stays request
-- Chronological ORDER of thoughts as author expressed them
-- ALL meaning and details - compress wording, never lose content
-- Author's narrative flow - don't reorganize, just structure better
+/// System prompt for GPT-4.1 Chat API - Summary + Structure (same language)
+/// Uses Telegram-compatible Markdown
+const CHAT_SUMMARY_STRUCTURE_PROMPT: &str = "\
+Transform voice transcription into TWO sections.
 
-STYLE:
-- Concise, telegraphic - cut filler words (ну, вот, типа, как бы, в общем)
-- Tighter wording, same meaning
-- Reader scans in 5 seconds
+═══ SECTION 1: BRIEF SUMMARY ═══
+Ultra-concise retelling in paragraph form:
+- Preserve author's thought FLOW and SEQUENCE
+- Keep questions as questions, requests as requests
+- Cut ALL filler: ну, вот, типа, как бы, в общем, собственно
+- Compress 5x but lose ZERO meaning
+- Add emoji at START of each paragraph: 📌 💡 ⚠️ ✅ 🔧 📝
+- Separate paragraphs with ONE empty line
+- This is a RETELLING, not a list - use flowing prose
+
+After summary, output EXACTLY this separator:
+----------
+
+═══ SECTION 2: STRUCTURED CONTENT ═══
+Rich Telegram Markdown for scanning:
 
 TELEGRAM SYNTAX (strict):
 **bold** = headers, key terms, actions (ALWAYS double asterisks)
-_italic_ = secondary emphasis (underscores, NOT single asterisks)
+_italic_ = secondary emphasis (underscores only)
 `code` = commands, paths, functions
 - bullets for lists
-1. 2. for sequences
+1. 2. for ordered sequences
 
-CRITICAL: Never use single asterisks (*text*) - Telegram ignores them. Only **double**.
+NEVER use single asterisks (*text*) - only **double**.
 
-LISTS:
+LISTS RULES:
 - Every list MUST have **bold header** above it
-- List = only homogeneous items (same category)
-- One emoji per bullet/paragraph for scanning
-- Emoji anchors: 📌 important, ✅ done, ⚠️ warning, 💡 idea, 🔧 fix, 📝 note
+- One emoji per bullet for scanning
+- List = homogeneous items only
 
-TEXT:
-- Not everything is a list - use paragraphs for narrative
-- **Subheaders** for long text
+TEXT RULES:
+- **Subheaders** for sections
 - Empty line between blocks
+- IT terms in English: Git, Docker, API
 
-RULES:
-- IT terms in English: Git, Docker, API, Claude
-- Output language = input language
-- NO intro, NO meta - just content
-- Short input = minimal cleanup";
+LANGUAGE: Output in the SAME language as input.
+NO intro, NO meta - just content.";
 
-/// Structure text using GPT-4.1 Chat Completions API
+/// System prompt for GPT-4.1 Chat API - Summary + Structure (English output)
+const CHAT_SUMMARY_STRUCTURE_ENGLISH_PROMPT: &str = "\
+Transform voice transcription into TWO sections. OUTPUT EVERYTHING IN ENGLISH.
+
+═══ SECTION 1: BRIEF SUMMARY ═══
+Ultra-concise retelling in paragraph form:
+- Preserve author's thought FLOW and SEQUENCE
+- Keep questions as questions, requests as requests
+- Cut ALL filler words
+- Compress 5x but lose ZERO meaning
+- Add emoji at START of each paragraph: 📌 💡 ⚠️ ✅ 🔧 📝
+- Separate paragraphs with ONE empty line
+- This is a RETELLING, not a list - use flowing prose
+
+After summary, output EXACTLY this separator:
+----------
+
+═══ SECTION 2: STRUCTURED CONTENT ═══
+Rich Telegram Markdown for scanning:
+
+TELEGRAM SYNTAX (strict):
+**bold** = headers, key terms, actions (ALWAYS double asterisks)
+_italic_ = secondary emphasis (underscores only)
+`code` = commands, paths, functions
+- bullets for lists
+1. 2. for ordered sequences
+
+NEVER use single asterisks (*text*) - only **double**.
+
+LISTS RULES:
+- Every list MUST have **bold header** above it
+- One emoji per bullet for scanning
+- List = homogeneous items only
+
+TEXT RULES:
+- **Subheaders** for sections
+- Empty line between blocks
+- IT terms stay in English: Git, Docker, API
+
+LANGUAGE: OUTPUT EVERYTHING IN ENGLISH regardless of input language.
+NO intro, NO meta - just content.";
+
+/// Call GPT-4.1 Chat Completions API with custom system prompt
 /// Uses same API key and base URL as transcription (for proxy compatibility)
-fn structure_text_with_chat_api(config: &OpenAIConfig, text: &str) -> Result<String, String> {
+fn call_chat_api(config: &OpenAIConfig, system_prompt: &str, text: &str, task_name: &str) -> Result<String, String> {
     let client = Client::new();
 
     // Convert base URL from audio API to chat completions
@@ -1225,7 +1280,7 @@ fn structure_text_with_chat_api(config: &OpenAIConfig, text: &str) -> Result<Str
         "messages": [
             {
                 "role": "system",
-                "content": CHAT_STRUCTURING_PROMPT
+                "content": system_prompt
             },
             {
                 "role": "user",
@@ -1236,7 +1291,7 @@ fn structure_text_with_chat_api(config: &OpenAIConfig, text: &str) -> Result<Str
         "max_tokens": 4096
     });
 
-    println!("[{}] [STRUCT] Sending to GPT-4.1 for structuring ({} chars)...", timestamp(), text.len());
+    println!("[{}] [CHAT] {} ({} chars)...", timestamp(), task_name, text.len());
 
     let body = serde_json::to_string(&request_body)
         .map_err(|e| format!("Failed to serialize request: {}", e))?;
@@ -1272,9 +1327,24 @@ fn structure_text_with_chat_api(config: &OpenAIConfig, text: &str) -> Result<Str
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("No content in Chat API response: {}", response_text))?;
 
-    println!("[{}] [STRUCT] GPT-4.1 returned {} chars", timestamp(), content.len());
+    println!("[{}] [CHAT] {} complete ({} chars)", timestamp(), task_name, content.len());
 
     Ok(content.to_string())
+}
+
+/// Helper: Structure text with same-language prompt
+fn structure_text_with_chat_api(config: &OpenAIConfig, text: &str) -> Result<String, String> {
+    call_chat_api(config, CHAT_SUMMARY_STRUCTURE_PROMPT, text, "Summary+Structure")
+}
+
+/// Helper: Structure text with English output prompt
+fn structure_text_english(config: &OpenAIConfig, text: &str) -> Result<String, String> {
+    call_chat_api(config, CHAT_SUMMARY_STRUCTURE_ENGLISH_PROMPT, text, "Summary+Structure (EN)")
+}
+
+/// Helper: Translate text to English
+fn translate_to_english(config: &OpenAIConfig, text: &str) -> Result<String, String> {
+    call_chat_api(config, CHAT_TRANSLATION_PROMPT, text, "Translation to EN")
 }
 
 fn resolve_model_path(model: &str) -> PathBuf {
@@ -2829,8 +2899,8 @@ struct TranscriptionJob {
     start_sample: usize,
     /// End sample position in full recording (for dev mode)
     end_sample: usize,
-    /// Use structured Markdown output mode
-    structured_mode: bool,
+    /// Output mode: OUTPUT_MODE_PLAIN, OUTPUT_MODE_STRUCTURED, or OUTPUT_MODE_TRANSLATE
+    output_mode: u8,
 }
 
 /// Completed transcription result
@@ -2849,9 +2919,9 @@ struct FragmentInfo {
     transcription: String,
     /// Raw API response JSON for debugging
     raw_response: Option<String>,
-    /// Whether structured mode was used for this fragment
-    structured_mode: bool,
-    /// Original transcription before Chat API structuring (if structured_mode)
+    /// Output mode used for this fragment (0=plain, 1=structured, 2=translate)
+    output_mode: u8,
+    /// Original transcription before Chat API processing (if output_mode != 0)
     original_transcription: Option<String>,
     /// Chat API error if structuring failed
     chat_api_error: Option<String>,
@@ -2912,7 +2982,7 @@ impl DevReport {
         end: usize,
         text: String,
         raw_response: String,
-        structured_mode: bool,
+        output_mode: u8,
         original_transcription: Option<String>,
         chat_api_error: Option<String>,
     ) {
@@ -2922,7 +2992,7 @@ impl DevReport {
             end_sample: end,
             transcription: text,
             raw_response: Some(raw_response),
-            structured_mode,
+            output_mode,
             original_transcription,
             chat_api_error,
         });
@@ -3113,7 +3183,8 @@ impl DevReport {
                     "end_sample": f.end_sample,
                     "duration_secs": (f.end_sample - f.start_sample) as f32 / RECORDING_SAMPLE_RATE as f32,
                     "transcription": f.transcription,
-                    "structured_mode": f.structured_mode,
+                    "structured_mode": f.output_mode != OUTPUT_MODE_PLAIN,
+                    "output_mode": f.output_mode,
                 });
                 // Add raw_response if present (for debugging API issues)
                 if let Some(ref raw) = f.raw_response {
@@ -3256,7 +3327,7 @@ fn run_openai(
     hotkey2: Option<HotkeyType>,
     streaming: bool,
 ) {
-    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8};
     use std::sync::mpsc;
 
     let dev_mode = is_dev_mode();
@@ -3275,12 +3346,13 @@ fn run_openai(
     );
 
     if let Some(ref key2) = hotkey2 {
-        println!("[HOTKEY] Primary: {} (normal), Secondary: {} (structured MD)", hotkey.name(), key2.name());
+        println!("[HOTKEY] Primary: {} (normal), Secondary: {} (structured), Tertiary: Left Cmd (translate)", hotkey.name(), key2.name());
     }
 
     let config = Arc::new(openai_config);
     let target_key = hotkey.to_rdev_key();
-    let target_key2 = hotkey2.map(|k| k.to_rdev_key());
+    let target_key2 = hotkey2.map(|k| k.to_rdev_key()); // Right Cmd = structured
+    let target_key3 = Some(Key::MetaLeft); // Left Cmd = translate to English
 
     let state: Arc<Mutex<RecordingState>> = Arc::new(Mutex::new(RecordingState::Idle));
     let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3290,8 +3362,8 @@ fn run_openai(
     // Atomic flag for recording state - used by audio stream
     let is_recording = Arc::new(AtomicBool::new(false));
 
-    // Flag for structured Markdown output mode (activated by secondary hotkey)
-    let structured_mode = Arc::new(AtomicBool::new(false));
+    // Output mode: PLAIN, STRUCTURED, or TRANSLATE (activated by different hotkeys)
+    let output_mode = Arc::new(AtomicU8::new(OUTPUT_MODE_PLAIN));
 
     // Sequence number for ordering transcription results
     let next_sequence = Arc::new(AtomicU64::new(0));
@@ -3311,8 +3383,8 @@ fn run_openai(
     // Current session ID (shared with worker/output threads for tagging messages)
     let current_session_id: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 
-    // Channel for dev mode fragment info (session_id, sequence_num, start, end, text, raw_response, structured_mode, original_text, chat_error)
-    let (dev_frag_tx, dev_frag_rx) = mpsc::channel::<(String, u64, usize, usize, String, String, bool, Option<String>, Option<String>)>();
+    // Channel for dev mode fragment info (session_id, sequence_num, start, end, text, raw_response, output_mode, original_text, chat_error)
+    let (dev_frag_tx, dev_frag_rx) = mpsc::channel::<(String, u64, usize, usize, String, String, u8, Option<String>, Option<String>)>();
 
     // Channel for dev mode typing events (session_id, event_type, text, char_count, sequence_num, success, error)
     let (dev_typing_tx, dev_typing_rx) =
@@ -3363,8 +3435,13 @@ fn run_openai(
                 OPENAI_PROMPT.to_string()
             };
 
-            if job.structured_mode {
-                println!("[{}] [WORKER] Structured MD mode enabled (will use GPT-4.1 Chat API)", timestamp());
+            let mode_name = match job.output_mode {
+                OUTPUT_MODE_TRANSLATE => "translate (English)",
+                OUTPUT_MODE_STRUCTURED => "structured (same language)",
+                _ => "plain",
+            };
+            if job.output_mode != OUTPUT_MODE_PLAIN {
+                println!("[{}] [WORKER] Mode: {} (will use GPT-4.1 Chat API)", timestamp(), mode_name);
             }
 
             let resampled = resample_48k_to_16k(&job.samples);
@@ -3466,113 +3543,184 @@ fn run_openai(
                                 )
                         };
 
-                        // Two-stage typing for structured mode, single for normal mode
-                        let (processed_text, chat_api_error) = if job.structured_mode {
-                            // Stage 1: Send original transcription immediately
-                            println!(
-                                "\n[{}] ═══════════════════════════════════════════════════════════",
-                                timestamp()
-                            );
-                            println!("[TRANSCRIPTION #{} - ORIGINAL]", job.sequence_num);
-                            println!("{}", transcribed_text);
-                            println!("═══════════════════════════════════════════════════════════\n");
+                        // Process based on output mode
+                        let (processed_text, chat_api_error) = match job.output_mode {
+                            OUTPUT_MODE_TRANSLATE => {
+                                // TRANSLATE MODE: Original + Translation + Summary+Structure (English)
 
-                            if let Err(e) = result_tx.send(TranscriptionOutput {
-                                text: transcribed_text.clone(),
-                                is_continuation,
-                                sequence_num: job.sequence_num,
-                            }) {
-                                eprintln!(
-                                    "[{}] [WORKER] ✗ Failed to send original to output: {}",
-                                    timestamp(),
-                                    e
+                                // Stage 1: Send original transcription immediately
+                                println!(
+                                    "\n[{}] ═══════════════════════════════════════════════════════════",
+                                    timestamp()
                                 );
-                            }
+                                println!("[TRANSCRIPTION #{} - ORIGINAL]", job.sequence_num);
+                                println!("{}", transcribed_text);
+                                println!("═══════════════════════════════════════════════════════════\n");
 
-                            // Stage 2: Call GPT-4.1 for structuring
-                            println!(
-                                "[{}] [WORKER] Structured mode: calling GPT-4.1 Chat API...",
-                                timestamp()
-                            );
-                            match structure_text_with_chat_api(&config_for_worker, &transcribed_text) {
-                                Ok(structured) => {
-                                    println!(
-                                        "[{}] [WORKER] ✓ Structured output ready ({} chars)",
-                                        timestamp(),
-                                        structured.len()
-                                    );
+                                if let Err(e) = result_tx.send(TranscriptionOutput {
+                                    text: transcribed_text.clone(),
+                                    is_continuation,
+                                    sequence_num: job.sequence_num,
+                                }) {
+                                    eprintln!("[{}] [WORKER] ✗ Failed to send original: {}", timestamp(), e);
+                                }
 
-                                    // Print structured for console
-                                    println!(
-                                        "\n[{}] ═══════════════════════════════════════════════════════════",
-                                        timestamp()
-                                    );
-                                    println!("[TRANSCRIPTION #{} - STRUCTURED]", job.sequence_num);
-                                    println!("{}", structured);
-                                    println!("═══════════════════════════════════════════════════════════\n");
+                                // Stage 2: Run translation and structuring in PARALLEL
+                                println!("[{}] [WORKER] Translate mode: launching parallel API calls...", timestamp());
 
-                                    // Type structured output directly (bypass channel to avoid sequence_num conflict)
-                                    // Small delay to let original finish typing
-                                    std::thread::sleep(Duration::from_millis(100));
+                                let config_for_translate = config_for_worker.clone();
+                                let config_for_structure = config_for_worker.clone();
+                                let text_for_translate = transcribed_text.clone();
+                                let text_for_structure = transcribed_text.clone();
 
-                                    let structured_with_separator = format!("\n\n----------\n{}", structured);
-                                    match type_text(&structured_with_separator) {
-                                        Ok(_) => {
-                                            println!(
-                                                "[{}] [WORKER] ✓ Structured text typed ({} chars)",
-                                                timestamp(),
-                                                structured_with_separator.len()
-                                            );
+                                // Use scoped threads for parallel execution
+                                let (translation_result, structure_result) = std::thread::scope(|s| {
+                                    let translate_handle = s.spawn(|| {
+                                        translate_to_english(&config_for_translate, &text_for_translate)
+                                    });
+                                    let structure_handle = s.spawn(|| {
+                                        structure_text_english(&config_for_structure, &text_for_structure)
+                                    });
+
+                                    (translate_handle.join(), structure_handle.join())
+                                });
+
+                                // Wait for original to finish typing
+                                std::thread::sleep(Duration::from_millis(100));
+
+                                // Stage 3: Type translation first
+                                let mut combined = transcribed_text.clone();
+                                let mut api_error: Option<String> = None;
+
+                                match translation_result {
+                                    Ok(Ok(translation)) => {
+                                        println!(
+                                            "\n[{}] ═══════════════════════════════════════════════════════════",
+                                            timestamp()
+                                        );
+                                        println!("[TRANSLATION]");
+                                        println!("{}", translation);
+                                        println!("═══════════════════════════════════════════════════════════\n");
+
+                                        let translation_with_separator = format!("\n\n----------\n{}", translation);
+                                        if let Err(e) = type_text(&translation_with_separator) {
+                                            eprintln!("[{}] [WORKER] ✗ Failed to type translation: {}", timestamp(), e);
                                         }
-                                        Err(e) => {
-                                            eprintln!(
-                                                "[{}] [WORKER] ✗ Failed to type structured text: {}",
-                                                timestamp(),
-                                                e
-                                            );
+                                        combined.push_str(&translation_with_separator);
+                                    }
+                                    Ok(Err(e)) => {
+                                        eprintln!("[{}] [WORKER] ⚠ Translation failed: {}", timestamp(), e);
+                                        api_error = Some(e);
+                                    }
+                                    Err(_) => {
+                                        eprintln!("[{}] [WORKER] ✗ Translation thread panicked", timestamp());
+                                    }
+                                }
+
+                                // Stage 4: Type structured content
+                                match structure_result {
+                                    Ok(Ok(structured)) => {
+                                        println!(
+                                            "\n[{}] ═══════════════════════════════════════════════════════════",
+                                            timestamp()
+                                        );
+                                        println!("[SUMMARY+STRUCTURE (EN)]");
+                                        println!("{}", structured);
+                                        println!("═══════════════════════════════════════════════════════════\n");
+
+                                        let structured_with_separator = format!("\n\n----------\n{}", structured);
+                                        if let Err(e) = type_text(&structured_with_separator) {
+                                            eprintln!("[{}] [WORKER] ✗ Failed to type structured: {}", timestamp(), e);
+                                        }
+                                        combined.push_str(&structured_with_separator);
+                                    }
+                                    Ok(Err(e)) => {
+                                        eprintln!("[{}] [WORKER] ⚠ Structure failed: {}", timestamp(), e);
+                                        if api_error.is_none() {
+                                            api_error = Some(e);
                                         }
                                     }
+                                    Err(_) => {
+                                        eprintln!("[{}] [WORKER] ✗ Structure thread panicked", timestamp());
+                                    }
+                                }
 
-                                    // Combined for logging
-                                    (format!("{}\n\n----------\n{}", transcribed_text, structured), None)
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "[{}] [WORKER] ⚠ Chat API failed: {}",
-                                        timestamp(),
-                                        e
-                                    );
-                                    // Original already sent, nothing more to do
-                                    (transcribed_text.clone(), Some(e))
-                                }
+                                (combined, api_error)
                             }
-                        } else {
-                            // Normal mode: single send
-                            println!(
-                                "\n[{}] ═══════════════════════════════════════════════════════════",
-                                timestamp()
-                            );
-                            println!("[TRANSCRIPTION #{}]", job.sequence_num);
-                            println!("{}", transcribed_text);
-                            println!("═══════════════════════════════════════════════════════════\n");
 
-                            if let Err(e) = result_tx.send(TranscriptionOutput {
-                                text: transcribed_text.clone(),
-                                is_continuation,
-                                sequence_num: job.sequence_num,
-                            }) {
-                                eprintln!(
-                                    "[{}] [WORKER] ✗ Failed to send to output thread: {}",
-                                    timestamp(),
-                                    e
+                            OUTPUT_MODE_STRUCTURED => {
+                                // STRUCTURED MODE: Original + Summary+Structure (same language)
+
+                                // Stage 1: Send original transcription immediately
+                                println!(
+                                    "\n[{}] ═══════════════════════════════════════════════════════════",
+                                    timestamp()
                                 );
+                                println!("[TRANSCRIPTION #{} - ORIGINAL]", job.sequence_num);
+                                println!("{}", transcribed_text);
+                                println!("═══════════════════════════════════════════════════════════\n");
+
+                                if let Err(e) = result_tx.send(TranscriptionOutput {
+                                    text: transcribed_text.clone(),
+                                    is_continuation,
+                                    sequence_num: job.sequence_num,
+                                }) {
+                                    eprintln!("[{}] [WORKER] ✗ Failed to send original: {}", timestamp(), e);
+                                }
+
+                                // Stage 2: Call GPT-4.1 for summary+structure
+                                println!("[{}] [WORKER] Structured mode: calling GPT-4.1...", timestamp());
+
+                                match structure_text_with_chat_api(&config_for_worker, &transcribed_text) {
+                                    Ok(structured) => {
+                                        println!(
+                                            "\n[{}] ═══════════════════════════════════════════════════════════",
+                                            timestamp()
+                                        );
+                                        println!("[SUMMARY+STRUCTURE]");
+                                        println!("{}", structured);
+                                        println!("═══════════════════════════════════════════════════════════\n");
+
+                                        // Type structured output directly
+                                        std::thread::sleep(Duration::from_millis(100));
+                                        let structured_with_separator = format!("\n\n----------\n{}", structured);
+                                        if let Err(e) = type_text(&structured_with_separator) {
+                                            eprintln!("[{}] [WORKER] ✗ Failed to type structured: {}", timestamp(), e);
+                                        }
+
+                                        (format!("{}\n\n----------\n{}", transcribed_text, structured), None)
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[{}] [WORKER] ⚠ Chat API failed: {}", timestamp(), e);
+                                        (transcribed_text.clone(), Some(e))
+                                    }
+                                }
                             }
-                            (transcribed_text.clone(), None)
+
+                            _ => {
+                                // PLAIN MODE: Just send transcribed text
+                                println!(
+                                    "\n[{}] ═══════════════════════════════════════════════════════════",
+                                    timestamp()
+                                );
+                                println!("[TRANSCRIPTION #{}]", job.sequence_num);
+                                println!("{}", transcribed_text);
+                                println!("═══════════════════════════════════════════════════════════\n");
+
+                                if let Err(e) = result_tx.send(TranscriptionOutput {
+                                    text: transcribed_text.clone(),
+                                    is_continuation,
+                                    sequence_num: job.sequence_num,
+                                }) {
+                                    eprintln!("[{}] [WORKER] ✗ Failed to send: {}", timestamp(), e);
+                                }
+                                (transcribed_text.clone(), None)
+                            }
                         };
 
                         // Send fragment info for dev report (with session_id for filtering)
                         let sid = session_id_for_worker.lock().unwrap().clone();
-                        let original_text = if job.structured_mode {
+                        let original_text = if job.output_mode != OUTPUT_MODE_PLAIN {
                             Some(transcribed_text.clone())
                         } else {
                             None
@@ -3584,7 +3732,7 @@ fn run_openai(
                             job.end_sample,
                             processed_text,
                             final_raw_response,
-                            job.structured_mode,
+                            job.output_mode,
                             original_text,
                             chat_api_error,
                         ));
@@ -3610,7 +3758,7 @@ fn run_openai(
                             job.end_sample,
                             String::new(), // empty text (skipped)
                             final_raw_response,
-                            job.structured_mode,
+                            job.output_mode,
                             None,
                             None,
                         ));
@@ -3633,7 +3781,7 @@ fn run_openai(
                         job.end_sample,
                         String::new(),
                         format!("{{\"error\": \"{}\"}}", e.replace('"', "\\\"")),
-                        job.structured_mode,
+                        job.output_mode,
                         None,
                         Some(e),
                     ));
@@ -3817,12 +3965,12 @@ fn run_openai(
     // Dev mode: Fragment collector thread (filters by session_id)
     let dev_report_for_collector = Arc::clone(&dev_report);
     thread::spawn(move || {
-        for (msg_session_id, seq, start, end, text, raw_response, structured_mode, original_text, chat_error) in dev_frag_rx {
+        for (msg_session_id, seq, start, end, text, raw_response, output_mode, original_text, chat_error) in dev_frag_rx {
             let mut report_guard = dev_report_for_collector.lock().unwrap();
             if let Some(ref mut report) = *report_guard {
                 // Only add fragment if it belongs to current session
                 if report.session_id == msg_session_id {
-                    report.add_fragment_with_raw(seq, start, end, text, raw_response, structured_mode, original_text, chat_error);
+                    report.add_fragment_with_raw(seq, start, end, text, raw_response, output_mode, original_text, chat_error);
                 } else {
                     println!(
                         "[DEV] Dropping stale fragment from session {} (current: {})",
@@ -3875,7 +4023,7 @@ fn run_openai(
     let job_tx_vad = job_tx.clone();
     let dev_vad_tx_for_vad = dev_vad_tx.clone();
     let session_id_for_vad = Arc::clone(&current_session_id);
-    let structured_mode_for_vad = Arc::clone(&structured_mode);
+    let output_mode_for_vad = Arc::clone(&output_mode);
 
     thread::spawn(move || {
         use std::sync::atomic::Ordering;
@@ -3962,13 +4110,13 @@ fn run_openai(
                 let sid = session_id_for_vad.lock().unwrap().clone();
                 let _ = dev_vad_tx_for_vad.send((sid, "phrase_detected".to_string(), log_details));
 
-                let is_structured = structured_mode_for_vad.load(Ordering::SeqCst);
+                let current_mode = output_mode_for_vad.load(Ordering::SeqCst);
                 let _ = job_tx_vad.send(TranscriptionJob {
                     samples: phrase_samples,
                     sequence_num: seq,
                     start_sample: start_pos,
                     end_sample: end_pos,
-                    structured_mode: is_structured,
+                    output_mode: current_mode,
                 });
             }
         }
@@ -3987,7 +4135,7 @@ fn run_openai(
     let session_id_callback = Arc::clone(&current_session_id);
     let last_phrase_callback = Arc::clone(&last_phrase);
     let dev_vad_tx_callback = dev_vad_tx;
-    let structured_mode_clone = Arc::clone(&structured_mode);
+    let output_mode_clone = Arc::clone(&output_mode);
 
     // Debounce state
     let key_debounce = Arc::new(AtomicBool::new(false));
@@ -3997,22 +4145,32 @@ fn run_openai(
         use std::sync::atomic::Ordering;
 
         match event.event_type {
-            EventType::KeyPress(key) if key == target_key || target_key2 == Some(key) => {
+            EventType::KeyPress(key) if key == target_key || target_key2 == Some(key) || target_key3 == Some(key) => {
                 if key_debounce_clone.swap(true, Ordering::SeqCst) {
                     return; // Already pressed, ignore repeat
                 }
 
-                // Set structured mode based on which key was pressed
-                let is_structured = target_key2 == Some(key);
-                structured_mode_clone.store(is_structured, Ordering::SeqCst);
+                // Determine output mode based on which key was pressed
+                let mode = if target_key3 == Some(key) {
+                    OUTPUT_MODE_TRANSLATE // Left Cmd = translate to English
+                } else if target_key2 == Some(key) {
+                    OUTPUT_MODE_STRUCTURED // Right Cmd = structured (same language)
+                } else {
+                    OUTPUT_MODE_PLAIN // Fn = plain transcription
+                };
+                output_mode_clone.store(mode, Ordering::SeqCst);
 
                 // Debug: log which key was pressed and mode
+                let mode_name = match mode {
+                    OUTPUT_MODE_TRANSLATE => "translate",
+                    OUTPUT_MODE_STRUCTURED => "structured",
+                    _ => "plain",
+                };
                 println!(
-                    "[{}] [HOTKEY] Pressed: {:?}, target_key2={:?}, is_structured={}",
+                    "[{}] [HOTKEY] Pressed: {:?}, mode={}",
                     timestamp(),
                     key,
-                    target_key2,
-                    is_structured
+                    mode_name
                 );
 
                 // Check if not already recording
@@ -4074,7 +4232,7 @@ fn run_openai(
                     // No start beep - it would be captured in the recording
                 }
             }
-            EventType::KeyRelease(key) if key == target_key || target_key2 == Some(key) => {
+            EventType::KeyRelease(key) if key == target_key || target_key2 == Some(key) || target_key3 == Some(key) => {
                 key_debounce_clone.store(false, Ordering::SeqCst);
 
                 // Check if currently recording
@@ -4153,13 +4311,13 @@ fn run_openai(
                             log_details,
                         ));
 
-                        let is_structured = structured_mode_clone.load(Ordering::SeqCst);
+                        let current_mode = output_mode_clone.load(Ordering::SeqCst);
                         let _ = job_tx_callback.send(TranscriptionJob {
                             samples: phrase_samples,
                             sequence_num: seq,
                             start_sample: start_pos,
                             end_sample: end_pos,
-                            structured_mode: is_structured,
+                            output_mode: current_mode,
                         });
                     } else {
                         println!("[{}] No remaining audio to transcribe", timestamp());
