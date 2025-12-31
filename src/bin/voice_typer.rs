@@ -1182,12 +1182,14 @@ STYLE:
 - Tighter wording, same meaning
 - Reader scans in 5 seconds
 
-TELEGRAM SYNTAX:
-**bold** = headers, key terms, actions
-*italic* = secondary emphasis
+TELEGRAM SYNTAX (strict):
+**bold** = headers, key terms, actions (ALWAYS double asterisks)
+_italic_ = secondary emphasis (underscores, NOT single asterisks)
 `code` = commands, paths, functions
 - bullets for lists
 1. 2. for sequences
+
+CRITICAL: Never use single asterisks (*text*) - Telegram ignores them. Only **double**.
 
 LISTS:
 - Every list MUST have **bold header** above it
