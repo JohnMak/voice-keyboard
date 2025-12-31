@@ -3346,13 +3346,13 @@ fn run_openai(
     );
 
     if let Some(ref key2) = hotkey2 {
-        println!("[HOTKEY] Primary: {} (normal), Secondary: {} (structured), Tertiary: Left Cmd (translate)", hotkey.name(), key2.name());
+        println!("[HOTKEY] Primary: {} (normal), Secondary: {} (structured), Tertiary: Right Option (translate)", hotkey.name(), key2.name());
     }
 
     let config = Arc::new(openai_config);
     let target_key = hotkey.to_rdev_key();
     let target_key2 = hotkey2.map(|k| k.to_rdev_key()); // Right Cmd = structured
-    let target_key3 = Some(Key::MetaLeft); // Left Cmd = translate to English
+    let target_key3 = Some(Key::AltGr); // Right Option/Alt = translate to English
 
     let state: Arc<Mutex<RecordingState>> = Arc::new(Mutex::new(RecordingState::Idle));
     let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
@@ -4152,7 +4152,7 @@ fn run_openai(
 
                 // Determine output mode based on which key was pressed
                 let mode = if target_key3 == Some(key) {
-                    OUTPUT_MODE_TRANSLATE // Left Cmd = translate to English
+                    OUTPUT_MODE_TRANSLATE // Right Option = translate to English
                 } else if target_key2 == Some(key) {
                     OUTPUT_MODE_STRUCTURED // Right Cmd = structured (same language)
                 } else {
