@@ -20,9 +20,16 @@ use std::fs::{self, File};
 use std::io::Cursor;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+
+// Global mutex to prevent concurrent typing from different threads
+static TYPING_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn get_typing_mutex() -> &'static Mutex<()> {
+    TYPING_MUTEX.get_or_init(|| Mutex::new(()))
+}
 
 // Cross-platform imports
 use arboard::Clipboard;
@@ -2531,7 +2538,13 @@ fn insert_text(text: &str, method: InputMethod) -> Result<(), String> {
 }
 
 /// Type text using keyboard simulation (cross-platform via enigo)
+/// Uses global mutex to prevent concurrent typing from different threads
 fn type_text(text: &str) -> Result<(), String> {
+    // Acquire typing mutex to prevent race conditions between threads
+    let _guard = get_typing_mutex()
+        .lock()
+        .map_err(|e| format!("Failed to acquire typing mutex: {}", e))?;
+
     // macOS: Use CGEvent for better Unicode support
     #[cfg(target_os = "macos")]
     {
@@ -2616,7 +2629,13 @@ fn get_frontmost_app_pid() -> Option<i32> {
 }
 
 /// Delete N characters by sending backspace keys (cross-platform)
+/// Uses global mutex to prevent concurrent keyboard operations
 fn delete_chars(count: usize) -> Result<(), String> {
+    // Acquire typing mutex to prevent race conditions
+    let _guard = get_typing_mutex()
+        .lock()
+        .map_err(|e| format!("Failed to acquire typing mutex: {}", e))?;
+
     let mut enigo = Enigo::new(&Settings::default()).map_err(|e| format!("Enigo error: {}", e))?;
 
     for _ in 0..count {
@@ -3494,7 +3513,7 @@ fn run_openai(
                                     // Small delay to let original finish typing
                                     std::thread::sleep(Duration::from_millis(100));
 
-                                    let structured_with_separator = format!("\n\n{}", structured);
+                                    let structured_with_separator = format!("\n\n----------\n{}", structured);
                                     match type_text(&structured_with_separator) {
                                         Ok(_) => {
                                             println!(
@@ -3513,7 +3532,7 @@ fn run_openai(
                                     }
 
                                     // Combined for logging
-                                    (format!("{}\n\n{}", transcribed_text, structured), None)
+                                    (format!("{}\n\n----------\n{}", transcribed_text, structured), None)
                                 }
                                 Err(e) => {
                                     eprintln!(
