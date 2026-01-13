@@ -44,9 +44,9 @@ use std::process::Command;
 const MIN_RECORDING_MS: u64 = 300;
 
 /// Output modes for transcription
-const OUTPUT_MODE_PLAIN: u8 = 0;      // Normal transcription only
+const OUTPUT_MODE_PLAIN: u8 = 0; // Normal transcription only
 const OUTPUT_MODE_STRUCTURED: u8 = 1; // Original + Summary + Structure (same language)
-const OUTPUT_MODE_TRANSLATE: u8 = 2;  // Original + Translation + Summary + Structure (English)
+const OUTPUT_MODE_TRANSLATE: u8 = 2; // Original + Translation + Summary + Structure (English)
 
 /// Dev mode: collect reports for analysis
 /// Set VOICE_KEYBOARD_DEV=1 to enable
@@ -113,7 +113,6 @@ IT-термины на английском: Git, Docker, API, React, TypeScript
 Если фраза обрывается — заканчивай многоточием, но НЕ отбрасывай её. \
 Разбивай текст на абзацы (пустая строка), если меняется тема или смысловой блок.";
 
-
 // ============================================================================
 // Audio feedback and constants
 // ============================================================================
@@ -121,6 +120,8 @@ IT-термины на английском: Git, Docker, API, React, TypeScript
 /// MIDI note frequencies for beep sounds
 const BEEP_STOP_FREQ: f32 = 440.0; // A4 - lower pitch for stop
 const BEEP_STOP_DURATION_MS: u64 = 100; // Normal length for end beep
+const BEEP_RETRY_FREQ: f32 = 330.0; // E4 - even lower pitch for retry
+const BEEP_RETRY_DURATION_MS: u64 = 80; // Shorter beep for retry
 const BEEP_DEFAULT_VOLUME: f32 = 0.1; // 10% volume (0.0 - 1.0)
 
 /// Global volume setting for beep sounds (0.0 = silent, 1.0 = max)
@@ -861,12 +862,14 @@ impl OpenAIConfig {
 
 /// Maximum number of retries for API errors
 const API_MAX_RETRIES: u32 = 3;
-/// Maximum number of retries for network errors (longer, to wait for connection restore)
-const API_NETWORK_MAX_RETRIES: u32 = 30;
+/// Maximum number of retries for network errors - now 0 to stop immediately and wait for user
+const API_NETWORK_MAX_RETRIES: u32 = 0;
 /// Base delay between retries in milliseconds
 const API_RETRY_DELAY_MS: u64 = 1000;
 /// Delay between network retries (longer)
 const API_NETWORK_RETRY_DELAY_MS: u64 = 2000;
+/// Prefix for connection lost errors (used to identify retryable errors)
+const CONNECTION_LOST_PREFIX: &str = "CONNECTION_LOST:";
 
 /// Check if error is a network connectivity error
 fn is_network_error(error: &str) -> bool {
@@ -932,29 +935,19 @@ fn transcribe_openai_internal(
                     return Err(e);
                 }
 
-                // Check if this is a network error - use extended retry
+                // Check if this is a network error - stop immediately and wait for user retry
                 if is_network_error(&e) {
-                    network_retry_count += 1;
-                    if network_retry_count >= API_NETWORK_MAX_RETRIES {
-                        eprintln!(
-                            "[{}] ✗ Network error, giving up after {} retries: {}",
-                            timestamp(),
-                            network_retry_count,
-                            e
-                        );
-                        return Err(format!(
-                            "Network error after {} retries: {}",
-                            network_retry_count, e
-                        ));
-                    }
-                    eprintln!(
-                        "[{}] ⚠ Network error (retry {}/{}): {}",
-                        timestamp(),
-                        network_retry_count,
-                        API_NETWORK_MAX_RETRIES,
-                        e
-                    );
-                    continue;
+                    // Print prominent CONNECTION LOST message
+                    eprintln!();
+                    eprintln!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+                    eprintln!("!!!                  CONNECTION LOST                     !!!");
+                    eprintln!("!!!     Please check your network connection.            !!!");
+                    eprintln!("!!!     Press hotkey again to retry.                     !!!");
+                    eprintln!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+                    eprintln!();
+
+                    // Return with special prefix so caller knows this is retryable
+                    return Err(format!("{}{}", CONNECTION_LOST_PREFIX, e));
                 }
 
                 // Regular API error - limited retries
@@ -984,14 +977,25 @@ fn transcribe_openai_internal(
                         Err(retry_e) => {
                             last_error = retry_e.clone();
                             if is_network_error(&retry_e) {
-                                // Switch to network retry mode
-                                network_retry_count = 1;
+                                // Network error - stop immediately and wait for user retry
+                                eprintln!();
                                 eprintln!(
-                                    "[{}] ⚠ Switched to network retry mode: {}",
-                                    timestamp(),
-                                    retry_e
+                                    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
                                 );
-                                break;
+                                eprintln!(
+                                    "!!!                  CONNECTION LOST                     !!!"
+                                );
+                                eprintln!(
+                                    "!!!     Please check your network connection.            !!!"
+                                );
+                                eprintln!(
+                                    "!!!     Press hotkey again to retry.                     !!!"
+                                );
+                                eprintln!(
+                                    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+                                );
+                                eprintln!();
+                                return Err(format!("{}{}", CONNECTION_LOST_PREFIX, retry_e));
                             }
                             eprintln!(
                                 "[{}] API error (attempt {}): {}",
@@ -1032,7 +1036,8 @@ fn transcribe_openai_single_attempt(
     // Generate deterministic low-amplitude noise pattern
     for i in 0..PADDING_SAMPLES {
         // Simple deterministic noise using sample index
-        let noise = ((i as f32 * 0.1).sin() * 0.5 + (i as f32 * 0.23).cos() * 0.5) * NOISE_AMPLITUDE;
+        let noise =
+            ((i as f32 * 0.1).sin() * 0.5 + (i as f32 * 0.23).cos() * 0.5) * NOISE_AMPLITUDE;
         padded_samples.push(noise);
     }
     let samples = &padded_samples[..];
@@ -1265,7 +1270,12 @@ NO intro, NO meta - just content.";
 
 /// Call GPT-4.1 Chat Completions API with custom system prompt
 /// Uses same API key and base URL as transcription (for proxy compatibility)
-fn call_chat_api(config: &OpenAIConfig, system_prompt: &str, text: &str, task_name: &str) -> Result<String, String> {
+fn call_chat_api(
+    config: &OpenAIConfig,
+    system_prompt: &str,
+    text: &str,
+    task_name: &str,
+) -> Result<String, String> {
     let client = Client::new();
 
     // Convert base URL from audio API to chat completions
@@ -1291,7 +1301,12 @@ fn call_chat_api(config: &OpenAIConfig, system_prompt: &str, text: &str, task_na
         "max_tokens": 4096
     });
 
-    println!("[{}] [CHAT] {} ({} chars)...", timestamp(), task_name, text.len());
+    println!(
+        "[{}] [CHAT] {} ({} chars)...",
+        timestamp(),
+        task_name,
+        text.len()
+    );
 
     let body = serde_json::to_string(&request_body)
         .map_err(|e| format!("Failed to serialize request: {}", e))?;
@@ -1327,19 +1342,34 @@ fn call_chat_api(config: &OpenAIConfig, system_prompt: &str, text: &str, task_na
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("No content in Chat API response: {}", response_text))?;
 
-    println!("[{}] [CHAT] {} complete ({} chars)", timestamp(), task_name, content.len());
+    println!(
+        "[{}] [CHAT] {} complete ({} chars)",
+        timestamp(),
+        task_name,
+        content.len()
+    );
 
     Ok(content.to_string())
 }
 
 /// Helper: Structure text with same-language prompt
 fn structure_text_with_chat_api(config: &OpenAIConfig, text: &str) -> Result<String, String> {
-    call_chat_api(config, CHAT_SUMMARY_STRUCTURE_PROMPT, text, "Summary+Structure")
+    call_chat_api(
+        config,
+        CHAT_SUMMARY_STRUCTURE_PROMPT,
+        text,
+        "Summary+Structure",
+    )
 }
 
 /// Helper: Structure text with English output prompt
 fn structure_text_english(config: &OpenAIConfig, text: &str) -> Result<String, String> {
-    call_chat_api(config, CHAT_SUMMARY_STRUCTURE_ENGLISH_PROMPT, text, "Summary+Structure (EN)")
+    call_chat_api(
+        config,
+        CHAT_SUMMARY_STRUCTURE_ENGLISH_PROMPT,
+        text,
+        "Summary+Structure (EN)",
+    )
 }
 
 /// Helper: Translate text to English
@@ -1402,7 +1432,9 @@ fn print_usage() {
         default_key.name()
     );
     println!("                     Options: fn, ctrl, ctrlright, alt, altright, shift, cmd");
-    println!("  --key2 <KEY>       Secondary hotkey for structured Markdown output (default: cmdright)");
+    println!(
+        "  --key2 <KEY>       Secondary hotkey for structured Markdown output (default: cmdright)"
+    );
     println!("                     Use 'none' to disable. Same key options as --key");
     println!("  --volume <0.0-1.0> Beep sounds volume (default: 0.1 = 10%)");
     println!("                     Use 0 to disable sounds, 1.0 for max volume");
@@ -2034,7 +2066,10 @@ fn main() {
     println!("Platform: {}", std::env::consts::OS);
     println!("Hold {} to record, release to transcribe", hotkey.name());
     if let Some(ref key2) = hotkey2 {
-        println!("Hold {} to record → structured Markdown output", key2.name());
+        println!(
+            "Hold {} to record → structured Markdown output",
+            key2.name()
+        );
     }
     println!("Input method: {}", input_mode_str);
     println!("Press Ctrl+C to exit\n");
@@ -2051,7 +2086,13 @@ fn main() {
 
                 if openai_config.test_connection() {
                     println!("OK\n");
-                    run_openai(openai_config, input_method, hotkey, hotkey2, config.streaming);
+                    run_openai(
+                        openai_config,
+                        input_method,
+                        hotkey,
+                        hotkey2,
+                        config.streaming,
+                    );
                 } else {
                     println!("FAILED");
                     eprintln!("\nCannot connect to OpenAI API.");
@@ -2871,6 +2912,16 @@ fn play_stop_beep() {
     play_beep(BEEP_STOP_FREQ, BEEP_STOP_DURATION_MS);
 }
 
+/// Play double beep to indicate retry of previous failed request
+fn play_retry_beep() {
+    use std::thread;
+    thread::spawn(|| {
+        play_beep_blocking(BEEP_RETRY_FREQ, BEEP_RETRY_DURATION_MS);
+        thread::sleep(Duration::from_millis(60));
+        play_beep_blocking(BEEP_RETRY_FREQ, BEEP_RETRY_DURATION_MS);
+    });
+}
+
 // ============================================================================
 // Utilities
 // ============================================================================
@@ -3384,7 +3435,17 @@ fn run_openai(
     let current_session_id: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 
     // Channel for dev mode fragment info (session_id, sequence_num, start, end, text, raw_response, output_mode, original_text, chat_error)
-    let (dev_frag_tx, dev_frag_rx) = mpsc::channel::<(String, u64, usize, usize, String, String, u8, Option<String>, Option<String>)>();
+    let (dev_frag_tx, dev_frag_rx) = mpsc::channel::<(
+        String,
+        u64,
+        usize,
+        usize,
+        String,
+        String,
+        u8,
+        Option<String>,
+        Option<String>,
+    )>();
 
     // Channel for dev mode typing events (session_id, event_type, text, char_count, sequence_num, success, error)
     let (dev_typing_tx, dev_typing_rx) =
@@ -3396,6 +3457,9 @@ fn run_openai(
     // VAD for phrase detection
     let vad: Arc<Mutex<VadPhraseDetector>> = Arc::new(Mutex::new(VadPhraseDetector::new()));
 
+    // Pending retry job - saved when network error occurs, retried on next hotkey press
+    let pending_retry_job: Arc<Mutex<Option<TranscriptionJob>>> = Arc::new(Mutex::new(None));
+
     let stream = start_recording_persistent(Arc::clone(&samples), Arc::clone(&is_recording))
         .expect("Failed to start audio recording");
 
@@ -3405,6 +3469,7 @@ fn run_openai(
     let processing_count_worker = Arc::clone(&processing_count);
     let dev_frag_tx_worker = dev_frag_tx;
     let session_id_for_worker = Arc::clone(&current_session_id);
+    let pending_retry_for_worker = Arc::clone(&pending_retry_job);
 
     thread::spawn(move || {
         use std::sync::atomic::Ordering;
@@ -3441,7 +3506,11 @@ fn run_openai(
                 _ => "plain",
             };
             if job.output_mode != OUTPUT_MODE_PLAIN {
-                println!("[{}] [WORKER] Mode: {} (will use GPT-4.1 Chat API)", timestamp(), mode_name);
+                println!(
+                    "[{}] [WORKER] Mode: {} (will use GPT-4.1 Chat API)",
+                    timestamp(),
+                    mode_name
+                );
             }
 
             let resampled = resample_48k_to_16k(&job.samples);
@@ -3555,18 +3624,27 @@ fn run_openai(
                                 );
                                 println!("[TRANSCRIPTION #{} - ORIGINAL]", job.sequence_num);
                                 println!("{}", transcribed_text);
-                                println!("═══════════════════════════════════════════════════════════\n");
+                                println!(
+                                    "═══════════════════════════════════════════════════════════\n"
+                                );
 
                                 if let Err(e) = result_tx.send(TranscriptionOutput {
                                     text: transcribed_text.clone(),
                                     is_continuation,
                                     sequence_num: job.sequence_num,
                                 }) {
-                                    eprintln!("[{}] [WORKER] ✗ Failed to send original: {}", timestamp(), e);
+                                    eprintln!(
+                                        "[{}] [WORKER] ✗ Failed to send original: {}",
+                                        timestamp(),
+                                        e
+                                    );
                                 }
 
                                 // Stage 2: Run translation and structuring in PARALLEL
-                                println!("[{}] [WORKER] Translate mode: launching parallel API calls...", timestamp());
+                                println!(
+                                    "[{}] [WORKER] Translate mode: launching parallel API calls...",
+                                    timestamp()
+                                );
 
                                 let config_for_translate = config_for_worker.clone();
                                 let config_for_structure = config_for_worker.clone();
@@ -3574,16 +3652,23 @@ fn run_openai(
                                 let text_for_structure = transcribed_text.clone();
 
                                 // Use scoped threads for parallel execution
-                                let (translation_result, structure_result) = std::thread::scope(|s| {
-                                    let translate_handle = s.spawn(|| {
-                                        translate_to_english(&config_for_translate, &text_for_translate)
-                                    });
-                                    let structure_handle = s.spawn(|| {
-                                        structure_text_english(&config_for_structure, &text_for_structure)
-                                    });
+                                let (translation_result, structure_result) =
+                                    std::thread::scope(|s| {
+                                        let translate_handle = s.spawn(|| {
+                                            translate_to_english(
+                                                &config_for_translate,
+                                                &text_for_translate,
+                                            )
+                                        });
+                                        let structure_handle = s.spawn(|| {
+                                            structure_text_english(
+                                                &config_for_structure,
+                                                &text_for_structure,
+                                            )
+                                        });
 
-                                    (translate_handle.join(), structure_handle.join())
-                                });
+                                        (translate_handle.join(), structure_handle.join())
+                                    });
 
                                 // Wait for original to finish typing
                                 std::thread::sleep(Duration::from_millis(100));
@@ -3602,18 +3687,30 @@ fn run_openai(
                                         println!("{}", translation);
                                         println!("═══════════════════════════════════════════════════════════\n");
 
-                                        let translation_with_separator = format!("\n\n----------\n{}", translation);
+                                        let translation_with_separator =
+                                            format!("\n\n----------\n{}", translation);
                                         if let Err(e) = type_text(&translation_with_separator) {
-                                            eprintln!("[{}] [WORKER] ✗ Failed to type translation: {}", timestamp(), e);
+                                            eprintln!(
+                                                "[{}] [WORKER] ✗ Failed to type translation: {}",
+                                                timestamp(),
+                                                e
+                                            );
                                         }
                                         combined.push_str(&translation_with_separator);
                                     }
                                     Ok(Err(e)) => {
-                                        eprintln!("[{}] [WORKER] ⚠ Translation failed: {}", timestamp(), e);
+                                        eprintln!(
+                                            "[{}] [WORKER] ⚠ Translation failed: {}",
+                                            timestamp(),
+                                            e
+                                        );
                                         api_error = Some(e);
                                     }
                                     Err(_) => {
-                                        eprintln!("[{}] [WORKER] ✗ Translation thread panicked", timestamp());
+                                        eprintln!(
+                                            "[{}] [WORKER] ✗ Translation thread panicked",
+                                            timestamp()
+                                        );
                                     }
                                 }
 
@@ -3628,20 +3725,32 @@ fn run_openai(
                                         println!("{}", structured);
                                         println!("═══════════════════════════════════════════════════════════\n");
 
-                                        let structured_with_separator = format!("\n\n----------\n{}", structured);
+                                        let structured_with_separator =
+                                            format!("\n\n----------\n{}", structured);
                                         if let Err(e) = type_text(&structured_with_separator) {
-                                            eprintln!("[{}] [WORKER] ✗ Failed to type structured: {}", timestamp(), e);
+                                            eprintln!(
+                                                "[{}] [WORKER] ✗ Failed to type structured: {}",
+                                                timestamp(),
+                                                e
+                                            );
                                         }
                                         combined.push_str(&structured_with_separator);
                                     }
                                     Ok(Err(e)) => {
-                                        eprintln!("[{}] [WORKER] ⚠ Structure failed: {}", timestamp(), e);
+                                        eprintln!(
+                                            "[{}] [WORKER] ⚠ Structure failed: {}",
+                                            timestamp(),
+                                            e
+                                        );
                                         if api_error.is_none() {
                                             api_error = Some(e);
                                         }
                                     }
                                     Err(_) => {
-                                        eprintln!("[{}] [WORKER] ✗ Structure thread panicked", timestamp());
+                                        eprintln!(
+                                            "[{}] [WORKER] ✗ Structure thread panicked",
+                                            timestamp()
+                                        );
                                     }
                                 }
 
@@ -3658,20 +3767,32 @@ fn run_openai(
                                 );
                                 println!("[TRANSCRIPTION #{} - ORIGINAL]", job.sequence_num);
                                 println!("{}", transcribed_text);
-                                println!("═══════════════════════════════════════════════════════════\n");
+                                println!(
+                                    "═══════════════════════════════════════════════════════════\n"
+                                );
 
                                 if let Err(e) = result_tx.send(TranscriptionOutput {
                                     text: transcribed_text.clone(),
                                     is_continuation,
                                     sequence_num: job.sequence_num,
                                 }) {
-                                    eprintln!("[{}] [WORKER] ✗ Failed to send original: {}", timestamp(), e);
+                                    eprintln!(
+                                        "[{}] [WORKER] ✗ Failed to send original: {}",
+                                        timestamp(),
+                                        e
+                                    );
                                 }
 
                                 // Stage 2: Call GPT-4.1 for summary+structure
-                                println!("[{}] [WORKER] Structured mode: calling GPT-4.1...", timestamp());
+                                println!(
+                                    "[{}] [WORKER] Structured mode: calling GPT-4.1...",
+                                    timestamp()
+                                );
 
-                                match structure_text_with_chat_api(&config_for_worker, &transcribed_text) {
+                                match structure_text_with_chat_api(
+                                    &config_for_worker,
+                                    &transcribed_text,
+                                ) {
                                     Ok(structured) => {
                                         println!(
                                             "\n[{}] ═══════════════════════════════════════════════════════════",
@@ -3683,15 +3804,30 @@ fn run_openai(
 
                                         // Type structured output directly
                                         std::thread::sleep(Duration::from_millis(100));
-                                        let structured_with_separator = format!("\n\n----------\n{}", structured);
+                                        let structured_with_separator =
+                                            format!("\n\n----------\n{}", structured);
                                         if let Err(e) = type_text(&structured_with_separator) {
-                                            eprintln!("[{}] [WORKER] ✗ Failed to type structured: {}", timestamp(), e);
+                                            eprintln!(
+                                                "[{}] [WORKER] ✗ Failed to type structured: {}",
+                                                timestamp(),
+                                                e
+                                            );
                                         }
 
-                                        (format!("{}\n\n----------\n{}", transcribed_text, structured), None)
+                                        (
+                                            format!(
+                                                "{}\n\n----------\n{}",
+                                                transcribed_text, structured
+                                            ),
+                                            None,
+                                        )
                                     }
                                     Err(e) => {
-                                        eprintln!("[{}] [WORKER] ⚠ Chat API failed: {}", timestamp(), e);
+                                        eprintln!(
+                                            "[{}] [WORKER] ⚠ Chat API failed: {}",
+                                            timestamp(),
+                                            e
+                                        );
                                         (transcribed_text.clone(), Some(e))
                                     }
                                 }
@@ -3705,7 +3841,9 @@ fn run_openai(
                                 );
                                 println!("[TRANSCRIPTION #{}]", job.sequence_num);
                                 println!("{}", transcribed_text);
-                                println!("═══════════════════════════════════════════════════════════\n");
+                                println!(
+                                    "═══════════════════════════════════════════════════════════\n"
+                                );
 
                                 if let Err(e) = result_tx.send(TranscriptionOutput {
                                     text: transcribed_text.clone(),
@@ -3765,12 +3903,30 @@ fn run_openai(
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[{}] [WORKER] ✗ Transcription error for #{}: {}",
-                        timestamp(),
-                        job.sequence_num,
-                        e
-                    );
+                    // Check if this is a connection lost error (retryable)
+                    if e.starts_with(CONNECTION_LOST_PREFIX) {
+                        // Save job for retry on next hotkey press
+                        let mut pending = pending_retry_for_worker.lock().unwrap();
+                        *pending = Some(TranscriptionJob {
+                            samples: job.samples.clone(),
+                            sequence_num: job.sequence_num,
+                            start_sample: job.start_sample,
+                            end_sample: job.end_sample,
+                            output_mode: job.output_mode,
+                        });
+                        println!(
+                            "[{}] [WORKER] Job #{} saved for retry (press hotkey to retry)",
+                            timestamp(),
+                            job.sequence_num
+                        );
+                    } else {
+                        eprintln!(
+                            "[{}] [WORKER] ✗ Transcription error for #{}: {}",
+                            timestamp(),
+                            job.sequence_num,
+                            e
+                        );
+                    }
 
                     // Send error to dev report
                     let sid = session_id_for_worker.lock().unwrap().clone();
@@ -3965,12 +4121,32 @@ fn run_openai(
     // Dev mode: Fragment collector thread (filters by session_id)
     let dev_report_for_collector = Arc::clone(&dev_report);
     thread::spawn(move || {
-        for (msg_session_id, seq, start, end, text, raw_response, output_mode, original_text, chat_error) in dev_frag_rx {
+        for (
+            msg_session_id,
+            seq,
+            start,
+            end,
+            text,
+            raw_response,
+            output_mode,
+            original_text,
+            chat_error,
+        ) in dev_frag_rx
+        {
             let mut report_guard = dev_report_for_collector.lock().unwrap();
             if let Some(ref mut report) = *report_guard {
                 // Only add fragment if it belongs to current session
                 if report.session_id == msg_session_id {
-                    report.add_fragment_with_raw(seq, start, end, text, raw_response, output_mode, original_text, chat_error);
+                    report.add_fragment_with_raw(
+                        seq,
+                        start,
+                        end,
+                        text,
+                        raw_response,
+                        output_mode,
+                        original_text,
+                        chat_error,
+                    );
                 } else {
                     println!(
                         "[DEV] Dropping stale fragment from session {} (current: {})",
@@ -4136,6 +4312,7 @@ fn run_openai(
     let last_phrase_callback = Arc::clone(&last_phrase);
     let dev_vad_tx_callback = dev_vad_tx;
     let output_mode_clone = Arc::clone(&output_mode);
+    let pending_retry_callback = Arc::clone(&pending_retry_job);
 
     // Debounce state
     let key_debounce = Arc::new(AtomicBool::new(false));
@@ -4145,9 +4322,34 @@ fn run_openai(
         use std::sync::atomic::Ordering;
 
         match event.event_type {
-            EventType::KeyPress(key) if key == target_key || target_key2 == Some(key) || target_key3 == Some(key) => {
+            EventType::KeyPress(key)
+                if key == target_key || target_key2 == Some(key) || target_key3 == Some(key) =>
+            {
                 if key_debounce_clone.swap(true, Ordering::SeqCst) {
                     return; // Already pressed, ignore repeat
+                }
+
+                // Check for pending retry job first
+                {
+                    let mut pending = pending_retry_callback.lock().unwrap();
+                    if let Some(job) = pending.take() {
+                        // Play retry beep to indicate we're retrying previous failed request
+                        play_retry_beep();
+
+                        println!(
+                            "[{}] [RETRY] Retrying previous failed job #{}...",
+                            timestamp(),
+                            job.sequence_num
+                        );
+
+                        // Re-submit the job to the worker
+                        processing_count_clone.fetch_add(1, Ordering::SeqCst);
+                        let _ = job_tx_callback.send(job);
+
+                        // Reset debounce immediately since we're not recording
+                        key_debounce_clone.store(false, Ordering::SeqCst);
+                        return;
+                    }
                 }
 
                 // Determine output mode based on which key was pressed
@@ -4232,7 +4434,9 @@ fn run_openai(
                     // No start beep - it would be captured in the recording
                 }
             }
-            EventType::KeyRelease(key) if key == target_key || target_key2 == Some(key) || target_key3 == Some(key) => {
+            EventType::KeyRelease(key)
+                if key == target_key || target_key2 == Some(key) || target_key3 == Some(key) =>
+            {
                 key_debounce_clone.store(false, Ordering::SeqCst);
 
                 // Check if currently recording
