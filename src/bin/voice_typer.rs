@@ -1432,10 +1432,11 @@ fn print_usage() {
         default_key.name()
     );
     println!("                     Options: fn, ctrl, ctrlright, alt, altright, shift, cmd");
-    println!(
-        "  --key2 <KEY>       Secondary hotkey for structured Markdown output (default: cmdright)"
-    );
+    println!("  --key2 <KEY>       Secondary hotkey for structured output (requires --extra-keys)");
     println!("                     Use 'none' to disable. Same key options as --key");
+    println!("  --extra-keys       [BETA] Enable experimental extra hotkeys:");
+    println!("                       Right Cmd → structured summary (same language)");
+    println!("                       Right Option → translate to English");
     println!("  --volume <0.0-1.0> Beep sounds volume (default: 0.1 = 10%)");
     println!("                     Use 0 to disable sounds, 1.0 for max volume");
     println!("  --silent, -q       Disable all beep sounds (same as --volume 0)");
@@ -1846,8 +1847,11 @@ fn main() {
         .and_then(|h| HotkeyType::from_str(h))
         .unwrap_or_else(HotkeyType::default_for_platform);
 
-    // Secondary hotkey for structured Markdown output (default: Right Cmd on macOS)
-    let mut hotkey2: Option<HotkeyType> = Some(HotkeyType::MetaRight);
+    // Secondary hotkey for structured Markdown output (disabled by default, enable with --extra-keys)
+    let mut hotkey2: Option<HotkeyType> = None;
+
+    // Flag for experimental extra hotkeys (Right Cmd = structured, Right Option = translate)
+    let mut extra_keys = false;
 
     // Initialize beep volume (default 10%)
     set_beep_volume(BEEP_DEFAULT_VOLUME);
@@ -2038,6 +2042,11 @@ fn main() {
             "--silent" | "--quiet" | "-q" => {
                 set_beep_volume(0.0);
             }
+            "--extra-keys" | "--experimental" => {
+                extra_keys = true;
+                // Enable extra hotkeys when flag is set
+                hotkey2 = Some(HotkeyType::MetaRight); // Right Cmd = structured
+            }
             arg => {
                 eprintln!("Unknown argument: {}", arg);
                 eprintln!("Use --help for usage information");
@@ -2065,11 +2074,12 @@ fn main() {
     println!("===========");
     println!("Platform: {}", std::env::consts::OS);
     println!("Hold {} to record, release to transcribe", hotkey.name());
-    if let Some(ref key2) = hotkey2 {
-        println!(
-            "Hold {} to record → structured Markdown output",
-            key2.name()
-        );
+    if extra_keys {
+        println!("[BETA] Extra hotkeys enabled:");
+        if let Some(ref key2) = hotkey2 {
+            println!("  {} → structured summary (same language)", key2.name());
+        }
+        println!("  Right Option → translate to English");
     }
     println!("Input method: {}", input_mode_str);
     println!("Press Ctrl+C to exit\n");
@@ -2092,6 +2102,7 @@ fn main() {
                         hotkey,
                         hotkey2,
                         config.streaming,
+                        extra_keys,
                     );
                 } else {
                     println!("FAILED");
@@ -3377,6 +3388,7 @@ fn run_openai(
     hotkey: HotkeyType,
     hotkey2: Option<HotkeyType>,
     streaming: bool,
+    extra_keys: bool,
 ) {
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8};
     use std::sync::mpsc;
@@ -3396,14 +3408,21 @@ fn run_openai(
         streaming
     );
 
-    if let Some(ref key2) = hotkey2 {
-        println!("[HOTKEY] Primary: {} (normal), Secondary: {} (structured), Tertiary: Right Option (translate)", hotkey.name(), key2.name());
+    if extra_keys {
+        if let Some(ref key2) = hotkey2 {
+            println!(
+                "[HOTKEY] Primary: {} (normal), Secondary: {} (structured), Tertiary: Right Option (translate)",
+                hotkey.name(),
+                key2.name()
+            );
+        }
     }
 
     let config = Arc::new(openai_config);
     let target_key = hotkey.to_rdev_key();
-    let target_key2 = hotkey2.map(|k| k.to_rdev_key()); // Right Cmd = structured
-    let target_key3 = Some(Key::AltGr); // Right Option/Alt = translate to English
+    let target_key2 = hotkey2.map(|k| k.to_rdev_key()); // Right Cmd = structured (only if extra_keys)
+                                                        // Right Option/Alt = translate to English (only if extra_keys enabled)
+    let target_key3 = if extra_keys { Some(Key::AltGr) } else { None };
 
     let state: Arc<Mutex<RecordingState>> = Arc::new(Mutex::new(RecordingState::Idle));
     let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));

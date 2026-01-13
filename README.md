@@ -230,7 +230,25 @@ Other:
   --list-keys          List available hotkeys
   --version, -V        Show version
   --help, -h           Show help
+
+Experimental:
+  --extra-keys         Enable experimental extra hotkeys (see below)
 ```
+
+### Experimental Features (Beta)
+
+Enable with `--extra-keys` flag:
+
+```bash
+./target/release/voice-typer --openai --extra-keys
+```
+
+| Hotkey | Function | Description |
+|--------|----------|-------------|
+| **Right Cmd** | Structured summary | Transcribes speech and generates a structured summary in the same language |
+| **Right Option** | Translate to English | Transcribes speech and translates with summary to English |
+
+> ⚠️ **Beta**: These features are experimental and may not work perfectly. They require additional API calls to GPT-4 for text processing.
 
 ### Examples
 
