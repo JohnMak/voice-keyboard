@@ -7,6 +7,10 @@
 //! 4. Pre-emphasis filter (boost high frequencies for clearer speech)
 //!
 //! All enhancements can be toggled via WhisperEnhanceConfig.
+//!
+//! Note: This module is only used when the "whisper" feature is enabled.
+
+#![allow(dead_code)] // Used only with whisper feature
 
 /// Configuration for audio enhancements
 #[derive(Debug, Clone)]

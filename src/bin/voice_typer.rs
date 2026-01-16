@@ -97,6 +97,7 @@ const MODEL_SIZES: &[(&str, u64)] = &[
 ];
 
 /// Initial prompt for Whisper (local model) - keep it simple, Whisper is not an LLM
+#[cfg(feature = "whisper")]
 const WHISPER_PROMPT: &str = "\
 Голосовые команды программиста на русском с IT-терминами на английском: \
 Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper, Claude Code.";
@@ -860,14 +861,10 @@ impl OpenAIConfig {
     }
 }
 
-/// Maximum number of retries for API errors
+/// Maximum number of retries for API errors (non-network)
 const API_MAX_RETRIES: u32 = 3;
-/// Maximum number of retries for network errors - now 0 to stop immediately and wait for user
-const API_NETWORK_MAX_RETRIES: u32 = 0;
 /// Base delay between retries in milliseconds
 const API_RETRY_DELAY_MS: u64 = 1000;
-/// Delay between network retries (longer)
-const API_NETWORK_RETRY_DELAY_MS: u64 = 2000;
 /// Prefix for connection lost errors (used to identify retryable errors)
 const CONNECTION_LOST_PREFIX: &str = "CONNECTION_LOST:";
 
@@ -888,135 +885,81 @@ fn is_network_error(error: &str) -> bool {
 
 /// Internal function to transcribe audio using OpenAI API with retry logic
 /// Returns (transcribed_text, raw_json_response)
+/// Network errors return immediately with CONNECTION_LOST prefix for user retry
 fn transcribe_openai_internal(
     config: &OpenAIConfig,
     samples: &[f32],
     #[cfg_attr(feature = "opus", allow(unused_variables))] sample_rate: u32,
     prompt: Option<&str>,
 ) -> Result<(String, String), String> {
-    let mut last_error;
-    let mut network_retry_count = 0u32;
+    let mut last_error = String::new();
 
-    loop {
-        let attempt = if network_retry_count > 0 {
-            network_retry_count
-        } else {
-            0
-        };
+    // First attempt
+    match transcribe_openai_single_attempt(config, samples, sample_rate, prompt) {
+        Ok((text, raw_response)) => return Ok((text, raw_response)),
+        Err(e) => {
+            // Don't retry on certain errors
+            if e.contains("Invalid file format") || e.contains("audio too short") {
+                return Err(e);
+            }
 
-        if attempt > 0 {
-            let delay = API_NETWORK_RETRY_DELAY_MS;
-            println!(
-                "[{}] ⏳ Network retry {}/{} after {}ms (waiting for connection)...",
-                timestamp(),
-                attempt,
-                API_NETWORK_MAX_RETRIES,
-                delay
-            );
-            thread::sleep(Duration::from_millis(delay));
+            // Network error - stop immediately and wait for user retry
+            if is_network_error(&e) {
+                print_connection_lost();
+                return Err(format!("{}{}", CONNECTION_LOST_PREFIX, e));
+            }
+
+            last_error = e.clone();
+            eprintln!("[{}] API error (attempt 1): {}", timestamp(), e);
         }
+    }
+
+    // Retry loop for non-network API errors
+    for attempt in 1..API_MAX_RETRIES {
+        let delay = API_RETRY_DELAY_MS * (1 << (attempt - 1));
+        println!(
+            "[{}] Retry {}/{} after {}ms...",
+            timestamp(),
+            attempt + 1,
+            API_MAX_RETRIES,
+            delay
+        );
+        thread::sleep(Duration::from_millis(delay));
 
         match transcribe_openai_single_attempt(config, samples, sample_rate, prompt) {
-            Ok((text, raw_response)) => {
-                if network_retry_count > 0 {
-                    println!(
-                        "[{}] ✓ Connection restored after {} retries!",
-                        timestamp(),
-                        network_retry_count
-                    );
-                }
-                return Ok((text, raw_response));
-            }
+            Ok((text, raw_response)) => return Ok((text, raw_response)),
             Err(e) => {
-                last_error = e.clone();
-
-                // Don't retry on certain errors
-                if e.contains("Invalid file format") || e.contains("audio too short") {
-                    return Err(e);
-                }
-
-                // Check if this is a network error - stop immediately and wait for user retry
+                // Network error during retry - stop and wait for user
                 if is_network_error(&e) {
-                    // Print prominent CONNECTION LOST message
-                    eprintln!();
-                    eprintln!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-                    eprintln!("!!!                  CONNECTION LOST                     !!!");
-                    eprintln!("!!!     Please check your network connection.            !!!");
-                    eprintln!("!!!     Press hotkey again to retry.                     !!!");
-                    eprintln!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-                    eprintln!();
-
-                    // Return with special prefix so caller knows this is retryable
+                    print_connection_lost();
                     return Err(format!("{}{}", CONNECTION_LOST_PREFIX, e));
                 }
-
-                // Regular API error - limited retries
+                last_error = e.clone();
                 eprintln!(
                     "[{}] API error (attempt {}): {}",
                     timestamp(),
                     attempt + 1,
                     e
                 );
-
-                // For non-network errors, do standard retry logic
-                let mut regular_attempts = 0u32;
-                while regular_attempts < API_MAX_RETRIES - 1 {
-                    regular_attempts += 1;
-                    let delay = API_RETRY_DELAY_MS * (1 << (regular_attempts - 1));
-                    println!(
-                        "[{}] Retry {}/{} after {}ms...",
-                        timestamp(),
-                        regular_attempts + 1,
-                        API_MAX_RETRIES,
-                        delay
-                    );
-                    thread::sleep(Duration::from_millis(delay));
-
-                    match transcribe_openai_single_attempt(config, samples, sample_rate, prompt) {
-                        Ok((text, raw_response)) => return Ok((text, raw_response)),
-                        Err(retry_e) => {
-                            last_error = retry_e.clone();
-                            if is_network_error(&retry_e) {
-                                // Network error - stop immediately and wait for user retry
-                                eprintln!();
-                                eprintln!(
-                                    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-                                );
-                                eprintln!(
-                                    "!!!                  CONNECTION LOST                     !!!"
-                                );
-                                eprintln!(
-                                    "!!!     Please check your network connection.            !!!"
-                                );
-                                eprintln!(
-                                    "!!!     Press hotkey again to retry.                     !!!"
-                                );
-                                eprintln!(
-                                    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-                                );
-                                eprintln!();
-                                return Err(format!("{}{}", CONNECTION_LOST_PREFIX, retry_e));
-                            }
-                            eprintln!(
-                                "[{}] API error (attempt {}): {}",
-                                timestamp(),
-                                regular_attempts + 1,
-                                retry_e
-                            );
-                        }
-                    }
-                }
-
-                if network_retry_count == 0 {
-                    // Exhausted regular retries without switching to network mode
-                    return Err(format!(
-                        "Failed after {} retries: {}",
-                        API_MAX_RETRIES, last_error
-                    ));
-                }
             }
         }
     }
+
+    Err(format!(
+        "Failed after {} retries: {}",
+        API_MAX_RETRIES, last_error
+    ))
+}
+
+/// Print prominent CONNECTION LOST message
+fn print_connection_lost() {
+    eprintln!();
+    eprintln!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+    eprintln!("!!!                  CONNECTION LOST                     !!!");
+    eprintln!("!!!     Please check your network connection.            !!!");
+    eprintln!("!!!     Press hotkey again to retry.                     !!!");
+    eprintln!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+    eprintln!();
 }
 
 /// Single attempt to transcribe audio using OpenAI API
