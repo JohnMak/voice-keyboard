@@ -250,6 +250,28 @@ Enable with `--extra-keys` flag:
 
 > ⚠️ **Beta**: These features are experimental and may not work perfectly. They require additional API calls to GPT-4 for text processing.
 
+### Smart Features
+
+#### Silence Detection
+
+Short recordings (< 3 seconds) are automatically checked for voice content using spectral analysis. If no voice is detected (just silence or background noise), the recording is skipped and a low double beep plays ("pup-pup") to indicate cancellation.
+
+This prevents accidental button presses from being sent to the API.
+
+- Recordings **< 3 sec**: Checked for voice, skipped if silent
+- Recordings **≥ 3 sec**: Always processed (API decides if meaningful)
+
+#### Connection Lost Retry
+
+If the network connection is lost during transcription:
+
+1. A prominent `CONNECTION LOST` message is displayed
+2. The failed recording is saved
+3. Press the hotkey again to retry with a double beep confirmation
+4. If still no connection, the message repeats
+
+This ensures no voice recordings are lost due to temporary network issues.
+
 ### Examples
 
 ```bash
