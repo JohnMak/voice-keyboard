@@ -2917,7 +2917,7 @@ fn play_retry_beep() {
     use std::thread;
     thread::spawn(|| {
         play_beep_blocking(BEEP_RETRY_FREQ, BEEP_RETRY_DURATION_MS);
-        thread::sleep(Duration::from_millis(60));
+        thread::sleep(Duration::from_millis(100)); // Longer pause to let DAC stabilize
         play_beep_blocking(BEEP_RETRY_FREQ, BEEP_RETRY_DURATION_MS);
     });
 }
@@ -2927,7 +2927,7 @@ fn play_error_beep() {
     use std::thread;
     thread::spawn(|| {
         play_beep_blocking(BEEP_ERROR_FREQ, BEEP_ERROR_DURATION_MS);
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(100)); // Longer pause to let DAC stabilize
         play_beep_blocking(BEEP_ERROR_FREQ, BEEP_ERROR_DURATION_MS);
     });
 }
