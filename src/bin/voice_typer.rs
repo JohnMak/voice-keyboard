@@ -123,7 +123,15 @@ const BEEP_STOP_FREQ: f32 = 440.0; // A4 - lower pitch for stop
 const BEEP_STOP_DURATION_MS: u64 = 100; // Normal length for end beep
 const BEEP_RETRY_FREQ: f32 = 330.0; // E4 - even lower pitch for retry
 const BEEP_RETRY_DURATION_MS: u64 = 80; // Shorter beep for retry
+const BEEP_ERROR_FREQ: f32 = 220.0; // A3 - low pitch for error/silence detected
+const BEEP_ERROR_DURATION_MS: u64 = 70; // Short beep for error
 const BEEP_DEFAULT_VOLUME: f32 = 0.1; // 10% volume (0.0 - 1.0)
+
+/// Short recording filter: recordings under this duration are checked for voice content
+/// Recordings >= this duration are always processed (let the API decide if it's silence)
+const SHORT_RECORDING_THRESHOLD_MS: u64 = 3000; // 3 seconds
+/// Minimum voice ratio to consider recording as having speech (for short recordings)
+const MIN_VOICE_RATIO_FOR_SPEECH: f32 = 0.10; // 10% of windows must have voice
 
 /// Global volume setting for beep sounds (0.0 = silent, 1.0 = max)
 static BEEP_VOLUME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -608,6 +616,44 @@ impl VadPhraseDetector {
             );
         }
         Some((remaining.to_vec(), start_pos, end_pos))
+    }
+
+    /// Check if audio samples contain voice content
+    /// Used to filter out accidental short recordings with only silence/noise
+    /// Returns (has_voice, voice_ratio) where voice_ratio is percentage of windows with voice
+    fn has_voice_content(&self, samples: &[f32]) -> (bool, f32) {
+        if samples.is_empty() {
+            return (false, 0.0);
+        }
+
+        let mut voice_windows = 0;
+        let mut total_windows = 0;
+
+        for chunk in samples.chunks(self.window_samples) {
+            if chunk.len() < self.window_samples {
+                break;
+            }
+            total_windows += 1;
+
+            let energy = self.calculate_energy(chunk);
+            if energy < VAD_ENERGY_THRESHOLD {
+                continue; // Skip silent windows
+            }
+
+            let voice_ratio = self.calculate_voice_ratio(chunk);
+            if voice_ratio >= VAD_VOICE_RATIO_THRESHOLD {
+                voice_windows += 1;
+            }
+        }
+
+        let voice_percent = if total_windows > 0 {
+            voice_windows as f32 / total_windows as f32
+        } else {
+            0.0
+        };
+
+        let has_voice = voice_percent >= MIN_VOICE_RATIO_FOR_SPEECH;
+        (has_voice, voice_percent)
     }
 
     fn reset(&mut self) {
@@ -2876,6 +2922,16 @@ fn play_retry_beep() {
     });
 }
 
+/// Play low double beep to indicate error (silence detected, recording skipped)
+fn play_error_beep() {
+    use std::thread;
+    thread::spawn(|| {
+        play_beep_blocking(BEEP_ERROR_FREQ, BEEP_ERROR_DURATION_MS);
+        thread::sleep(Duration::from_millis(50));
+        play_beep_blocking(BEEP_ERROR_FREQ, BEEP_ERROR_DURATION_MS);
+    });
+}
+
 // ============================================================================
 // Utilities
 // ============================================================================
@@ -4453,11 +4509,39 @@ fn run_openai(
 
                     // Queue final phrase for transcription
                     if let Some((phrase_samples, start_pos, end_pos)) = remaining {
+                        let duration_secs =
+                            phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
+                        let duration_ms = (duration_secs * 1000.0) as u64;
+
+                        // For short recordings (< 3 sec), check if there's actual voice content
+                        // to filter out accidental button presses with silence
+                        if duration_ms < SHORT_RECORDING_THRESHOLD_MS {
+                            let vad = vad_clone.lock().unwrap();
+                            let (has_voice, voice_percent) = vad.has_voice_content(&phrase_samples);
+                            drop(vad);
+
+                            if !has_voice {
+                                println!(
+                                    "[{}] Short recording ({:.1}s) with no voice detected ({:.0}% < {:.0}% threshold), skipping",
+                                    timestamp(),
+                                    duration_secs,
+                                    voice_percent * 100.0,
+                                    MIN_VOICE_RATIO_FOR_SPEECH * 100.0
+                                );
+                                play_error_beep();
+                                return;
+                            }
+                            println!(
+                                "[{}] Short recording ({:.1}s) has voice ({:.0}%), processing...",
+                                timestamp(),
+                                duration_secs,
+                                voice_percent * 100.0
+                            );
+                        }
+
                         let seq = next_sequence_clone.fetch_add(1, Ordering::SeqCst);
                         processing_count_clone.fetch_add(1, Ordering::SeqCst);
 
-                        let duration_secs =
-                            phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
                         println!(
                             "[{}] Final phrase #{} ({:.1}s), queuing for transcription...",
                             timestamp(),
