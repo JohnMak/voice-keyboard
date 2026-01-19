@@ -4462,7 +4462,6 @@ fn run_openai(
                 if *rec_state == RecordingState::Recording {
                     is_recording_clone.store(false, Ordering::SeqCst);
                     *rec_state = RecordingState::Idle;
-                    play_stop_beep();
 
                     let recording_duration = recording_start_clone
                         .lock()
@@ -4472,8 +4471,11 @@ fn run_openai(
 
                     if recording_duration < Duration::from_millis(MIN_RECORDING_MS) {
                         println!("[{}] Recording too short, ignoring", timestamp());
+                        play_error_beep();
                         return;
                     }
+
+                    play_stop_beep();
 
                     // Get audio to transcribe
                     // If streaming=false, send ALL audio as single segment
@@ -4932,16 +4934,17 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                         .map(|start| start.elapsed())
                         .unwrap_or(Duration::ZERO);
 
-                    play_stop_beep();
-
                     *rec_state = RecordingState::Idle;
                     *recording_start_clone.lock().unwrap() = None;
 
                     if recording_duration < Duration::from_millis(MIN_RECORDING_MS) {
                         println!("[{}] Recording too short, ignoring", timestamp());
+                        play_error_beep();
                         samples_clone.lock().unwrap().clear();
                         return;
                     }
+
+                    play_stop_beep();
 
                     let remaining = {
                         let samples = samples_clone.lock().unwrap();
