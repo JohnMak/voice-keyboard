@@ -103,9 +103,11 @@ const WHISPER_PROMPT: &str = "\
 Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper, Claude Code.";
 
 /// Prompt for GPT-4o transcription API - can use LLM-style instructions
-const OPENAI_PROMPT: &str = "\
-Голосовые команды программиста на русском. Команды роботу в повелительном наклонении. \
-IT-термины на английском: Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper. \
+/// Supports auto-detection between Russian and English (configurable via VOICE_KEYBOARD_LANGUAGES)
+const OPENAI_PROMPT_TEMPLATE: &str = "\
+Голосовые команды программиста. Автоматически определи язык речи ({languages}) и транскрибируй НА ТОМ ЖЕ ЯЗЫКЕ. \
+НЕ ПЕРЕВОДИ — если говорят по-английски, пиши по-английски; если по-русски — по-русски. \
+IT-термины оставляй на английском: Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper. \
 КРИТИЧЕСКИ ВАЖНО: Распознавай ТОЛЬКО реально слышимое в аудио. \
 НИКОГДА не повторяй текст из контекста — контекст только для понимания темы. \
 Если аудио неразборчиво, тишина или шум — ответь ровно одним символом: - \
@@ -113,6 +115,19 @@ IT-термины на английском: Git, Docker, API, React, TypeScript
 ВАЖНО: Выводи ВСЕ услышанное, даже незаконченные предложения. \
 Если фраза обрывается — заканчивай многоточием, но НЕ отбрасывай её. \
 Разбивай текст на абзацы (пустая строка), если меняется тема или смысловой блок.";
+
+/// Default supported languages for auto-detection
+const DEFAULT_LANGUAGES: &str = "Russian, English";
+
+/// Get configured languages from environment or use default
+fn get_languages() -> String {
+    std::env::var("VOICE_KEYBOARD_LANGUAGES").unwrap_or_else(|_| DEFAULT_LANGUAGES.to_string())
+}
+
+/// Build the transcription prompt with configured languages
+fn get_openai_prompt() -> String {
+    OPENAI_PROMPT_TEMPLATE.replace("{languages}", &get_languages())
+}
 
 // ============================================================================
 // Audio feedback and constants
@@ -3511,11 +3526,12 @@ fn run_openai(
             };
 
             // Always use standard transcription prompt (structured mode uses Chat API post-processing)
+            let base_prompt = get_openai_prompt();
             let prompt = if let Some(ref ctx_text) = context {
                 let last_sentence = extract_last_sentence(ctx_text);
-                format!("{} {}", OPENAI_PROMPT, last_sentence)
+                format!("{} {}", base_prompt, last_sentence)
             } else {
-                OPENAI_PROMPT.to_string()
+                base_prompt
             };
 
             let mode_name = match job.output_mode {
@@ -3572,11 +3588,12 @@ fn run_openai(
                             reason
                         );
                         // Retry without context to avoid model confusion
+                        let retry_prompt = get_openai_prompt();
                         match transcribe_openai_internal(
                             &config_for_worker,
                             &resampled,
                             WHISPER_SAMPLE_RATE,
-                            Some(OPENAI_PROMPT),
+                            Some(&retry_prompt),
                         ) {
                             Ok((retry_text, retry_raw)) => {
                                 let retry_trimmed = retry_text.trim();

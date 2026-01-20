@@ -183,6 +183,7 @@ curl -L -O https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.b
 |----------|-------------|---------|
 | `OPENAI_API_KEY` | OpenAI API key for GPT-4o mode | `sk-...` |
 | `MODEL_PATH` | Path to Whisper model file | `~/.local/share/voice-keyboard/models/ggml-large-v3-turbo.bin` |
+| `VOICE_KEYBOARD_LANGUAGES` | Languages for auto-detection (default: Russian, English) | `Russian, English, German` |
 | `VOICE_KEYBOARD_DEV` | Enable dev mode (save reports) | `1` |
 | `WHISPER_ENHANCE` | Audio enhancement settings | `all`, `none`, or `normalize,dc,pre_emphasis` |
 | `RUST_LOG` | Logging level | `debug`, `trace` |
