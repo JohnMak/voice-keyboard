@@ -35,6 +35,18 @@ pub struct Config {
     /// Show transcription notification
     #[serde(default = "default_true")]
     pub show_notifications: bool,
+
+    /// Auto-update enabled
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
+
+    /// Update channel (stable or beta)
+    #[serde(default)]
+    pub update_channel: UpdateChannel,
+
+    /// Custom update URL (overrides GitHub releases)
+    #[serde(default)]
+    pub update_url: Option<String>,
 }
 
 fn default_language() -> String {
@@ -92,6 +104,15 @@ pub enum InjectionMethodConfig {
     Clipboard,
     Keyboard,
     ClipboardOnly,
+}
+
+/// Update channel selection
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateChannel {
+    #[default]
+    Stable,
+    Beta,
 }
 
 impl From<InjectionMethodConfig> for InjectionMethod {
@@ -159,6 +180,14 @@ impl Config {
 
         Ok(dirs.data_dir().join("models"))
     }
+
+    /// Get data directory path (for updater, logs, etc.)
+    pub fn data_dir() -> Result<PathBuf> {
+        let dirs = directories::ProjectDirs::from("com", "alexmak", "voice-keyboard")
+            .ok_or_else(|| VoiceKeyboardError::Config("Failed to get data dir".to_string()))?;
+
+        Ok(dirs.data_dir().to_path_buf())
+    }
 }
 
 impl Default for Config {
@@ -173,6 +202,9 @@ impl Default for Config {
             injection_method: InjectionMethodConfig::Clipboard,
             play_sounds: true,
             show_notifications: true,
+            auto_update: true,
+            update_channel: UpdateChannel::default(),
+            update_url: None,
         }
     }
 }

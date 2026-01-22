@@ -183,6 +183,7 @@ curl -L -O https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.b
 |----------|-------------|---------|
 | `OPENAI_API_KEY` | OpenAI API key for GPT-4o mode | `sk-...` |
 | `MODEL_PATH` | Path to Whisper model file | `~/.local/share/voice-keyboard/models/ggml-large-v3-turbo.bin` |
+| `VOICE_KEYBOARD_LANGUAGES` | Languages for auto-detection (default: Russian, English) | `Russian, English, German` |
 | `VOICE_KEYBOARD_DEV` | Enable dev mode (save reports) | `1` |
 | `WHISPER_ENHANCE` | Audio enhancement settings | `all`, `none`, or `normalize,dc,pre_emphasis` |
 | `RUST_LOG` | Logging level | `debug`, `trace` |
@@ -230,7 +231,47 @@ Other:
   --list-keys          List available hotkeys
   --version, -V        Show version
   --help, -h           Show help
+
+Experimental:
+  --extra-keys         Enable experimental extra hotkeys (see below)
 ```
+
+### Experimental Features (Beta)
+
+Enable with `--extra-keys` flag:
+
+```bash
+./target/release/voice-typer --openai --extra-keys
+```
+
+| Hotkey | Function | Description |
+|--------|----------|-------------|
+| **Right Cmd** | Structured summary | Transcribes speech and generates a structured summary in the same language |
+| **Right Option** | Translate to English | Transcribes speech and translates with summary to English |
+
+> ⚠️ **Beta**: These features are experimental and may not work perfectly. They require additional API calls to GPT-4 for text processing.
+
+### Smart Features
+
+#### Silence Detection
+
+Short recordings (< 3 seconds) are automatically checked for voice content using spectral analysis. If no voice is detected (just silence or background noise), the recording is skipped and a low double beep plays ("pup-pup") to indicate cancellation.
+
+This prevents accidental button presses from being sent to the API.
+
+- Recordings **< 3 sec**: Checked for voice, skipped if silent
+- Recordings **≥ 3 sec**: Always processed (API decides if meaningful)
+
+#### Connection Lost Retry
+
+If the network connection is lost during transcription:
+
+1. A prominent `CONNECTION LOST` message is displayed
+2. The failed recording is saved
+3. Press the hotkey again to retry with a double beep confirmation
+4. If still no connection, the message repeats
+
+This ensures no voice recordings are lost due to temporary network issues.
 
 ### Examples
 

@@ -20,9 +20,16 @@ use std::fs::{self, File};
 use std::io::Cursor;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+
+// Global mutex to prevent concurrent typing from different threads
+static TYPING_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn get_typing_mutex() -> &'static Mutex<()> {
+    TYPING_MUTEX.get_or_init(|| Mutex::new(()))
+}
 
 // Cross-platform imports
 use arboard::Clipboard;
@@ -33,8 +40,41 @@ use rdev::{listen, Event, EventType, Key};
 use reqwest::blocking::Client;
 use std::process::Command;
 
+// ============================================================================
+// GUI Launch (feature-gated)
+// ============================================================================
+
+/// Launch the GUI with system tray
+#[cfg(feature = "gui")]
+fn launch_gui() {
+    use voice_keyboard::config::Config;
+
+    // Load configuration
+    let config = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Warning: Failed to load config: {}", e);
+            Config::default()
+        }
+    };
+
+    println!("Launching Voice Keyboard GUI...");
+    println!("Look for the microphone icon in your system tray.");
+
+    // Run GUI
+    if let Err(e) = voice_keyboard::gui::run(config) {
+        eprintln!("GUI error: {}", e);
+        std::process::exit(1);
+    }
+}
+
 /// Minimum recording duration to process (avoid accidental taps)
 const MIN_RECORDING_MS: u64 = 300;
+
+/// Output modes for transcription
+const OUTPUT_MODE_PLAIN: u8 = 0; // Normal transcription only
+const OUTPUT_MODE_STRUCTURED: u8 = 1; // Original + Summary + Structure (same language)
+const OUTPUT_MODE_TRANSLATE: u8 = 2; // Original + Translation + Summary + Structure (English)
 
 /// Dev mode: collect reports for analysis
 /// Set VOICE_KEYBOARD_DEV=1 to enable
@@ -85,14 +125,17 @@ const MODEL_SIZES: &[(&str, u64)] = &[
 ];
 
 /// Initial prompt for Whisper (local model) - keep it simple, Whisper is not an LLM
+#[cfg(feature = "whisper")]
 const WHISPER_PROMPT: &str = "\
 Голосовые команды программиста на русском с IT-терминами на английском: \
 Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper, Claude Code.";
 
 /// Prompt for GPT-4o transcription API - can use LLM-style instructions
-const OPENAI_PROMPT: &str = "\
-Голосовые команды программиста на русском. Команды роботу в повелительном наклонении. \
-IT-термины на английском: Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper. \
+/// Supports auto-detection between Russian and English (configurable via VOICE_KEYBOARD_LANGUAGES)
+const OPENAI_PROMPT_TEMPLATE: &str = "\
+Голосовые команды программиста. Автоматически определи язык речи ({languages}) и транскрибируй НА ТОМ ЖЕ ЯЗЫКЕ. \
+НЕ ПЕРЕВОДИ — если говорят по-английски, пиши по-английски; если по-русски — по-русски. \
+IT-термины оставляй на английском: Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper. \
 КРИТИЧЕСКИ ВАЖНО: Распознавай ТОЛЬКО реально слышимое в аудио. \
 НИКОГДА не повторяй текст из контекста — контекст только для понимания темы. \
 Если аудио неразборчиво, тишина или шум — ответь ровно одним символом: - \
@@ -101,6 +144,19 @@ IT-термины на английском: Git, Docker, API, React, TypeScript
 Если фраза обрывается — заканчивай многоточием, но НЕ отбрасывай её. \
 Разбивай текст на абзацы (пустая строка), если меняется тема или смысловой блок.";
 
+/// Default supported languages for auto-detection
+const DEFAULT_LANGUAGES: &str = "Russian, English";
+
+/// Get configured languages from environment or use default
+fn get_languages() -> String {
+    std::env::var("VOICE_KEYBOARD_LANGUAGES").unwrap_or_else(|_| DEFAULT_LANGUAGES.to_string())
+}
+
+/// Build the transcription prompt with configured languages
+fn get_openai_prompt() -> String {
+    OPENAI_PROMPT_TEMPLATE.replace("{languages}", &get_languages())
+}
+
 // ============================================================================
 // Audio feedback and constants
 // ============================================================================
@@ -108,7 +164,17 @@ IT-термины на английском: Git, Docker, API, React, TypeScript
 /// MIDI note frequencies for beep sounds
 const BEEP_STOP_FREQ: f32 = 440.0; // A4 - lower pitch for stop
 const BEEP_STOP_DURATION_MS: u64 = 100; // Normal length for end beep
+const BEEP_RETRY_FREQ: f32 = 330.0; // E4 - even lower pitch for retry
+const BEEP_RETRY_DURATION_MS: u64 = 80; // Shorter beep for retry
+const BEEP_ERROR_FREQ: f32 = 220.0; // A3 - low pitch for error/silence detected
+const BEEP_ERROR_DURATION_MS: u64 = 70; // Short beep for error
 const BEEP_DEFAULT_VOLUME: f32 = 0.1; // 10% volume (0.0 - 1.0)
+
+/// Short recording filter: recordings under this duration are checked for voice content
+/// Recordings >= this duration are always processed (let the API decide if it's silence)
+const SHORT_RECORDING_THRESHOLD_MS: u64 = 3000; // 3 seconds
+/// Minimum voice ratio to consider recording as having speech (for short recordings)
+const MIN_VOICE_RATIO_FOR_SPEECH: f32 = 0.10; // 10% of windows must have voice
 
 /// Global volume setting for beep sounds (0.0 = silent, 1.0 = max)
 static BEEP_VOLUME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -595,6 +661,44 @@ impl VadPhraseDetector {
         Some((remaining.to_vec(), start_pos, end_pos))
     }
 
+    /// Check if audio samples contain voice content
+    /// Used to filter out accidental short recordings with only silence/noise
+    /// Returns (has_voice, voice_ratio) where voice_ratio is percentage of windows with voice
+    fn has_voice_content(&self, samples: &[f32]) -> (bool, f32) {
+        if samples.is_empty() {
+            return (false, 0.0);
+        }
+
+        let mut voice_windows = 0;
+        let mut total_windows = 0;
+
+        for chunk in samples.chunks(self.window_samples) {
+            if chunk.len() < self.window_samples {
+                break;
+            }
+            total_windows += 1;
+
+            let energy = self.calculate_energy(chunk);
+            if energy < VAD_ENERGY_THRESHOLD {
+                continue; // Skip silent windows
+            }
+
+            let voice_ratio = self.calculate_voice_ratio(chunk);
+            if voice_ratio >= VAD_VOICE_RATIO_THRESHOLD {
+                voice_windows += 1;
+            }
+        }
+
+        let voice_percent = if total_windows > 0 {
+            voice_windows as f32 / total_windows as f32
+        } else {
+            0.0
+        };
+
+        let has_voice = voice_percent >= MIN_VOICE_RATIO_FOR_SPEECH;
+        (has_voice, voice_percent)
+    }
+
     fn reset(&mut self) {
         self.silent_windows = 0;
         self.speech_confirm_count = 0;
@@ -846,14 +950,12 @@ impl OpenAIConfig {
     }
 }
 
-/// Maximum number of retries for API errors
+/// Maximum number of retries for API errors (non-network)
 const API_MAX_RETRIES: u32 = 3;
-/// Maximum number of retries for network errors (longer, to wait for connection restore)
-const API_NETWORK_MAX_RETRIES: u32 = 30;
 /// Base delay between retries in milliseconds
 const API_RETRY_DELAY_MS: u64 = 1000;
-/// Delay between network retries (longer)
-const API_NETWORK_RETRY_DELAY_MS: u64 = 2000;
+/// Prefix for connection lost errors (used to identify retryable errors)
+const CONNECTION_LOST_PREFIX: &str = "CONNECTION_LOST:";
 
 /// Check if error is a network connectivity error
 fn is_network_error(error: &str) -> bool {
@@ -872,134 +974,81 @@ fn is_network_error(error: &str) -> bool {
 
 /// Internal function to transcribe audio using OpenAI API with retry logic
 /// Returns (transcribed_text, raw_json_response)
+/// Network errors return immediately with CONNECTION_LOST prefix for user retry
 fn transcribe_openai_internal(
     config: &OpenAIConfig,
     samples: &[f32],
     #[cfg_attr(feature = "opus", allow(unused_variables))] sample_rate: u32,
     prompt: Option<&str>,
 ) -> Result<(String, String), String> {
-    let mut last_error;
-    let mut network_retry_count = 0u32;
+    let mut last_error = String::new();
 
-    loop {
-        let attempt = if network_retry_count > 0 {
-            network_retry_count
-        } else {
-            0
-        };
+    // First attempt
+    match transcribe_openai_single_attempt(config, samples, sample_rate, prompt) {
+        Ok((text, raw_response)) => return Ok((text, raw_response)),
+        Err(e) => {
+            // Don't retry on certain errors
+            if e.contains("Invalid file format") || e.contains("audio too short") {
+                return Err(e);
+            }
 
-        if attempt > 0 {
-            let delay = API_NETWORK_RETRY_DELAY_MS;
-            println!(
-                "[{}] ⏳ Network retry {}/{} after {}ms (waiting for connection)...",
-                timestamp(),
-                attempt,
-                API_NETWORK_MAX_RETRIES,
-                delay
-            );
-            thread::sleep(Duration::from_millis(delay));
+            // Network error - stop immediately and wait for user retry
+            if is_network_error(&e) {
+                print_connection_lost();
+                return Err(format!("{}{}", CONNECTION_LOST_PREFIX, e));
+            }
+
+            last_error = e.clone();
+            eprintln!("[{}] API error (attempt 1): {}", timestamp(), e);
         }
+    }
+
+    // Retry loop for non-network API errors
+    for attempt in 1..API_MAX_RETRIES {
+        let delay = API_RETRY_DELAY_MS * (1 << (attempt - 1));
+        println!(
+            "[{}] Retry {}/{} after {}ms...",
+            timestamp(),
+            attempt + 1,
+            API_MAX_RETRIES,
+            delay
+        );
+        thread::sleep(Duration::from_millis(delay));
 
         match transcribe_openai_single_attempt(config, samples, sample_rate, prompt) {
-            Ok((text, raw_response)) => {
-                if network_retry_count > 0 {
-                    println!(
-                        "[{}] ✓ Connection restored after {} retries!",
-                        timestamp(),
-                        network_retry_count
-                    );
-                }
-                return Ok((text, raw_response));
-            }
+            Ok((text, raw_response)) => return Ok((text, raw_response)),
             Err(e) => {
-                last_error = e.clone();
-
-                // Don't retry on certain errors
-                if e.contains("Invalid file format") || e.contains("audio too short") {
-                    return Err(e);
-                }
-
-                // Check if this is a network error - use extended retry
+                // Network error during retry - stop and wait for user
                 if is_network_error(&e) {
-                    network_retry_count += 1;
-                    if network_retry_count >= API_NETWORK_MAX_RETRIES {
-                        eprintln!(
-                            "[{}] ✗ Network error, giving up after {} retries: {}",
-                            timestamp(),
-                            network_retry_count,
-                            e
-                        );
-                        return Err(format!(
-                            "Network error after {} retries: {}",
-                            network_retry_count, e
-                        ));
-                    }
-                    eprintln!(
-                        "[{}] ⚠ Network error (retry {}/{}): {}",
-                        timestamp(),
-                        network_retry_count,
-                        API_NETWORK_MAX_RETRIES,
-                        e
-                    );
-                    continue;
+                    print_connection_lost();
+                    return Err(format!("{}{}", CONNECTION_LOST_PREFIX, e));
                 }
-
-                // Regular API error - limited retries
+                last_error = e.clone();
                 eprintln!(
                     "[{}] API error (attempt {}): {}",
                     timestamp(),
                     attempt + 1,
                     e
                 );
-
-                // For non-network errors, do standard retry logic
-                let mut regular_attempts = 0u32;
-                while regular_attempts < API_MAX_RETRIES - 1 {
-                    regular_attempts += 1;
-                    let delay = API_RETRY_DELAY_MS * (1 << (regular_attempts - 1));
-                    println!(
-                        "[{}] Retry {}/{} after {}ms...",
-                        timestamp(),
-                        regular_attempts + 1,
-                        API_MAX_RETRIES,
-                        delay
-                    );
-                    thread::sleep(Duration::from_millis(delay));
-
-                    match transcribe_openai_single_attempt(config, samples, sample_rate, prompt) {
-                        Ok((text, raw_response)) => return Ok((text, raw_response)),
-                        Err(retry_e) => {
-                            last_error = retry_e.clone();
-                            if is_network_error(&retry_e) {
-                                // Switch to network retry mode
-                                network_retry_count = 1;
-                                eprintln!(
-                                    "[{}] ⚠ Switched to network retry mode: {}",
-                                    timestamp(),
-                                    retry_e
-                                );
-                                break;
-                            }
-                            eprintln!(
-                                "[{}] API error (attempt {}): {}",
-                                timestamp(),
-                                regular_attempts + 1,
-                                retry_e
-                            );
-                        }
-                    }
-                }
-
-                if network_retry_count == 0 {
-                    // Exhausted regular retries without switching to network mode
-                    return Err(format!(
-                        "Failed after {} retries: {}",
-                        API_MAX_RETRIES, last_error
-                    ));
-                }
             }
         }
     }
+
+    Err(format!(
+        "Failed after {} retries: {}",
+        API_MAX_RETRIES, last_error
+    ))
+}
+
+/// Print prominent CONNECTION LOST message
+fn print_connection_lost() {
+    eprintln!();
+    eprintln!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+    eprintln!("!!!                  CONNECTION LOST                     !!!");
+    eprintln!("!!!     Please check your network connection.            !!!");
+    eprintln!("!!!     Press hotkey again to retry.                     !!!");
+    eprintln!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+    eprintln!();
 }
 
 /// Single attempt to transcribe audio using OpenAI API
@@ -1019,7 +1068,8 @@ fn transcribe_openai_single_attempt(
     // Generate deterministic low-amplitude noise pattern
     for i in 0..PADDING_SAMPLES {
         // Simple deterministic noise using sample index
-        let noise = ((i as f32 * 0.1).sin() * 0.5 + (i as f32 * 0.23).cos() * 0.5) * NOISE_AMPLITUDE;
+        let noise =
+            ((i as f32 * 0.1).sin() * 0.5 + (i as f32 * 0.23).cos() * 0.5) * NOISE_AMPLITUDE;
         padded_samples.push(noise);
     }
     let samples = &padded_samples[..];
@@ -1153,6 +1203,212 @@ fn transcribe_openai_single_attempt(
     Ok((text.to_string(), response_text))
 }
 
+/// System prompt for simple translation to English
+const CHAT_TRANSLATION_PROMPT: &str = "\
+Translate the following text to English.
+
+RULES:
+- Preserve original meaning, tone, and structure
+- Keep questions as questions, exclamations as exclamations
+- Maintain paragraph breaks
+- IT terms stay in English: Git, Docker, API, Claude
+- Just translate, no formatting changes, no additions
+- Output ONLY the translation, nothing else";
+
+/// System prompt for GPT-4.1 Chat API - Summary + Structure (same language)
+/// Uses Telegram-compatible Markdown
+const CHAT_SUMMARY_STRUCTURE_PROMPT: &str = "\
+Transform voice transcription into TWO sections.
+
+═══ SECTION 1: BRIEF SUMMARY ═══
+Ultra-concise retelling in paragraph form:
+- Preserve author's thought FLOW and SEQUENCE
+- Keep questions as questions, requests as requests
+- Cut ALL filler: ну, вот, типа, как бы, в общем, собственно
+- Compress 5x but lose ZERO meaning
+- Add emoji at START of each paragraph: 📌 💡 ⚠️ ✅ 🔧 📝
+- Separate paragraphs with ONE empty line
+- This is a RETELLING, not a list - use flowing prose
+
+After summary, output EXACTLY this separator:
+----------
+
+═══ SECTION 2: STRUCTURED CONTENT ═══
+Rich Telegram Markdown for scanning:
+
+TELEGRAM SYNTAX (strict):
+**bold** = headers, key terms, actions (ALWAYS double asterisks)
+_italic_ = secondary emphasis (underscores only)
+`code` = commands, paths, functions
+- bullets for lists
+1. 2. for ordered sequences
+
+NEVER use single asterisks (*text*) - only **double**.
+
+LISTS RULES:
+- Every list MUST have **bold header** above it
+- One emoji per bullet for scanning
+- List = homogeneous items only
+
+TEXT RULES:
+- **Subheaders** for sections
+- Empty line between blocks
+- IT terms in English: Git, Docker, API
+
+LANGUAGE: Output in the SAME language as input.
+NO intro, NO meta - just content.";
+
+/// System prompt for GPT-4.1 Chat API - Summary + Structure (English output)
+const CHAT_SUMMARY_STRUCTURE_ENGLISH_PROMPT: &str = "\
+Transform voice transcription into TWO sections. OUTPUT EVERYTHING IN ENGLISH.
+
+═══ SECTION 1: BRIEF SUMMARY ═══
+Ultra-concise retelling in paragraph form:
+- Preserve author's thought FLOW and SEQUENCE
+- Keep questions as questions, requests as requests
+- Cut ALL filler words
+- Compress 5x but lose ZERO meaning
+- Add emoji at START of each paragraph: 📌 💡 ⚠️ ✅ 🔧 📝
+- Separate paragraphs with ONE empty line
+- This is a RETELLING, not a list - use flowing prose
+
+After summary, output EXACTLY this separator:
+----------
+
+═══ SECTION 2: STRUCTURED CONTENT ═══
+Rich Telegram Markdown for scanning:
+
+TELEGRAM SYNTAX (strict):
+**bold** = headers, key terms, actions (ALWAYS double asterisks)
+_italic_ = secondary emphasis (underscores only)
+`code` = commands, paths, functions
+- bullets for lists
+1. 2. for ordered sequences
+
+NEVER use single asterisks (*text*) - only **double**.
+
+LISTS RULES:
+- Every list MUST have **bold header** above it
+- One emoji per bullet for scanning
+- List = homogeneous items only
+
+TEXT RULES:
+- **Subheaders** for sections
+- Empty line between blocks
+- IT terms stay in English: Git, Docker, API
+
+LANGUAGE: OUTPUT EVERYTHING IN ENGLISH regardless of input language.
+NO intro, NO meta - just content.";
+
+/// Call GPT-4.1 Chat Completions API with custom system prompt
+/// Uses same API key and base URL as transcription (for proxy compatibility)
+fn call_chat_api(
+    config: &OpenAIConfig,
+    system_prompt: &str,
+    text: &str,
+    task_name: &str,
+) -> Result<String, String> {
+    let client = Client::new();
+
+    // Convert base URL from audio API to chat completions
+    // e.g., "https://api.openai.com/v1" -> "https://api.openai.com/v1/chat/completions"
+    let base_url = config.api_url.trim_end_matches('/');
+    let base_url = base_url.trim_end_matches("/audio/transcriptions");
+    let url = format!("{}/chat/completions", base_url);
+
+    // Build JSON request body
+    let request_body = serde_json::json!({
+        "model": "gpt-4.1",
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": text
+            }
+        ],
+        "temperature": 0.3,
+        "max_tokens": 4096
+    });
+
+    println!(
+        "[{}] [CHAT] {} ({} chars)...",
+        timestamp(),
+        task_name,
+        text.len()
+    );
+
+    let body = serde_json::to_string(&request_body)
+        .map_err(|e| format!("Failed to serialize request: {}", e))?;
+
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("Content-Type", "application/json")
+        .body(body)
+        .timeout(Duration::from_secs(60))
+        .send()
+        .map_err(|e| format!("Chat API request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().unwrap_or_default();
+        return Err(format!("Chat API error {}: {}", status, error_text));
+    }
+
+    let response_text = response
+        .text()
+        .map_err(|e| format!("Failed to read Chat API response: {}", e))?;
+
+    // Parse JSON and extract message content
+    let json: serde_json::Value = serde_json::from_str(&response_text)
+        .map_err(|e| format!("Failed to parse Chat API JSON: {}", e))?;
+
+    let content = json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("No content in Chat API response: {}", response_text))?;
+
+    println!(
+        "[{}] [CHAT] {} complete ({} chars)",
+        timestamp(),
+        task_name,
+        content.len()
+    );
+
+    Ok(content.to_string())
+}
+
+/// Helper: Structure text with same-language prompt
+fn structure_text_with_chat_api(config: &OpenAIConfig, text: &str) -> Result<String, String> {
+    call_chat_api(
+        config,
+        CHAT_SUMMARY_STRUCTURE_PROMPT,
+        text,
+        "Summary+Structure",
+    )
+}
+
+/// Helper: Structure text with English output prompt
+fn structure_text_english(config: &OpenAIConfig, text: &str) -> Result<String, String> {
+    call_chat_api(
+        config,
+        CHAT_SUMMARY_STRUCTURE_ENGLISH_PROMPT,
+        text,
+        "Summary+Structure (EN)",
+    )
+}
+
+/// Helper: Translate text to English
+fn translate_to_english(config: &OpenAIConfig, text: &str) -> Result<String, String> {
+    call_chat_api(config, CHAT_TRANSLATION_PROMPT, text, "Translation to EN")
+}
+
 fn resolve_model_path(model: &str) -> PathBuf {
     for (name, filename) in MODEL_PRESETS {
         if model.eq_ignore_ascii_case(name) {
@@ -1208,6 +1464,11 @@ fn print_usage() {
         default_key.name()
     );
     println!("                     Options: fn, ctrl, ctrlright, alt, altright, shift, cmd");
+    println!("  --key2 <KEY>       Secondary hotkey for structured output (requires --extra-keys)");
+    println!("                     Use 'none' to disable. Same key options as --key");
+    println!("  --extra-keys       [BETA] Enable experimental extra hotkeys:");
+    println!("                       Right Cmd → structured summary (same language)");
+    println!("                       Right Option → translate to English");
     println!("  --volume <0.0-1.0> Beep sounds volume (default: 0.1 = 10%)");
     println!("                     Use 0 to disable sounds, 1.0 for max volume");
     println!("  --silent, -q       Disable all beep sounds (same as --volume 0)");
@@ -1218,6 +1479,8 @@ fn print_usage() {
     println!("                     Optional: OPENAI_API_URL for custom endpoint (proxy)");
     println!("  --list-models      List available model presets");
     println!("  --list-keys        List available hotkey options");
+    #[cfg(feature = "gui")]
+    println!("  --gui              Launch GUI with system tray (settings window)");
     println!("  --version, -V      Show version information");
     println!("  --help, -h         Show this help");
     println!();
@@ -1618,6 +1881,12 @@ fn main() {
         .and_then(|h| HotkeyType::from_str(h))
         .unwrap_or_else(HotkeyType::default_for_platform);
 
+    // Secondary hotkey for structured Markdown output (disabled by default, enable with --extra-keys)
+    let mut hotkey2: Option<HotkeyType> = None;
+
+    // Flag for experimental extra hotkeys (Right Cmd = structured, Right Option = translate)
+    let mut extra_keys = false;
+
     // Initialize beep volume (default 10%)
     set_beep_volume(BEEP_DEFAULT_VOLUME);
 
@@ -1727,6 +1996,46 @@ fn main() {
                     }
                 }
             }
+            "--key2" => {
+                if i + 1 < args.len() {
+                    let key_str = &args[i + 1];
+                    if key_str == "none" || key_str == "off" || key_str == "disable" {
+                        hotkey2 = None;
+                    } else {
+                        match HotkeyType::from_str(key_str) {
+                            Some(key) => hotkey2 = Some(key),
+                            None => {
+                                eprintln!(
+                                    "Error: unknown hotkey '{}'. Use --list-keys to see options.",
+                                    key_str
+                                );
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    i += 1;
+                } else {
+                    eprintln!("Error: --key2 requires an argument (or 'none' to disable)");
+                    std::process::exit(1);
+                }
+            }
+            arg if arg.starts_with("--key2=") => {
+                let key_str = arg.trim_start_matches("--key2=");
+                if key_str == "none" || key_str == "off" || key_str == "disable" {
+                    hotkey2 = None;
+                } else {
+                    match HotkeyType::from_str(key_str) {
+                        Some(key) => hotkey2 = Some(key),
+                        None => {
+                            eprintln!(
+                                "Error: unknown hotkey '{}'. Use --list-keys to see options.",
+                                key_str
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
             "--volume" => {
                 if i + 1 < args.len() {
                     match args[i + 1].parse::<f32>() {
@@ -1767,6 +2076,17 @@ fn main() {
             "--silent" | "--quiet" | "-q" => {
                 set_beep_volume(0.0);
             }
+            "--extra-keys" | "--experimental" => {
+                extra_keys = true;
+                // Enable extra hotkeys when flag is set
+                hotkey2 = Some(HotkeyType::MetaRight); // Right Cmd = structured
+            }
+            #[cfg(feature = "gui")]
+            "--gui" => {
+                // Launch GUI mode with system tray
+                launch_gui();
+                return;
+            }
             arg => {
                 eprintln!("Unknown argument: {}", arg);
                 eprintln!("Use --help for usage information");
@@ -1794,6 +2114,13 @@ fn main() {
     println!("===========");
     println!("Platform: {}", std::env::consts::OS);
     println!("Hold {} to record, release to transcribe", hotkey.name());
+    if extra_keys {
+        println!("[BETA] Extra hotkeys enabled:");
+        if let Some(ref key2) = hotkey2 {
+            println!("  {} → structured summary (same language)", key2.name());
+        }
+        println!("  Right Option → translate to English");
+    }
     println!("Input method: {}", input_mode_str);
     println!("Press Ctrl+C to exit\n");
 
@@ -1809,7 +2136,14 @@ fn main() {
 
                 if openai_config.test_connection() {
                     println!("OK\n");
-                    run_openai(openai_config, input_method, hotkey, config.streaming);
+                    run_openai(
+                        openai_config,
+                        input_method,
+                        hotkey,
+                        hotkey2,
+                        config.streaming,
+                        extra_keys,
+                    );
                 } else {
                     println!("FAILED");
                     eprintln!("\nCannot connect to OpenAI API.");
@@ -2368,7 +2702,13 @@ fn insert_text(text: &str, method: InputMethod) -> Result<(), String> {
 }
 
 /// Type text using keyboard simulation (cross-platform via enigo)
+/// Uses global mutex to prevent concurrent typing from different threads
 fn type_text(text: &str) -> Result<(), String> {
+    // Acquire typing mutex to prevent race conditions between threads
+    let _guard = get_typing_mutex()
+        .lock()
+        .map_err(|e| format!("Failed to acquire typing mutex: {}", e))?;
+
     // macOS: Use CGEvent for better Unicode support
     #[cfg(target_os = "macos")]
     {
@@ -2453,7 +2793,13 @@ fn get_frontmost_app_pid() -> Option<i32> {
 }
 
 /// Delete N characters by sending backspace keys (cross-platform)
+/// Uses global mutex to prevent concurrent keyboard operations
 fn delete_chars(count: usize) -> Result<(), String> {
+    // Acquire typing mutex to prevent race conditions
+    let _guard = get_typing_mutex()
+        .lock()
+        .map_err(|e| format!("Failed to acquire typing mutex: {}", e))?;
+
     let mut enigo = Enigo::new(&Settings::default()).map_err(|e| format!("Enigo error: {}", e))?;
 
     for _ in 0..count {
@@ -2617,6 +2963,26 @@ fn play_stop_beep() {
     play_beep(BEEP_STOP_FREQ, BEEP_STOP_DURATION_MS);
 }
 
+/// Play double beep to indicate retry of previous failed request
+fn play_retry_beep() {
+    use std::thread;
+    thread::spawn(|| {
+        play_beep_blocking(BEEP_RETRY_FREQ, BEEP_RETRY_DURATION_MS);
+        thread::sleep(Duration::from_millis(100)); // Longer pause to let DAC stabilize
+        play_beep_blocking(BEEP_RETRY_FREQ, BEEP_RETRY_DURATION_MS);
+    });
+}
+
+/// Play low double beep to indicate error (silence detected, recording skipped)
+fn play_error_beep() {
+    use std::thread;
+    thread::spawn(|| {
+        play_beep_blocking(BEEP_ERROR_FREQ, BEEP_ERROR_DURATION_MS);
+        thread::sleep(Duration::from_millis(100)); // Longer pause to let DAC stabilize
+        play_beep_blocking(BEEP_ERROR_FREQ, BEEP_ERROR_DURATION_MS);
+    });
+}
+
 // ============================================================================
 // Utilities
 // ============================================================================
@@ -2645,6 +3011,8 @@ struct TranscriptionJob {
     start_sample: usize,
     /// End sample position in full recording (for dev mode)
     end_sample: usize,
+    /// Output mode: OUTPUT_MODE_PLAIN, OUTPUT_MODE_STRUCTURED, or OUTPUT_MODE_TRANSLATE
+    output_mode: u8,
 }
 
 /// Completed transcription result
@@ -2663,6 +3031,12 @@ struct FragmentInfo {
     transcription: String,
     /// Raw API response JSON for debugging
     raw_response: Option<String>,
+    /// Output mode used for this fragment (0=plain, 1=structured, 2=translate)
+    output_mode: u8,
+    /// Original transcription before Chat API processing (if output_mode != 0)
+    original_transcription: Option<String>,
+    /// Chat API error if structuring failed
+    chat_api_error: Option<String>,
 }
 
 /// Dev mode: Typing event (insert or delete)
@@ -2720,6 +3094,9 @@ impl DevReport {
         end: usize,
         text: String,
         raw_response: String,
+        output_mode: u8,
+        original_transcription: Option<String>,
+        chat_api_error: Option<String>,
     ) {
         self.fragments.push(FragmentInfo {
             index,
@@ -2727,6 +3104,9 @@ impl DevReport {
             end_sample: end,
             transcription: text,
             raw_response: Some(raw_response),
+            output_mode,
+            original_transcription,
+            chat_api_error,
         });
     }
 
@@ -2915,6 +3295,8 @@ impl DevReport {
                     "end_sample": f.end_sample,
                     "duration_secs": (f.end_sample - f.start_sample) as f32 / RECORDING_SAMPLE_RATE as f32,
                     "transcription": f.transcription,
+                    "structured_mode": f.output_mode != OUTPUT_MODE_PLAIN,
+                    "output_mode": f.output_mode,
                 });
                 // Add raw_response if present (for debugging API issues)
                 if let Some(ref raw) = f.raw_response {
@@ -2924,6 +3306,14 @@ impl DevReport {
                     } else {
                         frag["api_response_raw"] = serde_json::json!(raw);
                     }
+                }
+                // Add original transcription if structured mode was used
+                if let Some(ref orig) = f.original_transcription {
+                    frag["original_transcription"] = serde_json::json!(orig);
+                }
+                // Add Chat API error if structuring failed
+                if let Some(ref err) = f.chat_api_error {
+                    frag["chat_api_error"] = serde_json::json!(err);
                 }
                 frag
             }).collect::<Vec<_>>(),
@@ -3046,9 +3436,11 @@ fn run_openai(
     openai_config: OpenAIConfig,
     input_method: InputMethod,
     hotkey: HotkeyType,
+    hotkey2: Option<HotkeyType>,
     streaming: bool,
+    extra_keys: bool,
 ) {
-    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8};
     use std::sync::mpsc;
 
     let dev_mode = is_dev_mode();
@@ -3066,8 +3458,21 @@ fn run_openai(
         streaming
     );
 
+    if extra_keys {
+        if let Some(ref key2) = hotkey2 {
+            println!(
+                "[HOTKEY] Primary: {} (normal), Secondary: {} (structured), Tertiary: Right Option (translate)",
+                hotkey.name(),
+                key2.name()
+            );
+        }
+    }
+
     let config = Arc::new(openai_config);
     let target_key = hotkey.to_rdev_key();
+    let target_key2 = hotkey2.map(|k| k.to_rdev_key()); // Right Cmd = structured (only if extra_keys)
+                                                        // Right Option/Alt = translate to English (only if extra_keys enabled)
+    let target_key3 = if extra_keys { Some(Key::AltGr) } else { None };
 
     let state: Arc<Mutex<RecordingState>> = Arc::new(Mutex::new(RecordingState::Idle));
     let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3076,6 +3481,9 @@ fn run_openai(
 
     // Atomic flag for recording state - used by audio stream
     let is_recording = Arc::new(AtomicBool::new(false));
+
+    // Output mode: PLAIN, STRUCTURED, or TRANSLATE (activated by different hotkeys)
+    let output_mode = Arc::new(AtomicU8::new(OUTPUT_MODE_PLAIN));
 
     // Sequence number for ordering transcription results
     let next_sequence = Arc::new(AtomicU64::new(0));
@@ -3095,8 +3503,18 @@ fn run_openai(
     // Current session ID (shared with worker/output threads for tagging messages)
     let current_session_id: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 
-    // Channel for dev mode fragment info (session_id, sequence_num, start, end, text, raw_response)
-    let (dev_frag_tx, dev_frag_rx) = mpsc::channel::<(String, u64, usize, usize, String, String)>();
+    // Channel for dev mode fragment info (session_id, sequence_num, start, end, text, raw_response, output_mode, original_text, chat_error)
+    let (dev_frag_tx, dev_frag_rx) = mpsc::channel::<(
+        String,
+        u64,
+        usize,
+        usize,
+        String,
+        String,
+        u8,
+        Option<String>,
+        Option<String>,
+    )>();
 
     // Channel for dev mode typing events (session_id, event_type, text, char_count, sequence_num, success, error)
     let (dev_typing_tx, dev_typing_rx) =
@@ -3108,6 +3526,9 @@ fn run_openai(
     // VAD for phrase detection
     let vad: Arc<Mutex<VadPhraseDetector>> = Arc::new(Mutex::new(VadPhraseDetector::new()));
 
+    // Pending retry job - saved when network error occurs, retried on next hotkey press
+    let pending_retry_job: Arc<Mutex<Option<TranscriptionJob>>> = Arc::new(Mutex::new(None));
+
     let stream = start_recording_persistent(Arc::clone(&samples), Arc::clone(&is_recording))
         .expect("Failed to start audio recording");
 
@@ -3117,6 +3538,7 @@ fn run_openai(
     let processing_count_worker = Arc::clone(&processing_count);
     let dev_frag_tx_worker = dev_frag_tx;
     let session_id_for_worker = Arc::clone(&current_session_id);
+    let pending_retry_for_worker = Arc::clone(&pending_retry_job);
 
     thread::spawn(move || {
         use std::sync::atomic::Ordering;
@@ -3139,12 +3561,27 @@ fn run_openai(
                 }
             };
 
+            // Always use standard transcription prompt (structured mode uses Chat API post-processing)
+            let base_prompt = get_openai_prompt();
             let prompt = if let Some(ref ctx_text) = context {
                 let last_sentence = extract_last_sentence(ctx_text);
-                format!("{} {}", OPENAI_PROMPT, last_sentence)
+                format!("{} {}", base_prompt, last_sentence)
             } else {
-                OPENAI_PROMPT.to_string()
+                base_prompt
             };
+
+            let mode_name = match job.output_mode {
+                OUTPUT_MODE_TRANSLATE => "translate (English)",
+                OUTPUT_MODE_STRUCTURED => "structured (same language)",
+                _ => "plain",
+            };
+            if job.output_mode != OUTPUT_MODE_PLAIN {
+                println!(
+                    "[{}] [WORKER] Mode: {} (will use GPT-4.1 Chat API)",
+                    timestamp(),
+                    mode_name
+                );
+            }
 
             let resampled = resample_48k_to_16k(&job.samples);
             println!(
@@ -3187,11 +3624,12 @@ fn run_openai(
                             reason
                         );
                         // Retry without context to avoid model confusion
+                        let retry_prompt = get_openai_prompt();
                         match transcribe_openai_internal(
                             &config_for_worker,
                             &resampled,
                             WHISPER_SAMPLE_RATE,
-                            Some(OPENAI_PROMPT),
+                            Some(&retry_prompt),
                         ) {
                             Ok((retry_text, retry_raw)) => {
                                 let retry_trimmed = retry_text.trim();
@@ -3231,7 +3669,8 @@ fn run_openai(
                         // Save audio for analysis
                         let _audio_file = save_audio_segment(&job.samples, RECORDING_SAMPLE_RATE);
 
-                        let (processed_text, marker_continuation) = process_continuation(&text);
+                        let (transcribed_text, marker_continuation) = process_continuation(&text);
+
                         let is_first_phrase = context.is_none();
 
                         let is_continuation = if is_first_phrase {
@@ -3239,34 +3678,262 @@ fn run_openai(
                         } else {
                             marker_continuation
                                 || should_continue(
-                                    &processed_text,
+                                    &transcribed_text,
                                     context.as_deref().unwrap_or(""),
                                 )
                         };
 
-                        // Print full transcription for easy copy-paste from console
-                        println!(
-                            "\n[{}] ═══════════════════════════════════════════════════════════",
-                            timestamp()
-                        );
-                        println!("[TRANSCRIPTION #{}]", job.sequence_num);
-                        println!("{}", processed_text);
-                        println!("═══════════════════════════════════════════════════════════\n");
+                        // Process based on output mode
+                        let (processed_text, chat_api_error) = match job.output_mode {
+                            OUTPUT_MODE_TRANSLATE => {
+                                // TRANSLATE MODE: Original + Translation + Summary+Structure (English)
 
-                        if let Err(e) = result_tx.send(TranscriptionOutput {
-                            text: processed_text.clone(),
-                            is_continuation,
-                            sequence_num: job.sequence_num,
-                        }) {
-                            eprintln!(
-                                "[{}] [WORKER] ✗ Failed to send to output thread: {} (channel closed?)",
-                                timestamp(),
-                                e
-                            );
-                        }
+                                // Stage 1: Send original transcription immediately
+                                println!(
+                                    "\n[{}] ═══════════════════════════════════════════════════════════",
+                                    timestamp()
+                                );
+                                println!("[TRANSCRIPTION #{} - ORIGINAL]", job.sequence_num);
+                                println!("{}", transcribed_text);
+                                println!(
+                                    "═══════════════════════════════════════════════════════════\n"
+                                );
+
+                                if let Err(e) = result_tx.send(TranscriptionOutput {
+                                    text: transcribed_text.clone(),
+                                    is_continuation,
+                                    sequence_num: job.sequence_num,
+                                }) {
+                                    eprintln!(
+                                        "[{}] [WORKER] ✗ Failed to send original: {}",
+                                        timestamp(),
+                                        e
+                                    );
+                                }
+
+                                // Stage 2: Run translation and structuring in PARALLEL
+                                println!(
+                                    "[{}] [WORKER] Translate mode: launching parallel API calls...",
+                                    timestamp()
+                                );
+
+                                let config_for_translate = config_for_worker.clone();
+                                let config_for_structure = config_for_worker.clone();
+                                let text_for_translate = transcribed_text.clone();
+                                let text_for_structure = transcribed_text.clone();
+
+                                // Use scoped threads for parallel execution
+                                let (translation_result, structure_result) =
+                                    std::thread::scope(|s| {
+                                        let translate_handle = s.spawn(|| {
+                                            translate_to_english(
+                                                &config_for_translate,
+                                                &text_for_translate,
+                                            )
+                                        });
+                                        let structure_handle = s.spawn(|| {
+                                            structure_text_english(
+                                                &config_for_structure,
+                                                &text_for_structure,
+                                            )
+                                        });
+
+                                        (translate_handle.join(), structure_handle.join())
+                                    });
+
+                                // Wait for original to finish typing
+                                std::thread::sleep(Duration::from_millis(100));
+
+                                // Stage 3: Type translation first
+                                let mut combined = transcribed_text.clone();
+                                let mut api_error: Option<String> = None;
+
+                                match translation_result {
+                                    Ok(Ok(translation)) => {
+                                        println!(
+                                            "\n[{}] ═══════════════════════════════════════════════════════════",
+                                            timestamp()
+                                        );
+                                        println!("[TRANSLATION]");
+                                        println!("{}", translation);
+                                        println!("═══════════════════════════════════════════════════════════\n");
+
+                                        let translation_with_separator =
+                                            format!("\n\n----------\n{}", translation);
+                                        if let Err(e) = type_text(&translation_with_separator) {
+                                            eprintln!(
+                                                "[{}] [WORKER] ✗ Failed to type translation: {}",
+                                                timestamp(),
+                                                e
+                                            );
+                                        }
+                                        combined.push_str(&translation_with_separator);
+                                    }
+                                    Ok(Err(e)) => {
+                                        eprintln!(
+                                            "[{}] [WORKER] ⚠ Translation failed: {}",
+                                            timestamp(),
+                                            e
+                                        );
+                                        api_error = Some(e);
+                                    }
+                                    Err(_) => {
+                                        eprintln!(
+                                            "[{}] [WORKER] ✗ Translation thread panicked",
+                                            timestamp()
+                                        );
+                                    }
+                                }
+
+                                // Stage 4: Type structured content
+                                match structure_result {
+                                    Ok(Ok(structured)) => {
+                                        println!(
+                                            "\n[{}] ═══════════════════════════════════════════════════════════",
+                                            timestamp()
+                                        );
+                                        println!("[SUMMARY+STRUCTURE (EN)]");
+                                        println!("{}", structured);
+                                        println!("═══════════════════════════════════════════════════════════\n");
+
+                                        let structured_with_separator =
+                                            format!("\n\n----------\n{}", structured);
+                                        if let Err(e) = type_text(&structured_with_separator) {
+                                            eprintln!(
+                                                "[{}] [WORKER] ✗ Failed to type structured: {}",
+                                                timestamp(),
+                                                e
+                                            );
+                                        }
+                                        combined.push_str(&structured_with_separator);
+                                    }
+                                    Ok(Err(e)) => {
+                                        eprintln!(
+                                            "[{}] [WORKER] ⚠ Structure failed: {}",
+                                            timestamp(),
+                                            e
+                                        );
+                                        if api_error.is_none() {
+                                            api_error = Some(e);
+                                        }
+                                    }
+                                    Err(_) => {
+                                        eprintln!(
+                                            "[{}] [WORKER] ✗ Structure thread panicked",
+                                            timestamp()
+                                        );
+                                    }
+                                }
+
+                                (combined, api_error)
+                            }
+
+                            OUTPUT_MODE_STRUCTURED => {
+                                // STRUCTURED MODE: Original + Summary+Structure (same language)
+
+                                // Stage 1: Send original transcription immediately
+                                println!(
+                                    "\n[{}] ═══════════════════════════════════════════════════════════",
+                                    timestamp()
+                                );
+                                println!("[TRANSCRIPTION #{} - ORIGINAL]", job.sequence_num);
+                                println!("{}", transcribed_text);
+                                println!(
+                                    "═══════════════════════════════════════════════════════════\n"
+                                );
+
+                                if let Err(e) = result_tx.send(TranscriptionOutput {
+                                    text: transcribed_text.clone(),
+                                    is_continuation,
+                                    sequence_num: job.sequence_num,
+                                }) {
+                                    eprintln!(
+                                        "[{}] [WORKER] ✗ Failed to send original: {}",
+                                        timestamp(),
+                                        e
+                                    );
+                                }
+
+                                // Stage 2: Call GPT-4.1 for summary+structure
+                                println!(
+                                    "[{}] [WORKER] Structured mode: calling GPT-4.1...",
+                                    timestamp()
+                                );
+
+                                match structure_text_with_chat_api(
+                                    &config_for_worker,
+                                    &transcribed_text,
+                                ) {
+                                    Ok(structured) => {
+                                        println!(
+                                            "\n[{}] ═══════════════════════════════════════════════════════════",
+                                            timestamp()
+                                        );
+                                        println!("[SUMMARY+STRUCTURE]");
+                                        println!("{}", structured);
+                                        println!("═══════════════════════════════════════════════════════════\n");
+
+                                        // Type structured output directly
+                                        std::thread::sleep(Duration::from_millis(100));
+                                        let structured_with_separator =
+                                            format!("\n\n----------\n{}", structured);
+                                        if let Err(e) = type_text(&structured_with_separator) {
+                                            eprintln!(
+                                                "[{}] [WORKER] ✗ Failed to type structured: {}",
+                                                timestamp(),
+                                                e
+                                            );
+                                        }
+
+                                        (
+                                            format!(
+                                                "{}\n\n----------\n{}",
+                                                transcribed_text, structured
+                                            ),
+                                            None,
+                                        )
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[{}] [WORKER] ⚠ Chat API failed: {}",
+                                            timestamp(),
+                                            e
+                                        );
+                                        (transcribed_text.clone(), Some(e))
+                                    }
+                                }
+                            }
+
+                            _ => {
+                                // PLAIN MODE: Just send transcribed text
+                                println!(
+                                    "\n[{}] ═══════════════════════════════════════════════════════════",
+                                    timestamp()
+                                );
+                                println!("[TRANSCRIPTION #{}]", job.sequence_num);
+                                println!("{}", transcribed_text);
+                                println!(
+                                    "═══════════════════════════════════════════════════════════\n"
+                                );
+
+                                if let Err(e) = result_tx.send(TranscriptionOutput {
+                                    text: transcribed_text.clone(),
+                                    is_continuation,
+                                    sequence_num: job.sequence_num,
+                                }) {
+                                    eprintln!("[{}] [WORKER] ✗ Failed to send: {}", timestamp(), e);
+                                }
+                                (transcribed_text.clone(), None)
+                            }
+                        };
 
                         // Send fragment info for dev report (with session_id for filtering)
                         let sid = session_id_for_worker.lock().unwrap().clone();
+                        let original_text = if job.output_mode != OUTPUT_MODE_PLAIN {
+                            Some(transcribed_text.clone())
+                        } else {
+                            None
+                        };
                         let _ = dev_frag_tx_worker.send((
                             sid,
                             job.sequence_num,
@@ -3274,6 +3941,9 @@ fn run_openai(
                             job.end_sample,
                             processed_text,
                             final_raw_response,
+                            job.output_mode,
+                            original_text,
+                            chat_api_error,
                         ));
                     } else {
                         let reason = if trimmed == "-" {
@@ -3297,16 +3967,37 @@ fn run_openai(
                             job.end_sample,
                             String::new(), // empty text (skipped)
                             final_raw_response,
+                            job.output_mode,
+                            None,
+                            None,
                         ));
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[{}] [WORKER] ✗ Transcription error for #{}: {}",
-                        timestamp(),
-                        job.sequence_num,
-                        e
-                    );
+                    // Check if this is a connection lost error (retryable)
+                    if e.starts_with(CONNECTION_LOST_PREFIX) {
+                        // Save job for retry on next hotkey press
+                        let mut pending = pending_retry_for_worker.lock().unwrap();
+                        *pending = Some(TranscriptionJob {
+                            samples: job.samples.clone(),
+                            sequence_num: job.sequence_num,
+                            start_sample: job.start_sample,
+                            end_sample: job.end_sample,
+                            output_mode: job.output_mode,
+                        });
+                        println!(
+                            "[{}] [WORKER] Job #{} saved for retry (press hotkey to retry)",
+                            timestamp(),
+                            job.sequence_num
+                        );
+                    } else {
+                        eprintln!(
+                            "[{}] [WORKER] ✗ Transcription error for #{}: {}",
+                            timestamp(),
+                            job.sequence_num,
+                            e
+                        );
+                    }
 
                     // Send error to dev report
                     let sid = session_id_for_worker.lock().unwrap().clone();
@@ -3317,6 +4008,9 @@ fn run_openai(
                         job.end_sample,
                         String::new(),
                         format!("{{\"error\": \"{}\"}}", e.replace('"', "\\\"")),
+                        job.output_mode,
+                        None,
+                        Some(e),
                     ));
                 }
             }
@@ -3498,12 +4192,32 @@ fn run_openai(
     // Dev mode: Fragment collector thread (filters by session_id)
     let dev_report_for_collector = Arc::clone(&dev_report);
     thread::spawn(move || {
-        for (msg_session_id, seq, start, end, text, raw_response) in dev_frag_rx {
+        for (
+            msg_session_id,
+            seq,
+            start,
+            end,
+            text,
+            raw_response,
+            output_mode,
+            original_text,
+            chat_error,
+        ) in dev_frag_rx
+        {
             let mut report_guard = dev_report_for_collector.lock().unwrap();
             if let Some(ref mut report) = *report_guard {
                 // Only add fragment if it belongs to current session
                 if report.session_id == msg_session_id {
-                    report.add_fragment_with_raw(seq, start, end, text, raw_response);
+                    report.add_fragment_with_raw(
+                        seq,
+                        start,
+                        end,
+                        text,
+                        raw_response,
+                        output_mode,
+                        original_text,
+                        chat_error,
+                    );
                 } else {
                     println!(
                         "[DEV] Dropping stale fragment from session {} (current: {})",
@@ -3556,6 +4270,7 @@ fn run_openai(
     let job_tx_vad = job_tx.clone();
     let dev_vad_tx_for_vad = dev_vad_tx.clone();
     let session_id_for_vad = Arc::clone(&current_session_id);
+    let output_mode_for_vad = Arc::clone(&output_mode);
 
     thread::spawn(move || {
         use std::sync::atomic::Ordering;
@@ -3642,11 +4357,13 @@ fn run_openai(
                 let sid = session_id_for_vad.lock().unwrap().clone();
                 let _ = dev_vad_tx_for_vad.send((sid, "phrase_detected".to_string(), log_details));
 
+                let current_mode = output_mode_for_vad.load(Ordering::SeqCst);
                 let _ = job_tx_vad.send(TranscriptionJob {
                     samples: phrase_samples,
                     sequence_num: seq,
                     start_sample: start_pos,
                     end_sample: end_pos,
+                    output_mode: current_mode,
                 });
             }
         }
@@ -3665,6 +4382,8 @@ fn run_openai(
     let session_id_callback = Arc::clone(&current_session_id);
     let last_phrase_callback = Arc::clone(&last_phrase);
     let dev_vad_tx_callback = dev_vad_tx;
+    let output_mode_clone = Arc::clone(&output_mode);
+    let pending_retry_callback = Arc::clone(&pending_retry_job);
 
     // Debounce state
     let key_debounce = Arc::new(AtomicBool::new(false));
@@ -3674,10 +4393,58 @@ fn run_openai(
         use std::sync::atomic::Ordering;
 
         match event.event_type {
-            EventType::KeyPress(key) if key == target_key => {
+            EventType::KeyPress(key)
+                if key == target_key || target_key2 == Some(key) || target_key3 == Some(key) =>
+            {
                 if key_debounce_clone.swap(true, Ordering::SeqCst) {
                     return; // Already pressed, ignore repeat
                 }
+
+                // Check for pending retry job first
+                {
+                    let mut pending = pending_retry_callback.lock().unwrap();
+                    if let Some(job) = pending.take() {
+                        // Play retry beep to indicate we're retrying previous failed request
+                        play_retry_beep();
+
+                        println!(
+                            "[{}] [RETRY] Retrying previous failed job #{}...",
+                            timestamp(),
+                            job.sequence_num
+                        );
+
+                        // Re-submit the job to the worker
+                        processing_count_clone.fetch_add(1, Ordering::SeqCst);
+                        let _ = job_tx_callback.send(job);
+
+                        // Reset debounce immediately since we're not recording
+                        key_debounce_clone.store(false, Ordering::SeqCst);
+                        return;
+                    }
+                }
+
+                // Determine output mode based on which key was pressed
+                let mode = if target_key3 == Some(key) {
+                    OUTPUT_MODE_TRANSLATE // Right Option = translate to English
+                } else if target_key2 == Some(key) {
+                    OUTPUT_MODE_STRUCTURED // Right Cmd = structured (same language)
+                } else {
+                    OUTPUT_MODE_PLAIN // Fn = plain transcription
+                };
+                output_mode_clone.store(mode, Ordering::SeqCst);
+
+                // Debug: log which key was pressed and mode
+                let mode_name = match mode {
+                    OUTPUT_MODE_TRANSLATE => "translate",
+                    OUTPUT_MODE_STRUCTURED => "structured",
+                    _ => "plain",
+                };
+                println!(
+                    "[{}] [HOTKEY] Pressed: {:?}, mode={}",
+                    timestamp(),
+                    key,
+                    mode_name
+                );
 
                 // Check if not already recording
                 let mut rec_state = state_clone.lock().unwrap();
@@ -3738,7 +4505,9 @@ fn run_openai(
                     // No start beep - it would be captured in the recording
                 }
             }
-            EventType::KeyRelease(key) if key == target_key => {
+            EventType::KeyRelease(key)
+                if key == target_key || target_key2 == Some(key) || target_key3 == Some(key) =>
+            {
                 key_debounce_clone.store(false, Ordering::SeqCst);
 
                 // Check if currently recording
@@ -3746,7 +4515,6 @@ fn run_openai(
                 if *rec_state == RecordingState::Recording {
                     is_recording_clone.store(false, Ordering::SeqCst);
                     *rec_state = RecordingState::Idle;
-                    play_stop_beep();
 
                     let recording_duration = recording_start_clone
                         .lock()
@@ -3756,8 +4524,11 @@ fn run_openai(
 
                     if recording_duration < Duration::from_millis(MIN_RECORDING_MS) {
                         println!("[{}] Recording too short, ignoring", timestamp());
+                        play_error_beep();
                         return;
                     }
+
+                    play_stop_beep();
 
                     // Get audio to transcribe
                     // If streaming=false, send ALL audio as single segment
@@ -3793,11 +4564,39 @@ fn run_openai(
 
                     // Queue final phrase for transcription
                     if let Some((phrase_samples, start_pos, end_pos)) = remaining {
+                        let duration_secs =
+                            phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
+                        let duration_ms = (duration_secs * 1000.0) as u64;
+
+                        // For short recordings (< 3 sec), check if there's actual voice content
+                        // to filter out accidental button presses with silence
+                        if duration_ms < SHORT_RECORDING_THRESHOLD_MS {
+                            let vad = vad_clone.lock().unwrap();
+                            let (has_voice, voice_percent) = vad.has_voice_content(&phrase_samples);
+                            drop(vad);
+
+                            if !has_voice {
+                                println!(
+                                    "[{}] Short recording ({:.1}s) with no voice detected ({:.0}% < {:.0}% threshold), skipping",
+                                    timestamp(),
+                                    duration_secs,
+                                    voice_percent * 100.0,
+                                    MIN_VOICE_RATIO_FOR_SPEECH * 100.0
+                                );
+                                play_error_beep();
+                                return;
+                            }
+                            println!(
+                                "[{}] Short recording ({:.1}s) has voice ({:.0}%), processing...",
+                                timestamp(),
+                                duration_secs,
+                                voice_percent * 100.0
+                            );
+                        }
+
                         let seq = next_sequence_clone.fetch_add(1, Ordering::SeqCst);
                         processing_count_clone.fetch_add(1, Ordering::SeqCst);
 
-                        let duration_secs =
-                            phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
                         println!(
                             "[{}] Final phrase #{} ({:.1}s), queuing for transcription...",
                             timestamp(),
@@ -3817,11 +4616,13 @@ fn run_openai(
                             log_details,
                         ));
 
+                        let current_mode = output_mode_clone.load(Ordering::SeqCst);
                         let _ = job_tx_callback.send(TranscriptionJob {
                             samples: phrase_samples,
                             sequence_num: seq,
                             start_sample: start_pos,
                             end_sample: end_pos,
+                            output_mode: current_mode,
                         });
                     } else {
                         println!("[{}] No remaining audio to transcribe", timestamp());
@@ -4186,16 +4987,17 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                         .map(|start| start.elapsed())
                         .unwrap_or(Duration::ZERO);
 
-                    play_stop_beep();
-
                     *rec_state = RecordingState::Idle;
                     *recording_start_clone.lock().unwrap() = None;
 
                     if recording_duration < Duration::from_millis(MIN_RECORDING_MS) {
                         println!("[{}] Recording too short, ignoring", timestamp());
+                        play_error_beep();
                         samples_clone.lock().unwrap().clear();
                         return;
                     }
+
+                    play_stop_beep();
 
                     let remaining = {
                         let samples = samples_clone.lock().unwrap();

@@ -8,10 +8,12 @@
 use anyhow::Result;
 #[cfg(feature = "whisper")]
 use std::path::PathBuf;
+use tracing::Level;
 #[cfg(feature = "whisper")]
 use tracing::{error, info};
-use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
+#[cfg(not(feature = "whisper"))]
+use voice_keyboard::config::Config;
 #[cfg(feature = "whisper")]
 use voice_keyboard::transcribe::Transcriber;
 #[cfg(feature = "whisper")]
@@ -21,8 +23,6 @@ use voice_keyboard::{
     hotkey::{HotkeyAction, HotkeyConfig, HotkeyListener},
     inject::TextInjector,
 };
-#[cfg(not(feature = "whisper"))]
-use voice_keyboard::config::Config;
 
 #[tokio::main]
 async fn main() -> Result<()> {
