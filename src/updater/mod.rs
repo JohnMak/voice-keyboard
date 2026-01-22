@@ -263,7 +263,7 @@ impl Updater {
     }
 
     /// Find the appropriate asset for current platform
-    fn find_platform_asset(&self, assets: &[ReleaseAsset]) -> Result<&ReleaseAsset> {
+    fn find_platform_asset<'a>(&self, assets: &'a [ReleaseAsset]) -> Result<&'a ReleaseAsset> {
         let target = self.target_triple();
 
         // Look for matching asset

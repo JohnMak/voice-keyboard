@@ -41,7 +41,7 @@ reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-fea
 indicatif = "0.17"  # Progress bar
 
 # Timestamps for logging
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 
 # Environment variables (.env file)
 dotenvy = "0.15"
