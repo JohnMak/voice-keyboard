@@ -59,22 +59,29 @@ impl eframe::App for VoiceKeyboardApp {
             });
         });
 
-        // Status bar at bottom
+        // Status bar at bottom - capture save request to handle after UI
+        let mut should_save = false;
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 let state = self.state.lock().unwrap();
                 ui.label(&state.status_message);
+                let has_unsaved = state.has_unsaved_changes;
+                drop(state);
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if state.has_unsaved_changes {
+                    if has_unsaved {
                         if ui.button("Save").clicked() {
-                            drop(state);
-                            self.save_config();
+                            should_save = true;
                         }
                     }
                 });
             });
         });
+
+        // Handle save after UI rendering to avoid mutable borrow conflict
+        if should_save {
+            self.save_config();
+        }
 
         // Main content
         egui::CentralPanel::default().show(ctx, |ui| {

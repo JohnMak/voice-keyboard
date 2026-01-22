@@ -38,6 +38,10 @@ pub fn setup_tray(
         .with_icon(icon)
         .build()?;
 
+    // Extract menu item IDs before spawning thread (MenuId uses Rc which is not Send)
+    let show_id = show_item.id().0.clone();
+    let quit_id = quit_item.id().0.clone();
+
     // Spawn menu event handler thread
     let ctx_clone = ctx.clone();
     std::thread::spawn(move || {
@@ -46,12 +50,12 @@ pub fn setup_tray(
         loop {
             if let Ok(event) = menu_channel.recv() {
                 match event.id.0.as_str() {
-                    id if id == show_item.id().0 => {
+                    id if id == show_id => {
                         // Request repaint to show window
                         ctx_clone.request_repaint();
                         // Note: Window visibility is controlled by egui viewport
                     }
-                    id if id == quit_item.id().0 => {
+                    id if id == quit_id => {
                         std::process::exit(0);
                     }
                     _ => {}

@@ -69,12 +69,17 @@ jobs:
             libopus-dev \
             pkg-config
 
-      # Build (opus only on Linux/Windows where it works reliably)
+      # Build with appropriate features per platform
+      # - Windows: whisper + opus + gui (full features)
+      # - Linux: whisper + opus (gui needs extra system deps for release)
+      # - macOS: whisper only (opus has linking issues on macOS CI)
       - name: Build
         shell: bash
         run: |
           if [[ "${{ matrix.os }}" == "ubuntu-22.04" ]]; then
             cargo build --release --bin voice-typer --features "whisper,opus" --target ${{ matrix.target }}
+          elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            cargo build --release --bin voice-typer --features "whisper,opus,gui" --target ${{ matrix.target }}
           else
             cargo build --release --bin voice-typer --features "whisper" --target ${{ matrix.target }}
           fi

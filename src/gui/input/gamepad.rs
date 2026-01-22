@@ -95,9 +95,14 @@ pub fn list_gamepads() -> Vec<GamepadInfo> {
         .map(|(id, gamepad)| GamepadInfo {
             id: id.into(),
             name: gamepad.name().to_string(),
-            uuid: format!("{}", gamepad.uuid()),
+            uuid: format_uuid(gamepad.uuid()),
         })
         .collect()
+}
+
+/// Format gamepad UUID bytes as hex string
+fn format_uuid(bytes: [u8; 16]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Gamepad information
