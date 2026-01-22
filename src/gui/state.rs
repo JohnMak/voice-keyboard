@@ -5,9 +5,24 @@
 use crate::config::{Config, UpdateChannel};
 use std::path::PathBuf;
 
+/// Application status for tray icon color
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AppStatus {
+    /// Red: Not configured (no API key and no Whisper model)
+    #[default]
+    NotConfigured,
+    /// Orange: Configured but connection failed or testing
+    NoConnection,
+    /// Green: Ready to transcribe
+    Ready,
+}
+
 /// Main application state shared across GUI and worker threads
 #[derive(Debug)]
 pub struct AppState {
+    /// Current app status (affects tray icon color)
+    pub status: AppStatus,
+
     /// OpenAI API key
     pub api_key: String,
 
@@ -126,7 +141,25 @@ impl AppState {
         // Check downloaded models
         let downloaded_models = get_downloaded_models();
 
+        // Determine initial status
+        let has_api_key = !api_key.is_empty();
+        let has_whisper_model = !downloaded_models.is_empty();
+        let status = if has_api_key || has_whisper_model {
+            AppStatus::Ready // Configured, will test connection later
+        } else {
+            AppStatus::NotConfigured // Red - needs setup
+        };
+
+        let status_message = match status {
+            AppStatus::NotConfigured => {
+                "Not configured - enter API key or download Whisper model".to_string()
+            }
+            AppStatus::NoConnection => "Connection failed".to_string(),
+            AppStatus::Ready => "Ready".to_string(),
+        };
+
         Self {
+            status,
             api_key,
             hotkey_type,
             input_method,
@@ -138,7 +171,7 @@ impl AppState {
             },
             auto_update: config.auto_update,
             update_channel: config.update_channel,
-            status_message: "Ready".to_string(),
+            status_message,
             last_transcription: String::new(),
             config_path,
             has_unsaved_changes: false,

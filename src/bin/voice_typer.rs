@@ -1453,8 +1453,13 @@ fn print_usage() {
     let default_key = HotkeyType::default_for_platform();
     println!("Usage: voice-typer [OPTIONS]");
     println!();
+    #[cfg(feature = "gui")]
+    println!("By default, launches GUI with system tray. Use --cli for command-line mode.");
+    println!();
     println!("Options:");
-    println!("  --model <MODEL>    Model name or path to .bin file");
+    #[cfg(feature = "gui")]
+    println!("  --cli              Run in CLI mode (no GUI, requires --openai or local model)");
+    println!("  --model <MODEL>    Model name or path to .bin file (CLI mode)");
     println!("                     Presets: tiny, base, small, medium, large-v3-turbo (or turbo)");
     println!("                     Default: base");
     println!("  --download <MODEL> Download a model from the internet (tries multiple mirrors)");
@@ -1472,15 +1477,12 @@ fn print_usage() {
     println!("  --volume <0.0-1.0> Beep sounds volume (default: 0.1 = 10%)");
     println!("                     Use 0 to disable sounds, 1.0 for max volume");
     println!("  --silent, -q       Disable all beep sounds (same as --volume 0)");
-    println!("  --clipboard        Use clipboard+paste instead of keyboard input");
-    println!("  --keyboard         Use keyboard simulation (default)");
-    println!("  --openai           Use OpenAI gpt-4o-transcribe API instead of local Whisper");
+    println!("  --clipboard        Use clipboard+paste instead of keyboard input (CLI mode)");
+    println!("  --keyboard         Use keyboard simulation (default in CLI mode)");
+    println!("  --openai           Use OpenAI API instead of local Whisper (CLI mode)");
     println!("                     Requires OPENAI_API_KEY in .env file or environment");
-    println!("                     Optional: OPENAI_API_URL for custom endpoint (proxy)");
     println!("  --list-models      List available model presets");
     println!("  --list-keys        List available hotkey options");
-    #[cfg(feature = "gui")]
-    println!("  --gui              Launch GUI with system tray (settings window)");
     println!("  --version, -V      Show version information");
     println!("  --help, -h         Show this help");
     println!();
@@ -1869,6 +1871,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let mut model_arg: Option<String> = config.model.clone();
     let mut use_openai = false;
+    let mut cli_mode = false; // CLI mode (advanced, requires --cli flag)
 
     let mut input_method = match config.input_method.as_deref() {
         Some("clipboard") => InputMethod::Clipboard,
@@ -2081,9 +2084,13 @@ fn main() {
                 // Enable extra hotkeys when flag is set
                 hotkey2 = Some(HotkeyType::MetaRight); // Right Cmd = structured
             }
+            "--cli" => {
+                // CLI mode (no GUI, requires model or --openai)
+                cli_mode = true;
+            }
             #[cfg(feature = "gui")]
             "--gui" => {
-                // Launch GUI mode with system tray
+                // Explicitly launch GUI (same as default)
                 launch_gui();
                 return;
             }
@@ -2096,6 +2103,14 @@ fn main() {
         i += 1;
     }
 
+    // Default: Launch GUI mode (unless --cli was specified)
+    #[cfg(feature = "gui")]
+    if !cli_mode {
+        launch_gui();
+        return;
+    }
+
+    // CLI mode continues below...
     let input_mode_str = match input_method {
         InputMethod::Keyboard => "keyboard simulation",
         InputMethod::Clipboard => {
