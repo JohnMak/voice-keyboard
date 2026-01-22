@@ -360,6 +360,25 @@ impl VoiceKeyboardApp {
                 .weak(),
             );
         });
+
+        ui.add_space(10.0);
+
+        // Start/Restart Voice Keyboard section
+        ui.group(|ui| {
+            ui.label("Voice Keyboard Service");
+
+            ui.horizontal(|ui| {
+                if ui.button("Start Voice Keyboard").clicked() {
+                    self.start_voice_keyboard();
+                }
+
+                ui.label(
+                    egui::RichText::new("Saves config and starts voice capture in background")
+                        .small()
+                        .weak(),
+                );
+            });
+        });
     }
 
     /// Show the Whisper Offline tab
@@ -375,6 +394,59 @@ impl VoiceKeyboardApp {
         } else {
             state.has_unsaved_changes = false;
             state.status_message = "Settings saved".to_string();
+        }
+    }
+
+    /// Start voice keyboard in CLI mode
+    fn start_voice_keyboard(&mut self) {
+        // First save the config
+        self.save_config();
+
+        // Get settings from state
+        let (api_key_set, extra_keys) = {
+            let state = self.state.lock().unwrap();
+            (!state.api_key.is_empty(), state.extra_keys_enabled)
+        };
+
+        if !api_key_set {
+            let mut state = self.state.lock().unwrap();
+            state.status_message = "Error: API key not configured".to_string();
+            return;
+        }
+
+        // Find the voice-typer binary (same directory as current exe)
+        let binary_path = match std::env::current_exe() {
+            Ok(exe) => {
+                let parent = exe.parent().unwrap_or(std::path::Path::new("."));
+                if cfg!(target_os = "windows") {
+                    parent.join("voice-typer.exe")
+                } else {
+                    parent.join("voice-typer")
+                }
+            }
+            Err(_) => {
+                let mut state = self.state.lock().unwrap();
+                state.status_message = "Error: Cannot find executable path".to_string();
+                return;
+            }
+        };
+
+        // Build arguments
+        let mut args = vec!["--cli".to_string(), "--openai".to_string()];
+        if extra_keys {
+            args.push("--extra-keys".to_string());
+        }
+
+        // Spawn the process
+        match std::process::Command::new(&binary_path).args(&args).spawn() {
+            Ok(_) => {
+                let mut state = self.state.lock().unwrap();
+                state.status_message = "Voice keyboard started".to_string();
+            }
+            Err(e) => {
+                let mut state = self.state.lock().unwrap();
+                state.status_message = format!("Error starting: {}", e);
+            }
         }
     }
 }
