@@ -69,14 +69,15 @@ jobs:
             libopus-dev \
             pkg-config
 
-      # macOS dependencies
-      - name: Install macOS dependencies
-        if: runner.os == 'macOS'
-        run: brew install opus
-
-      # Build
+      # Build (opus only on Linux/Windows where it works reliably)
       - name: Build
-        run: cargo build --release --bin voice-typer --features "whisper,opus" --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          if [[ "${{ matrix.os }}" == "ubuntu-22.04" ]]; then
+            cargo build --release --bin voice-typer --features "whisper,opus" --target ${{ matrix.target }}
+          else
+            cargo build --release --bin voice-typer --features "whisper" --target ${{ matrix.target }}
+          fi
 
       # Test that binary works
       - name: Test binary
@@ -149,6 +150,7 @@ jobs:
 
       - name: Build release
         run: cargo build --release --bin voice-typer --features "whisper,opus"
+        # opus only available on Linux with proper deps
 
       - name: Create PNG icon from SVG
         run: |
@@ -192,11 +194,8 @@ jobs:
         with:
           key: ${{ matrix.target }}-dmg
 
-      - name: Install dependencies
-        run: brew install opus
-
       - name: Build release
-        run: cargo build --release --bin voice-typer --features "whisper,opus" --target ${{ matrix.target }}
+        run: cargo build --release --bin voice-typer --features "whisper" --target ${{ matrix.target }}
 
       - name: Create app bundle
         run: |
