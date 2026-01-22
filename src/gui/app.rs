@@ -403,9 +403,13 @@ impl VoiceKeyboardApp {
         self.save_config();
 
         // Get settings from state
-        let (api_key_set, extra_keys) = {
+        let (api_key_set, extra_keys, input_method) = {
             let state = self.state.lock().unwrap();
-            (!state.api_key.is_empty(), state.extra_keys_enabled)
+            (
+                !state.api_key.is_empty(),
+                state.extra_keys_enabled,
+                state.input_method,
+            )
         };
 
         if !api_key_set {
@@ -433,15 +437,27 @@ impl VoiceKeyboardApp {
 
         // Build arguments
         let mut args = vec!["--cli".to_string(), "--openai".to_string()];
+
+        // Add input method
+        match input_method {
+            super::state::InputMethod::Clipboard => args.push("--clipboard".to_string()),
+            super::state::InputMethod::Keyboard => args.push("--keyboard".to_string()),
+        }
+
         if extra_keys {
             args.push("--extra-keys".to_string());
         }
+
+        let mode_str = match input_method {
+            super::state::InputMethod::Clipboard => "clipboard",
+            super::state::InputMethod::Keyboard => "keyboard",
+        };
 
         // Spawn the process
         match std::process::Command::new(&binary_path).args(&args).spawn() {
             Ok(_) => {
                 let mut state = self.state.lock().unwrap();
-                state.status_message = "Voice keyboard started".to_string();
+                state.status_message = format!("Voice keyboard started ({})", mode_str);
             }
             Err(e) => {
                 let mut state = self.state.lock().unwrap();
