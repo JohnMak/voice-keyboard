@@ -132,8 +132,27 @@ fn launch_and_monitor(
         return ExitCode::FAILURE;
     }
 
-    // Pass through command line arguments to the core app
-    let args: Vec<String> = env::args().skip(1).collect();
+    // Build arguments for the core app
+    let mut args: Vec<String> = env::args().skip(1).collect();
+
+    // If no arguments provided and we have API key configured, use --cli --openai mode
+    if args.is_empty() {
+        if config.openai_api_key.is_some() || std::env::var("OPENAI_API_KEY").is_ok() {
+            args.push("--cli".to_string());
+            args.push("--openai".to_string());
+
+            // Pass extra keys setting if enabled
+            if config.extra_keys_enabled {
+                args.push("--extra-keys".to_string());
+                logger.log("Starting in CLI OpenAI mode with extra keys");
+            } else {
+                logger.log("Starting in CLI OpenAI mode (API key configured)");
+            }
+        } else {
+            logger.log("No API key configured - starting GUI for setup");
+            // GUI mode will be default (no args)
+        }
+    }
 
     logger.log(&format!(
         "Launching core app: {} {}",

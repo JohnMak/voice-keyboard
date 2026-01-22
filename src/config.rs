@@ -55,6 +55,10 @@ pub struct Config {
     /// Custom update URL (overrides GitHub releases)
     #[serde(default)]
     pub update_url: Option<String>,
+
+    /// Enable extra hotkeys (Right Cmd = structured, Right Option = translate)
+    #[serde(default)]
+    pub extra_keys_enabled: bool,
 }
 
 fn default_language() -> String {
@@ -219,6 +223,7 @@ impl Default for Config {
             auto_update: true,
             update_channel: UpdateChannel::default(),
             update_url: None,
+            extra_keys_enabled: false,
         }
     }
 }

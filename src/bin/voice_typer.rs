@@ -909,8 +909,11 @@ struct OpenAIConfig {
 }
 
 impl OpenAIConfig {
-    /// Load OpenAI configuration from .env file and environment
+    /// Load OpenAI configuration from config file, .env file, or environment
     fn load() -> Option<Self> {
+        // First, try to load from config file
+        let config = voice_keyboard::config::Config::load().ok();
+
         // Try to load .env file from current directory or home
         let _ = dotenvy::dotenv();
 
@@ -920,11 +923,37 @@ impl OpenAIConfig {
             let _ = dotenvy::from_path(&env_path);
         }
 
-        let api_key = env::var("OPENAI_API_KEY").ok()?;
-        let api_url =
-            env::var("OPENAI_API_URL").unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        // Priority: config file > env var
+        let api_key = config
+            .as_ref()
+            .and_then(|c| c.openai_api_key.clone())
+            .or_else(|| env::var("OPENAI_API_KEY").ok());
+
+        let api_key = match api_key {
+            Some(key) if !key.is_empty() => {
+                println!("[CONFIG] API key loaded (length: {})", key.len());
+                key
+            }
+            _ => {
+                eprintln!("[ERROR] No OpenAI API key found in config or environment");
+                eprintln!("        Set OPENAI_API_KEY or configure in GUI settings");
+                return None;
+            }
+        };
+
+        let api_url = config
+            .as_ref()
+            .map(|c| c.openai_api_url.clone())
+            .filter(|url| !url.is_empty())
+            .or_else(|| env::var("OPENAI_API_URL").ok())
+            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+
+        println!("[CONFIG] API URL: {}", api_url);
+
         let model = env::var("OPENAI_TRANSCRIPTION_MODEL")
             .unwrap_or_else(|_| "gpt-4o-transcribe".to_string());
+
+        println!("[CONFIG] Model: {}", model);
 
         Some(Self {
             api_key,

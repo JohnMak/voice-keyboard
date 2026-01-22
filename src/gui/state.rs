@@ -179,7 +179,7 @@ impl AppState {
             hotkey_type,
             input_method,
             volume: if config.play_sounds { 0.5 } else { 0.0 },
-            extra_keys_enabled: false, // TODO: add to config
+            extra_keys_enabled: config.extra_keys_enabled,
             whisper_offline: WhisperOfflineState {
                 downloaded_models,
                 ..Default::default()
@@ -221,6 +221,7 @@ impl AppState {
             auto_update: self.auto_update,
             update_channel: self.update_channel,
             update_url: None,
+            extra_keys_enabled: self.extra_keys_enabled,
         };
 
         config.save()?;
