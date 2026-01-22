@@ -9,6 +9,14 @@ use tracing::info;
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// OpenAI API key (optional, can also use OPENAI_API_KEY env var)
+    #[serde(default)]
+    pub openai_api_key: Option<String>,
+
+    /// OpenAI API URL (optional, defaults to https://api.openai.com/v1)
+    #[serde(default = "default_openai_api_url")]
+    pub openai_api_url: String,
+
     /// Path to Whisper model file
     pub model_path: PathBuf,
 
@@ -51,6 +59,10 @@ pub struct Config {
 
 fn default_language() -> String {
     "auto".to_string()
+}
+
+fn default_openai_api_url() -> String {
+    "https://api.openai.com/v1".to_string()
 }
 
 fn default_true() -> bool {
@@ -195,6 +207,8 @@ impl Default for Config {
         let models_dir = Self::models_dir().unwrap_or_else(|_| PathBuf::from("./models"));
 
         Self {
+            openai_api_key: None,
+            openai_api_url: default_openai_api_url(),
             model_path: models_dir.join("ggml-large-v3-turbo.bin"),
             model_size: ModelSizeConfig::LargeV3Turbo,
             language: "auto".to_string(),

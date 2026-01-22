@@ -21,6 +21,9 @@ pub struct VoiceKeyboardApp {
 
     /// Temporary API key input (for editing)
     api_key_input: String,
+
+    /// Temporary API URL input (for editing)
+    api_url_input: String,
 }
 
 /// Available tabs
@@ -33,7 +36,10 @@ enum Tab {
 impl VoiceKeyboardApp {
     /// Create new app with shared state
     pub fn new(state: Arc<Mutex<AppState>>) -> Self {
-        let api_key_input = state.lock().unwrap().api_key.clone();
+        let state_guard = state.lock().unwrap();
+        let api_key_input = state_guard.api_key.clone();
+        let api_url_input = state_guard.api_url.clone();
+        drop(state_guard);
 
         Self {
             state,
@@ -41,6 +47,7 @@ impl VoiceKeyboardApp {
             show_api_key: false,
             binding_hotkey: false,
             api_key_input,
+            api_url_input,
         }
     }
 }
@@ -110,17 +117,20 @@ impl VoiceKeyboardApp {
         ui.heading("General Settings");
         ui.add_space(10.0);
 
-        // API Key section
+        // OpenAI API section
         ui.group(|ui| {
-            ui.label("OpenAI API Key");
+            ui.label("OpenAI API Configuration");
+
+            // API Key
             ui.horizontal(|ui| {
+                ui.label("API Key:");
                 let text_edit = if self.show_api_key {
                     egui::TextEdit::singleline(&mut self.api_key_input)
                 } else {
                     egui::TextEdit::singleline(&mut self.api_key_input).password(true)
                 };
 
-                let response = ui.add_sized([300.0, 20.0], text_edit);
+                let response = ui.add_sized([280.0, 20.0], text_edit);
 
                 if response.changed() {
                     let mut state = self.state.lock().unwrap();
@@ -135,10 +145,28 @@ impl VoiceKeyboardApp {
                     self.show_api_key = !self.show_api_key;
                 }
             });
+
+            // API URL
+            ui.horizontal(|ui| {
+                ui.label("API URL:");
+                let response = ui.add_sized(
+                    [340.0, 20.0],
+                    egui::TextEdit::singleline(&mut self.api_url_input),
+                );
+
+                if response.changed() {
+                    let mut state = self.state.lock().unwrap();
+                    state.api_url = self.api_url_input.clone();
+                    state.has_unsaved_changes = true;
+                }
+            });
+
             ui.label(
-                egui::RichText::new("Get your API key from platform.openai.com")
-                    .small()
-                    .weak(),
+                egui::RichText::new(
+                    "Get API key from platform.openai.com. Use custom URL for proxy/local server.",
+                )
+                .small()
+                .weak(),
             );
         });
 

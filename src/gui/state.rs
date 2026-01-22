@@ -26,6 +26,9 @@ pub struct AppState {
     /// OpenAI API key
     pub api_key: String,
 
+    /// OpenAI API URL (e.g., https://api.openai.com/v1 or proxy URL)
+    pub api_url: String,
+
     /// Current hotkey configuration
     pub hotkey_type: String,
 
@@ -125,8 +128,19 @@ impl AppState {
     pub fn from_config(config: Config) -> Self {
         let config_path = Config::config_path().unwrap_or_else(|_| PathBuf::from("config.json"));
 
-        // Load API key from environment or config
-        let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+        // Load API key: config takes priority, then env var
+        let api_key = config
+            .openai_api_key
+            .clone()
+            .unwrap_or_else(|| std::env::var("OPENAI_API_KEY").unwrap_or_default());
+
+        // Load API URL: config takes priority, then env var, then default
+        let api_url = if config.openai_api_url.is_empty() {
+            std::env::var("OPENAI_API_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string())
+        } else {
+            config.openai_api_url.clone()
+        };
 
         // Parse input method from config
         let input_method = match &config.injection_method {
@@ -161,6 +175,7 @@ impl AppState {
         Self {
             status,
             api_key,
+            api_url,
             hotkey_type,
             input_method,
             volume: if config.play_sounds { 0.5 } else { 0.0 },
@@ -183,6 +198,12 @@ impl AppState {
         use crate::config::{Config, HotkeyConfigSerde, InjectionMethodConfig};
 
         let config = Config {
+            openai_api_key: if self.api_key.is_empty() {
+                None
+            } else {
+                Some(self.api_key.clone())
+            },
+            openai_api_url: self.api_url.clone(),
             model_path: PathBuf::new(), // TODO: get from whisper settings
             model_size: crate::config::ModelSizeConfig::LargeV3Turbo,
             language: "auto".to_string(),
@@ -203,12 +224,6 @@ impl AppState {
         };
 
         config.save()?;
-
-        // Save API key to environment file if changed
-        if !self.api_key.is_empty() {
-            // Note: We don't persist API key to file for security
-            // User should set OPENAI_API_KEY environment variable
-        }
 
         Ok(())
     }
