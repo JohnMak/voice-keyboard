@@ -108,7 +108,7 @@ impl Default for WhisperOfflineState {
 impl AppState {
     /// Create state from config
     pub fn from_config(config: Config) -> Self {
-        let config_path = Config::config_path().unwrap_or_else(|| PathBuf::from("config.json"));
+        let config_path = Config::config_path().unwrap_or_else(|_| PathBuf::from("config.json"));
 
         // Load API key from environment or config
         let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
