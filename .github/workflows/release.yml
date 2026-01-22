@@ -66,11 +66,15 @@ jobs:
             libx11-dev \
             libxtst-dev \
             libevdev-dev \
+            libgtk-3-dev \
+            libappindicator3-dev \
+            libudev-dev \
+            libopus-dev \
             pkg-config
 
       # Build
       - name: Build
-        run: cargo build --release --bin voice-typer --features whisper --target ${{ matrix.target }}
+        run: cargo build --release --bin voice-typer --features "whisper,opus,gui" --target ${{ matrix.target }}
 
       # Test that binary works
       - name: Test binary
@@ -135,13 +139,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libasound2-dev libxdo-dev libx11-dev libxtst-dev libevdev-dev pkg-config
+            libasound2-dev libxdo-dev libx11-dev libxtst-dev libevdev-dev \
+            libgtk-3-dev libappindicator3-dev libudev-dev libopus-dev pkg-config
 
       - name: Install cargo-deb
         run: cargo install cargo-deb
 
       - name: Build release
-        run: cargo build --release --bin voice-typer --features whisper
+        run: cargo build --release --bin voice-typer --features "whisper,opus,gui"
 
       - name: Create PNG icon from SVG
         run: |
@@ -186,7 +191,7 @@ jobs:
           key: ${{ matrix.target }}-dmg
 
       - name: Build release
-        run: cargo build --release --bin voice-typer --features whisper --target ${{ matrix.target }}
+        run: cargo build --release --bin voice-typer --features "whisper,opus,gui" --target ${{ matrix.target }}
 
       - name: Create app bundle
         run: |
