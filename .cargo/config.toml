@@ -1,0 +1,12 @@
+# Cargo configuration for voice-keyboard
+
+# Windows: Use static CRT linking for standalone exe
+# This eliminates the need for Visual C++ Redistributable
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
