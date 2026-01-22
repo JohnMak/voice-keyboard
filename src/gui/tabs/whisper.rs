@@ -60,10 +60,18 @@ pub fn show(ui: &mut egui::Ui, state: &Arc<Mutex<AppState>>) {
         let whisper = &mut state_guard.whisper_offline;
 
         ui.horizontal(|ui| {
-            ui.radio_value(&mut whisper.use_as_primary, false, "Use as fallback (when API fails)");
+            ui.radio_value(
+                &mut whisper.use_as_primary,
+                false,
+                "Use as fallback (when API fails)",
+            );
         });
         ui.horizontal(|ui| {
-            ui.radio_value(&mut whisper.use_as_primary, true, "Use as primary (instead of OpenAI)");
+            ui.radio_value(
+                &mut whisper.use_as_primary,
+                true,
+                "Use as primary (instead of OpenAI)",
+            );
         });
 
         ui.checkbox(&mut whisper.enabled, "Enable Whisper offline mode");
@@ -187,19 +195,20 @@ fn start_download(model_name: &str, state: &Arc<Mutex<AppState>>) {
     }
 
     // Start download in background thread
-    std::thread::spawn(move || {
-        match download_model_blocking(&model_name, &state) {
-            Ok(()) => {
-                let mut state_guard = state.lock().unwrap();
-                state_guard.whisper_offline.download_progress = None;
-                state_guard.whisper_offline.downloaded_models.push(model_name.clone());
-                state_guard.status_message = format!("Downloaded {}", model_name);
-            }
-            Err(e) => {
-                let mut state_guard = state.lock().unwrap();
-                state_guard.whisper_offline.download_progress = None;
-                state_guard.status_message = format!("Download failed: {}", e);
-            }
+    std::thread::spawn(move || match download_model_blocking(&model_name, &state) {
+        Ok(()) => {
+            let mut state_guard = state.lock().unwrap();
+            state_guard.whisper_offline.download_progress = None;
+            state_guard
+                .whisper_offline
+                .downloaded_models
+                .push(model_name.clone());
+            state_guard.status_message = format!("Downloaded {}", model_name);
+        }
+        Err(e) => {
+            let mut state_guard = state.lock().unwrap();
+            state_guard.whisper_offline.download_progress = None;
+            state_guard.status_message = format!("Download failed: {}", e);
         }
     });
 }
@@ -219,9 +228,7 @@ fn download_model_blocking(model_name: &str, state: &Arc<Mutex<AppState>>) -> an
     let dest_path = models_dir.join(format!("ggml-{}.bin", model_name));
 
     // Download with progress
-    let response = reqwest::blocking::Client::new()
-        .get(&url)
-        .send()?;
+    let response = reqwest::blocking::Client::new().get(&url).send()?;
 
     let total_size = response.content_length().unwrap_or(0);
     let mut downloaded: u64 = 0;

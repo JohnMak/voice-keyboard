@@ -99,7 +99,10 @@ impl InputCapture {
             });
         }
 
-        Self { event_rx, stop_flag }
+        Self {
+            event_rx,
+            stop_flag,
+        }
     }
 
     /// Wait for next input event

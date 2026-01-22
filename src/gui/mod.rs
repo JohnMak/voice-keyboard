@@ -67,11 +67,23 @@ fn setup_custom_styles(ctx: &eframe::egui::Context) {
 
     // Slightly larger default font
     style.text_styles = [
-        (TextStyle::Small, FontId::new(12.0, FontFamily::Proportional)),
+        (
+            TextStyle::Small,
+            FontId::new(12.0, FontFamily::Proportional),
+        ),
         (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
-        (TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace)),
-        (TextStyle::Button, FontId::new(14.0, FontFamily::Proportional)),
-        (TextStyle::Heading, FontId::new(18.0, FontFamily::Proportional)),
+        (
+            TextStyle::Monospace,
+            FontId::new(13.0, FontFamily::Monospace),
+        ),
+        (
+            TextStyle::Button,
+            FontId::new(14.0, FontFamily::Proportional),
+        ),
+        (
+            TextStyle::Heading,
+            FontId::new(18.0, FontFamily::Proportional),
+        ),
     ]
     .into();
 

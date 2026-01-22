@@ -51,7 +51,11 @@ impl eframe::App for VoiceKeyboardApp {
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.current_tab, Tab::General, "General");
-                ui.selectable_value(&mut self.current_tab, Tab::WhisperOffline, "Whisper Offline");
+                ui.selectable_value(
+                    &mut self.current_tab,
+                    Tab::WhisperOffline,
+                    "Whisper Offline",
+                );
             });
         });
 
@@ -74,11 +78,9 @@ impl eframe::App for VoiceKeyboardApp {
 
         // Main content
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                match self.current_tab {
-                    Tab::General => self.show_general_tab(ui),
-                    Tab::WhisperOffline => self.show_whisper_tab(ui),
-                }
+            egui::ScrollArea::vertical().show(ui, |ui| match self.current_tab {
+                Tab::General => self.show_general_tab(ui),
+                Tab::WhisperOffline => self.show_whisper_tab(ui),
             });
         });
 
@@ -119,7 +121,10 @@ impl VoiceKeyboardApp {
                     state.has_unsaved_changes = true;
                 }
 
-                if ui.button(if self.show_api_key { "Hide" } else { "Show" }).clicked() {
+                if ui
+                    .button(if self.show_api_key { "Hide" } else { "Show" })
+                    .clicked()
+                {
                     self.show_api_key = !self.show_api_key;
                 }
             });
@@ -147,7 +152,14 @@ impl VoiceKeyboardApp {
                 }
                 drop(state);
 
-                if ui.button(if self.binding_hotkey { "Cancel" } else { "Bind..." }).clicked() {
+                if ui
+                    .button(if self.binding_hotkey {
+                        "Cancel"
+                    } else {
+                        "Bind..."
+                    })
+                    .clicked()
+                {
                     self.binding_hotkey = !self.binding_hotkey;
                 }
             });
@@ -159,7 +171,10 @@ impl VoiceKeyboardApp {
                 .show_ui(ui, |ui| {
                     let options = ["fn", "ctrl", "ctrlright", "alt", "altright", "shift", "cmd"];
                     for option in options {
-                        if ui.selectable_label(state.hotkey_type == option, option).clicked() {
+                        if ui
+                            .selectable_label(state.hotkey_type == option, option)
+                            .clicked()
+                        {
                             state.hotkey_type = option.to_string();
                             state.has_unsaved_changes = true;
                         }
@@ -178,7 +193,10 @@ impl VoiceKeyboardApp {
 
             ui.horizontal(|ui| {
                 if ui
-                    .radio(state.input_method == InputMethod::Keyboard, "Keyboard simulation")
+                    .radio(
+                        state.input_method == InputMethod::Keyboard,
+                        "Keyboard simulation",
+                    )
                     .clicked()
                 {
                     state.input_method = InputMethod::Keyboard;
@@ -188,7 +206,10 @@ impl VoiceKeyboardApp {
 
             ui.horizontal(|ui| {
                 if ui
-                    .radio(state.input_method == InputMethod::Clipboard, "Clipboard + paste")
+                    .radio(
+                        state.input_method == InputMethod::Clipboard,
+                        "Clipboard + paste",
+                    )
                     .clicked()
                 {
                     state.input_method = InputMethod::Clipboard;
@@ -234,7 +255,10 @@ impl VoiceKeyboardApp {
             let mut extra_keys = state.extra_keys_enabled;
 
             if ui
-                .checkbox(&mut extra_keys, "Enable extra hotkeys (Right Cmd, Right Option)")
+                .checkbox(
+                    &mut extra_keys,
+                    "Enable extra hotkeys (Right Cmd, Right Option)",
+                )
                 .changed()
             {
                 state.extra_keys_enabled = extra_keys;
@@ -242,9 +266,63 @@ impl VoiceKeyboardApp {
             }
 
             ui.label(
-                egui::RichText::new("Right Cmd: Structured summary | Right Option: Translate to English")
-                    .small()
-                    .weak(),
+                egui::RichText::new(
+                    "Right Cmd: Structured summary | Right Option: Translate to English",
+                )
+                .small()
+                .weak(),
+            );
+        });
+
+        ui.add_space(10.0);
+
+        // Auto-update section
+        ui.group(|ui| {
+            ui.label("Auto-Update");
+
+            ui.horizontal(|ui| {
+                ui.label(format!("Current version: v{}", env!("CARGO_PKG_VERSION")));
+            });
+
+            let mut state = self.state.lock().unwrap();
+            let mut auto_update = state.auto_update;
+
+            if ui
+                .checkbox(&mut auto_update, "Enable automatic updates")
+                .changed()
+            {
+                state.auto_update = auto_update;
+                state.has_unsaved_changes = true;
+            }
+
+            // Update channel selection
+            ui.horizontal(|ui| {
+                ui.label("Update channel:");
+
+                use crate::config::UpdateChannel;
+
+                let mut channel = state.update_channel;
+                if ui
+                    .radio(channel == UpdateChannel::Stable, "Stable")
+                    .clicked()
+                {
+                    channel = UpdateChannel::Stable;
+                    state.update_channel = channel;
+                    state.has_unsaved_changes = true;
+                }
+                if ui.radio(channel == UpdateChannel::Beta, "Beta").clicked() {
+                    channel = UpdateChannel::Beta;
+                    state.update_channel = channel;
+                    state.has_unsaved_changes = true;
+                }
+            });
+
+            ui.label(
+                egui::RichText::new(
+                    "Beta channel includes pre-release versions with latest features",
+                )
+                .small()
+                .weak(),
             );
         });
     }

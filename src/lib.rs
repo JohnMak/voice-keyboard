@@ -17,6 +17,9 @@ pub mod transcribe;
 #[cfg(feature = "gui-core")]
 pub mod gui;
 
+#[cfg(feature = "updater")]
+pub mod updater;
+
 pub use config::Config;
 
 use thiserror::Error;

@@ -2,7 +2,7 @@
 //!
 //! This state is shared between the GUI thread and background worker threads.
 
-use crate::config::Config;
+use crate::config::{Config, UpdateChannel};
 use std::path::PathBuf;
 
 /// Main application state shared across GUI and worker threads
@@ -25,6 +25,12 @@ pub struct AppState {
 
     /// Whisper offline settings
     pub whisper_offline: WhisperOfflineState,
+
+    /// Auto-update enabled
+    pub auto_update: bool,
+
+    /// Update channel (stable or beta)
+    pub update_channel: UpdateChannel,
 
     /// Status message to display
     pub status_message: String,
@@ -102,8 +108,7 @@ impl Default for WhisperOfflineState {
 impl AppState {
     /// Create state from config
     pub fn from_config(config: Config) -> Self {
-        let config_path = Config::config_path()
-            .unwrap_or_else(|| PathBuf::from("config.json"));
+        let config_path = Config::config_path().unwrap_or_else(|| PathBuf::from("config.json"));
 
         // Load API key from environment or config
         let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
@@ -131,6 +136,8 @@ impl AppState {
                 downloaded_models,
                 ..Default::default()
             },
+            auto_update: config.auto_update,
+            update_channel: config.update_channel,
             status_message: "Ready".to_string(),
             last_transcription: String::new(),
             config_path,
@@ -157,6 +164,9 @@ impl AppState {
             },
             play_sounds: self.volume > 0.0,
             show_notifications: true,
+            auto_update: self.auto_update,
+            update_channel: self.update_channel,
+            update_url: None,
         };
 
         config.save()?;
@@ -189,10 +199,7 @@ fn get_downloaded_models() -> Vec<String> {
                 let name = name.to_string_lossy();
                 // Match model file patterns like "ggml-large-v3-turbo.bin"
                 if name.starts_with("ggml-") && path.extension().is_some_and(|e| e == "bin") {
-                    let model_name = name
-                        .strip_prefix("ggml-")
-                        .unwrap_or(&name)
-                        .to_string();
+                    let model_name = name.strip_prefix("ggml-").unwrap_or(&name).to_string();
                     models.push(model_name);
                 }
             }

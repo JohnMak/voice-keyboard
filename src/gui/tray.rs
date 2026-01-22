@@ -117,9 +117,6 @@ fn create_default_icon() -> Vec<u8> {
 
 /// Stub for when tray feature is not enabled
 #[cfg(not(feature = "gui-tray"))]
-pub fn setup_tray(
-    _state: Arc<Mutex<AppState>>,
-    _ctx: eframe::egui::Context,
-) -> anyhow::Result<()> {
+pub fn setup_tray(_state: Arc<Mutex<AppState>>, _ctx: eframe::egui::Context) -> anyhow::Result<()> {
     Ok(())
 }

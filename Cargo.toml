@@ -65,6 +65,17 @@ hidapi = { version = "2.6", optional = true }
 # Gamepad support (optional)
 gilrs = { version = "0.11", optional = true }
 
+# Auto-update from GitHub Releases (optional)
+self_update = { version = "0.41", optional = true, default-features = false, features = ["rustls", "archive-tar", "archive-zip", "compression-flate2"] }
+# Binary replacement (Windows file locking workaround)
+self-replace = { version = "1.5", optional = true }
+# Semantic version comparison
+semver = { version = "1.0", optional = true }
+# Archive extraction
+flate2 = { version = "1.0", optional = true }
+tar = { version = "0.4", optional = true }
+zip = { version = "2.2", optional = true, default-features = false, features = ["deflate"] }
+
 # macOS-only dependencies (including tray)
 [target.'cfg(target_os = "macos")'.dependencies]
 tray-icon = { version = "0.19", optional = true }
@@ -98,6 +109,12 @@ path = "src/bin/voice_recorder.rs"
 name = "voice-typer"
 path = "src/bin/voice_typer.rs"
 
+# Launcher binary - checks for updates and launches voice-typer
+[[bin]]
+name = "voice-typer-launcher"
+path = "src/bin/launcher.rs"
+required-features = ["updater"]
+
 [dev-dependencies]
 tempfile = "3"
 assert_cmd = "2"
@@ -113,6 +130,8 @@ gui-core = ["egui", "eframe", "image"]  # Settings window only
 gui-tray = ["tray-icon", "muda"]  # System tray (Linux requires libgtk-3-dev)
 gui-input = ["hidapi", "gilrs"]  # USB HID + gamepad hotkey binding
 gui = ["gui-core", "gui-tray", "gui-input"]  # Full GUI with all features
+# Auto-update feature
+updater = ["self_update", "self-replace", "semver", "flate2", "tar", "zip"]
 
 [profile.release]
 lto = true

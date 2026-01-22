@@ -60,10 +60,10 @@ fn button_to_code(button: gilrs::Button) -> u32 {
     use gilrs::Button;
 
     match button {
-        Button::South => 0,      // A / Cross
-        Button::East => 1,       // B / Circle
-        Button::North => 2,      // Y / Triangle
-        Button::West => 3,       // X / Square
+        Button::South => 0, // A / Cross
+        Button::East => 1,  // B / Circle
+        Button::North => 2, // Y / Triangle
+        Button::West => 3,  // X / Square
         Button::LeftTrigger => 4,
         Button::LeftTrigger2 => 5,
         Button::RightTrigger => 6,
