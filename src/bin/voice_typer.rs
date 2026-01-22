@@ -40,6 +40,34 @@ use rdev::{listen, Event, EventType, Key};
 use reqwest::blocking::Client;
 use std::process::Command;
 
+// ============================================================================
+// GUI Launch (feature-gated)
+// ============================================================================
+
+/// Launch the GUI with system tray
+#[cfg(feature = "gui")]
+fn launch_gui() {
+    use voice_keyboard::config::Config;
+
+    // Load configuration
+    let config = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Warning: Failed to load config: {}", e);
+            Config::default()
+        }
+    };
+
+    println!("Launching Voice Keyboard GUI...");
+    println!("Look for the microphone icon in your system tray.");
+
+    // Run GUI
+    if let Err(e) = voice_keyboard::gui::run(config) {
+        eprintln!("GUI error: {}", e);
+        std::process::exit(1);
+    }
+}
+
 /// Minimum recording duration to process (avoid accidental taps)
 const MIN_RECORDING_MS: u64 = 300;
 
@@ -1451,6 +1479,8 @@ fn print_usage() {
     println!("                     Optional: OPENAI_API_URL for custom endpoint (proxy)");
     println!("  --list-models      List available model presets");
     println!("  --list-keys        List available hotkey options");
+    #[cfg(feature = "gui")]
+    println!("  --gui              Launch GUI with system tray (settings window)");
     println!("  --version, -V      Show version information");
     println!("  --help, -h         Show this help");
     println!();
@@ -2050,6 +2080,12 @@ fn main() {
                 extra_keys = true;
                 // Enable extra hotkeys when flag is set
                 hotkey2 = Some(HotkeyType::MetaRight); // Right Cmd = structured
+            }
+            #[cfg(feature = "gui")]
+            "--gui" => {
+                // Launch GUI mode with system tray
+                launch_gui();
+                return;
             }
             arg => {
                 eprintln!("Unknown argument: {}", arg);

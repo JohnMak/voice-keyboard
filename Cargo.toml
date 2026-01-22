@@ -54,12 +54,34 @@ cpal = "0.15"           # Audio recording (CoreAudio/ALSA/WASAPI)
 rdev = "0.5"            # Global hotkeys
 enigo = "0.2"           # Keyboard simulation
 
-# macOS-only dependencies
+# GUI dependencies (optional, enabled with --features gui)
+egui = { version = "0.30", optional = true }
+eframe = { version = "0.30", optional = true, default-features = false, features = ["glow", "x11", "wayland"] }
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }  # Icon loading
+
+# USB HID devices support (optional, for SpeechMike etc.)
+hidapi = { version = "2.6", optional = true }
+
+# Gamepad support (optional)
+gilrs = { version = "0.11", optional = true }
+
+# macOS-only dependencies (including tray)
 [target.'cfg(target_os = "macos")'.dependencies]
-tray-icon = "0.19"      # System tray
+tray-icon = { version = "0.19", optional = true }
+muda = { version = "0.15", optional = true }
 cocoa = "0.26"          # macOS clipboard for files
 objc = "0.2"            # Objective-C runtime
 core-graphics = { version = "0.24", features = ["elcapitan"] }  # CGEvent with post_to_pid
+
+# Windows-only dependencies (tray)
+[target.'cfg(target_os = "windows")'.dependencies]
+tray-icon = { version = "0.19", optional = true }
+muda = { version = "0.15", optional = true }
+
+# Linux tray requires GTK dev packages (libgtk-3-dev, libappindicator3-dev)
+[target.'cfg(target_os = "linux")'.dependencies]
+tray-icon = { version = "0.19", optional = true }
+muda = { version = "0.15", optional = true }
 
 # Minimal binary - standalone, no whisper dependency
 [[bin]]
@@ -86,6 +108,11 @@ whisper = ["whisper-rs"]
 coreml = ["whisper-rs/coreml"]
 metal = ["whisper-rs/metal"]
 opus = ["ogg-opus"]  # OGG/Opus encoding (requires libopus: brew install opus)
+# GUI features
+gui-core = ["egui", "eframe", "image"]  # Settings window only
+gui-tray = ["tray-icon", "muda"]  # System tray (Linux requires libgtk-3-dev)
+gui-input = ["hidapi", "gilrs"]  # USB HID + gamepad hotkey binding
+gui = ["gui-core", "gui-tray", "gui-input"]  # Full GUI with all features
 
 [profile.release]
 lto = true

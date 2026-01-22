@@ -14,6 +14,9 @@ pub mod inject;
 #[cfg(feature = "whisper")]
 pub mod transcribe;
 
+#[cfg(feature = "gui-core")]
+pub mod gui;
+
 pub use config::Config;
 
 use thiserror::Error;
