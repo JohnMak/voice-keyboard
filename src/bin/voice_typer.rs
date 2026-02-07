@@ -100,14 +100,14 @@ const MODEL_SIZES: &[(&str, u64)] = &[
 #[cfg(feature = "whisper")]
 const WHISPER_PROMPT: &str = "\
 Голосовые команды программиста на русском с IT-терминами на английском: \
-Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper, Claude Code.";
+Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper, Claude Code, subagent.";
 
 /// Prompt for GPT-4o transcription API - can use LLM-style instructions
 /// Supports auto-detection between Russian and English (configurable via VOICE_KEYBOARD_LANGUAGES)
 const OPENAI_PROMPT_TEMPLATE: &str = "\
 Голосовые команды программиста. Автоматически определи язык речи ({languages}) и транскрибируй НА ТОМ ЖЕ ЯЗЫКЕ. \
 НЕ ПЕРЕВОДИ — если говорят по-английски, пиши по-английски; если по-русски — по-русски. \
-IT-термины оставляй на английском: Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper. \
+IT-термины оставляй на английском: Git, Docker, API, React, TypeScript, npm, config, Claude, Whisper, subagent. \
 КРИТИЧЕСКИ ВАЖНО: Распознавай ТОЛЬКО реально слышимое в аудио. \
 НИКОГДА не повторяй текст из контекста — контекст только для понимания темы. \
 Если аудио неразборчиво, тишина или шум — ответь ровно одним символом: - \
@@ -1183,7 +1183,7 @@ RULES:
 - Preserve original meaning, tone, and structure
 - Keep questions as questions, exclamations as exclamations
 - Maintain paragraph breaks
-- IT terms stay in English: Git, Docker, API, Claude
+- IT terms stay in English: Git, Docker, API, Claude, subagent
 - Just translate, no formatting changes, no additions
 - Output ONLY the translation, nothing else";
 
