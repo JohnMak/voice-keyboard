@@ -150,11 +150,35 @@ impl Config {
             let content = std::fs::read_to_string(&path)
                 .map_err(|e| VoiceKeyboardError::Config(format!("Failed to read config: {e}")))?;
 
-            let config: Config = serde_json::from_str(&content)
-                .map_err(|e| VoiceKeyboardError::Config(format!("Failed to parse config: {e}")))?;
-
-            info!("Loaded config from {}", path.display());
-            Ok(config)
+            // Try strict deserialization first
+            match serde_json::from_str::<Config>(&content) {
+                Ok(config) => {
+                    info!("Loaded config from {}", path.display());
+                    Ok(config)
+                }
+                Err(_) => {
+                    // Fallback: extract available fields from potentially incompatible format
+                    // (e.g., Tauri UI config has different field types for hotkey, model, etc.)
+                    info!("Config format mismatch, extracting available fields from {}", path.display());
+                    let value: serde_json::Value = serde_json::from_str(&content)
+                        .map_err(|e| VoiceKeyboardError::Config(format!("Failed to parse config: {e}")))?;
+                    let mut config = Self::default();
+                    if let Some(key) = value.get("openai_api_key").and_then(|v| v.as_str()) {
+                        if !key.is_empty() {
+                            config.openai_api_key = Some(key.to_string());
+                        }
+                    }
+                    if let Some(url) = value.get("openai_api_url").and_then(|v| v.as_str()) {
+                        if !url.is_empty() {
+                            config.openai_api_url = url.to_string();
+                        }
+                    }
+                    if let Some(lang) = value.get("language").and_then(|v| v.as_str()) {
+                        config.language = lang.to_string();
+                    }
+                    Ok(config)
+                }
+            }
         } else {
             info!("Config not found, using defaults");
             Ok(Self::default())
@@ -182,27 +206,30 @@ impl Config {
     }
 
     /// Get config file path
+    ///
+    /// Uses BaseDirs to match the path used by Tauri UI:
+    /// macOS: ~/Library/Application Support/voice-keyboard/config.json
     pub fn config_path() -> Result<PathBuf> {
-        let dirs = directories::ProjectDirs::from("com", "alexmak", "voice-keyboard")
+        let base = directories::BaseDirs::new()
             .ok_or_else(|| VoiceKeyboardError::Config("Failed to get config dir".to_string()))?;
 
-        Ok(dirs.config_dir().join("config.json"))
+        Ok(base.config_dir().join("voice-keyboard").join("config.json"))
     }
 
     /// Get models directory path
     pub fn models_dir() -> Result<PathBuf> {
-        let dirs = directories::ProjectDirs::from("com", "alexmak", "voice-keyboard")
+        let base = directories::BaseDirs::new()
             .ok_or_else(|| VoiceKeyboardError::Config("Failed to get data dir".to_string()))?;
 
-        Ok(dirs.data_dir().join("models"))
+        Ok(base.data_dir().join("voice-keyboard").join("models"))
     }
 
     /// Get data directory path (for updater, logs, etc.)
     pub fn data_dir() -> Result<PathBuf> {
-        let dirs = directories::ProjectDirs::from("com", "alexmak", "voice-keyboard")
+        let base = directories::BaseDirs::new()
             .ok_or_else(|| VoiceKeyboardError::Config("Failed to get data dir".to_string()))?;
 
-        Ok(dirs.data_dir().to_path_buf())
+        Ok(base.data_dir().join("voice-keyboard"))
     }
 }
 

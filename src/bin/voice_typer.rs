@@ -979,6 +979,14 @@ impl OpenAIConfig {
     }
 }
 
+fn mask_api_key(key: &str) -> String {
+    let trimmed = key.trim();
+    if trimmed.len() <= 8 {
+        return "***".to_string();
+    }
+    format!("{}...{}", &trimmed[..4], &trimmed[trimmed.len() - 4..])
+}
+
 /// Maximum number of retries for API errors (non-network)
 const API_MAX_RETRIES: u32 = 3;
 /// Base delay between retries in milliseconds
@@ -2167,6 +2175,22 @@ fn main() {
     }
     println!("Input method: {}", input_mode_str);
     println!("Press Ctrl+C to exit\n");
+    std::io::stdout().flush().ok();
+
+    // Pre-request microphone permission at startup by briefly creating an audio stream.
+    // This triggers the macOS permission dialog immediately instead of on first Fn press.
+    // Accessibility and Input Monitoring are requested automatically by enigo/rdev.
+    #[cfg(target_os = "macos")]
+    {
+        use std::sync::atomic::AtomicBool;
+        let dummy_samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+        let dummy_flag = Arc::new(AtomicBool::new(false));
+        if let Ok(stream) = start_recording_persistent(Arc::clone(&dummy_samples), Arc::clone(&dummy_flag)) {
+            drop(stream);
+            println!("[{}] Microphone permission: OK", timestamp());
+        }
+        std::io::stdout().flush().ok();
+    }
 
     // OpenAI mode: use gpt-4o-transcribe API
     if use_openai {
@@ -2174,12 +2198,14 @@ fn main() {
             Some(openai_config) => {
                 println!("Transcription: OpenAI API ({})", openai_config.model);
                 println!("API URL: {}", openai_config.api_url);
+                println!("API Key: {}", mask_api_key(&openai_config.api_key));
 
                 print!("Testing connection... ");
                 std::io::stdout().flush().ok();
 
                 if openai_config.test_connection() {
                     println!("OK\n");
+                    std::io::stdout().flush().ok();
                     run_openai(
                         openai_config,
                         input_method,
@@ -2190,6 +2216,7 @@ fn main() {
                     );
                 } else {
                     println!("FAILED");
+                    std::io::stdout().flush().ok();
                     eprintln!("\nCannot connect to OpenAI API.");
                     eprintln!("Check your OPENAI_API_KEY and OPENAI_API_URL.");
                     std::process::exit(1);
@@ -2722,10 +2749,8 @@ fn start_recording_persistent(
     }
     .map_err(|e| format!("Failed to build stream: {}", e))?;
 
-    stream
-        .play()
-        .map_err(|e| format!("Failed to start stream: {}", e))?;
-
+    // Return stream in paused state — caller controls play/pause
+    // This keeps macOS microphone indicator off until recording starts
     Ok(stream)
 }
 
@@ -2922,6 +2947,7 @@ fn play_beep(frequency: f32, duration_ms: u64) {
         play_beep_blocking(frequency, duration_ms);
     });
 }
+
 
 fn play_beep_blocking(frequency: f32, duration_ms: u64) {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -3501,6 +3527,7 @@ fn run_openai(
         },
         streaming
     );
+    std::io::stdout().flush().ok();
 
     if extra_keys {
         if let Some(ref key2) = hotkey2 {
@@ -3573,8 +3600,9 @@ fn run_openai(
     // Pending retry job - saved when network error occurs, retried on next hotkey press
     let pending_retry_job: Arc<Mutex<Option<TranscriptionJob>>> = Arc::new(Mutex::new(None));
 
-    let stream = start_recording_persistent(Arc::clone(&samples), Arc::clone(&is_recording))
-        .expect("Failed to start audio recording");
+    // Stream is created on key press and destroyed on key release
+    // so macOS microphone indicator only shows during recording
+    let active_stream: Arc<Mutex<Option<cpal::Stream>>> = Arc::new(Mutex::new(None));
 
     // Transcription worker thread - processes jobs from queue
     let config_for_worker = Arc::clone(&config);
@@ -4002,6 +4030,13 @@ fn run_openai(
                             reason
                         );
 
+                        // Advance output sequence so key handler doesn't deadlock
+                        let _ = result_tx.send(TranscriptionOutput {
+                            text: String::new(),
+                            is_continuation: false,
+                            sequence_num: job.sequence_num,
+                        });
+
                         // Still send to dev report for debugging (with empty text but raw response)
                         let sid = session_id_for_worker.lock().unwrap().clone();
                         let _ = dev_frag_tx_worker.send((
@@ -4042,6 +4077,18 @@ fn run_openai(
                             e
                         );
                     }
+                    println!("[{}] [ERROR] API error: {}", timestamp(), e);
+                    std::io::stdout().flush().ok();
+
+                    // Play error sound
+                    play_error_beep();
+
+                    // Advance output sequence so key handler doesn't deadlock
+                    let _ = result_tx.send(TranscriptionOutput {
+                        text: String::new(),
+                        is_continuation: false,
+                        sequence_num: job.sequence_num,
+                    });
 
                     // Send error to dev report
                     let sid = session_id_for_worker.lock().unwrap().clone();
@@ -4104,6 +4151,18 @@ fn run_openai(
                 pending_outputs.keys().collect::<Vec<_>>()
             );
             while let Some(output) = pending_outputs.remove(&current_seq) {
+                // Skip empty results (from skipped segments or API errors)
+                if output.text.trim().is_empty() {
+                    println!(
+                        "[{}] [OUTPUT] ⏭ Skipping empty result #{}",
+                        timestamp(),
+                        current_seq
+                    );
+                    next_output_seq_for_output.fetch_add(1, Ordering::SeqCst);
+                    current_seq += 1;
+                    continue;
+                }
+
                 println!(
                     "[{}] [OUTPUT] ✓ Processing seq #{} for typing",
                     timestamp(),
@@ -4168,6 +4227,7 @@ fn run_openai(
                     let (success, error) = match &insert_result {
                         Ok(_) => {
                             println!("[{}] +\"{}\"", timestamp(), output.text);
+                            std::io::stdout().flush().ok();
                             (true, None)
                         }
                         Err(e) => {
@@ -4191,6 +4251,7 @@ fn run_openai(
                     let old_ctx = ctx.clone();
                     *ctx = format!("{}, {}", remove_trailing_punctuation(&old_ctx), output.text);
                     println!("[{}] ctx: \"{}\" -> \"{}\"", timestamp(), old_ctx, *ctx);
+                    std::io::stdout().flush().ok();
                 } else {
                     let final_text = if is_first_phrase {
                         capitalize_first(&output.text)
@@ -4204,6 +4265,7 @@ fn run_openai(
                     let (success, error) = match &insert_result {
                         Ok(_) => {
                             println!("[{}] \"{}\"", timestamp(), final_text);
+                            std::io::stdout().flush().ok();
                             (true, None)
                         }
                         Err(e) => {
@@ -4427,6 +4489,7 @@ fn run_openai(
     let last_phrase_callback = Arc::clone(&last_phrase);
     let dev_vad_tx_callback = dev_vad_tx;
     let output_mode_clone = Arc::clone(&output_mode);
+    let active_stream_clone = Arc::clone(&active_stream);
     let pending_retry_callback = Arc::clone(&pending_retry_job);
 
     // Debounce state
@@ -4534,6 +4597,19 @@ fn run_openai(
                     is_recording_clone.store(true, Ordering::SeqCst);
                     *rec_state = RecordingState::Recording;
 
+                    // Start audio stream on-demand so macOS mic indicator only shows during recording
+                    match start_recording_persistent(Arc::clone(&samples_clone), Arc::clone(&is_recording_clone)) {
+                        Ok(stream) => {
+                            *active_stream_clone.lock().unwrap() = Some(stream);
+                        }
+                        Err(e) => {
+                            eprintln!("[{}] Failed to start audio: {}", timestamp(), e);
+                            is_recording_clone.store(false, Ordering::SeqCst);
+                            *rec_state = RecordingState::Idle;
+                            return;
+                        }
+                    }
+
                     // Clear context from previous session - new recording = new context
                     last_phrase_callback.lock().unwrap().clear();
 
@@ -4546,6 +4622,7 @@ fn run_openai(
                     }
 
                     println!("[{}] Recording...", timestamp());
+                    std::io::stdout().flush().ok();
                     // No start beep - it would be captured in the recording
                 }
             }
@@ -4560,6 +4637,9 @@ fn run_openai(
                     is_recording_clone.store(false, Ordering::SeqCst);
                     *rec_state = RecordingState::Idle;
 
+                    // Drop audio stream to hide macOS microphone indicator
+                    *active_stream_clone.lock().unwrap() = None;
+
                     let recording_duration = recording_start_clone
                         .lock()
                         .unwrap()
@@ -4568,6 +4648,7 @@ fn run_openai(
 
                     if recording_duration < Duration::from_millis(MIN_RECORDING_MS) {
                         println!("[{}] Recording too short, ignoring", timestamp());
+                        std::io::stdout().flush().ok();
                         play_error_beep();
                         return;
                     }
@@ -4749,8 +4830,6 @@ fn run_openai(
     if let Err(e) = listen(callback) {
         eprintln!("Error: {:?}", e);
     }
-
-    drop(stream);
 }
 
 // ============================================================================
@@ -4774,12 +4853,9 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
 
     let vad: Arc<Mutex<VadPhraseDetector>> = Arc::new(Mutex::new(VadPhraseDetector::new()));
 
-    // Start audio stream ONCE at startup - always listening
-    let samples_for_stream = Arc::clone(&samples);
-    let is_recording_for_stream = Arc::clone(&is_recording_flag);
-    let _persistent_stream =
-        start_recording_persistent(samples_for_stream, is_recording_for_stream)
-            .expect("Failed to start audio stream");
+    // Stream is created on key press and destroyed on key release
+    // so macOS microphone indicator only shows during recording
+    let active_stream: Arc<Mutex<Option<cpal::Stream>>> = Arc::new(Mutex::new(None));
 
     let state_clone = Arc::clone(&state);
     let samples_clone = Arc::clone(&samples);
@@ -4948,6 +5024,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                     eprintln!("Failed to insert text: {}", e);
                                 } else {
                                     println!("[{}] +\"{}\"", timestamp(), processed_text);
+                                    std::io::stdout().flush().ok();
                                     log_transcription_with_audio(
                                         &text,
                                         &processed_text,
@@ -4963,6 +5040,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                     processed_text
                                 );
                                 println!("[{}] ctx: \"{}\" -> \"{}\"", timestamp(), old_ctx, *ctx);
+                                std::io::stdout().flush().ok();
                             } else {
                                 let final_text = if is_first_phrase {
                                     capitalize_first(&processed_text)
@@ -4976,6 +5054,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                     eprintln!("Failed to insert text: {}", e);
                                 } else {
                                     println!("[{}] \"{}\"", timestamp(), final_text);
+                                    std::io::stdout().flush().ok();
                                     log_transcription_with_audio(
                                         &text,
                                         &final_text,
@@ -5036,6 +5115,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
 
                     if recording_duration < Duration::from_millis(MIN_RECORDING_MS) {
                         println!("[{}] Recording too short, ignoring", timestamp());
+                        std::io::stdout().flush().ok();
                         play_error_beep();
                         samples_clone.lock().unwrap().clear();
                         return;
@@ -5059,6 +5139,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                             timestamp(),
                             duration_secs
                         );
+                        std::io::stdout().flush().ok();
 
                         let context = {
                             let ctx = last_phrase_clone.lock().unwrap();
@@ -5142,6 +5223,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                             eprintln!("Failed to insert text: {}", e);
                                         } else {
                                             println!("[{}] +\"{}\"", timestamp(), processed_text);
+                                            std::io::stdout().flush().ok();
                                             log_transcription_with_audio(
                                                 &text,
                                                 &processed_text,
@@ -5163,6 +5245,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                             eprintln!("Failed to insert text: {}", e);
                                         } else {
                                             println!("[{}] \"{}\"", timestamp(), final_text);
+                                            std::io::stdout().flush().ok();
                                             log_transcription_with_audio(
                                                 &text,
                                                 &final_text,
@@ -5173,6 +5256,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                                     }
                                 } else {
                                     println!("[{}] (no speech detected)", timestamp());
+                                    std::io::stdout().flush().ok();
                                 }
                             }
                             Err(e) => {
@@ -5182,6 +5266,7 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                     } else {
                         println!("[{}] Done", timestamp());
                     }
+                    std::io::stdout().flush().ok();
 
                     samples_clone.lock().unwrap().clear();
                     last_phrase_clone.lock().unwrap().clear();

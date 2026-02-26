@@ -11,11 +11,6 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "trayIcon": {
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": true,
-      "menuOnLeftClick": false
-    },
     "windows": [
       {
         "title": "Voice Keyboard",
@@ -35,6 +30,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": [
+      "binaries/voice-typer"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

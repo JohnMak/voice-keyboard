@@ -12,37 +12,123 @@
         <header class="header">
             <h1>Voice Keyboard</h1>
             <nav class="tabs">
-                <button class="tab active" data-tab="log">Log</button>
+                <button class="tab active" data-tab="test">Test</button>
+                <button class="tab" data-tab="log">Log</button>
                 <button class="tab" data-tab="settings">Settings</button>
             </nav>
         </header>
 
-        <!-- Log Tab -->
-        <section id="log-tab" class="tab-content active">
-            <div class="status-bar">
-                <span class="status-indicator idle"></span>
-                <span class="status-text">Ready</span>
-                <span class="hotkey-hint">Hold <kbd>Fn</kbd> to record</span>
-            </div>
-
-            <div class="log-container">
-                <div id="transcription-log" class="transcription-log">
-                    <p class="placeholder">Transcriptions will appear here...</p>
+        <!-- Test Tab -->
+        <section id="test-tab" class="tab-content active">
+            <!-- Info Cards -->
+            <div class="test-info">
+                <div class="info-card">
+                    <span class="info-label">Connection</span>
+                    <span id="test-connection" class="info-value connected">Connected</span>
+                </div>
+                <div class="info-card">
+                    <span class="info-label">Mode</span>
+                    <span id="test-mode" class="info-value">OpenAI API</span>
+                </div>
+                <div class="info-card">
+                    <span class="info-label">Hotkey</span>
+                    <span id="test-hotkey" class="info-value"><kbd>Fn</kbd></span>
                 </div>
             </div>
 
-            <div class="log-actions">
-                <button id="clear-log" class="btn btn-secondary">Clear Log</button>
-                <button id="report-issue" class="btn btn-danger">
-                    <span class="icon">⚠️</span>
-                    Report Issue
-                </button>
+            <!-- Hotkey State -->
+            <div id="hotkey-state" class="hotkey-state idle">
+                <div class="hotkey-icon">⏺</div>
+                <div class="hotkey-label">Press and hold <kbd>Fn</kbd> to record</div>
+            </div>
+
+            <!-- Result Area -->
+            <div class="test-result">
+                <div id="test-result-text" class="test-result-text">
+                    <p class="placeholder">Transcription will appear here...</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Log Tab (Debug) -->
+        <section id="log-tab" class="tab-content">
+            <div class="debug-toolbar">
+                <div class="debug-filters">
+                    <label class="filter-chip active" data-filter="all">
+                        <input type="checkbox" checked> All
+                    </label>
+                    <label class="filter-chip active" data-filter="system">
+                        <input type="checkbox" checked> System
+                    </label>
+                    <label class="filter-chip active" data-filter="recording">
+                        <input type="checkbox" checked> Recording
+                    </label>
+                    <label class="filter-chip active" data-filter="vad">
+                        <input type="checkbox" checked> VAD
+                    </label>
+                    <label class="filter-chip active" data-filter="worker">
+                        <input type="checkbox" checked> Worker
+                    </label>
+                    <label class="filter-chip active" data-filter="filter">
+                        <input type="checkbox" checked> Filter
+                    </label>
+                    <label class="filter-chip active" data-filter="transcription">
+                        <input type="checkbox" checked> Transcription
+                    </label>
+                    <label class="filter-chip active" data-filter="error">
+                        <input type="checkbox" checked> Errors
+                    </label>
+                </div>
+                <div class="debug-actions">
+                    <label class="auto-scroll-toggle">
+                        <input type="checkbox" id="debug-autoscroll" checked> Auto-scroll
+                    </label>
+                    <button id="clear-debug" class="btn btn-secondary btn-small">Clear</button>
+                </div>
+            </div>
+
+            <div class="debug-log-container">
+                <div id="debug-log" class="debug-log"></div>
             </div>
         </section>
 
         <!-- Settings Tab -->
         <section id="settings-tab" class="tab-content">
             <div class="settings-group">
+                <h2>Transcription Mode</h2>
+                <div class="mode-selector">
+                    <label class="mode-card selected" data-mode="openai">
+                        <input type="radio" name="transcription-mode" value="openai" checked>
+                        <div class="mode-card-content">
+                            <div class="mode-card-title">OpenAI API</div>
+                            <div class="mode-card-desc">Cloud-based, best quality. Requires API key.</div>
+                        </div>
+                    </label>
+                    <label class="mode-card" data-mode="local">
+                        <input type="radio" name="transcription-mode" value="local">
+                        <div class="mode-card-content">
+                            <div class="mode-card-title">Local Whisper</div>
+                            <div class="mode-card-desc">Offline, private. Requires model download.</div>
+                        </div>
+                    </label>
+                </div>
+            </div>
+
+            <div id="openai-settings" class="settings-group">
+                <h2>OpenAI</h2>
+                <label class="field">
+                    <span class="field-label">API Key</span>
+                    <input id="openai-key" class="input" type="password" placeholder="sk-..." autocomplete="off">
+                    <span id="api-key-hint" class="api-key-hint" style="display:none"></span>
+                </label>
+                <label class="field">
+                    <span class="field-label">API URL</span>
+                    <input id="openai-url" class="input" type="text" placeholder="https://api.openai.com/v1">
+                </label>
+                <p class="field-note">Used for GPT-4o transcription in the background process.</p>
+            </div>
+
+            <div id="model-settings" class="settings-group hidden">
                 <h2>Model</h2>
                 <div id="models-list" class="models-list">
                     <!-- Models loaded dynamically -->
@@ -77,10 +163,54 @@
                 </select>
             </div>
 
+            <div class="settings-group">
+                <h2>Sound Feedback</h2>
+                <label class="toggle-field">
+                    <span class="toggle-label">Play beep on recording stop</span>
+                    <input type="checkbox" id="sound-enabled" checked>
+                    <span class="toggle-switch"></span>
+                </label>
+            </div>
+
             <div class="settings-actions">
-                <button id="save-settings" class="btn btn-primary">Save Settings</button>
+                <button id="save-settings" class="btn btn-primary">Save & Reload</button>
             </div>
         </section>
+    </div>
+
+    <!-- Permissions Modal -->
+    <div id="permissions-modal" class="modal hidden">
+        <div class="modal-content">
+            <h2>Permissions Required</h2>
+            <p>Voice Keyboard needs the following permissions to work:</p>
+            <div class="permissions-list">
+                <div class="permission-item" id="perm-microphone">
+                    <span class="perm-icon">&#x274C;</span>
+                    <div>
+                        <div class="perm-name">Microphone</div>
+                        <div class="perm-desc">Record speech for transcription</div>
+                    </div>
+                </div>
+                <div class="permission-item" id="perm-accessibility">
+                    <span class="perm-icon">&#x274C;</span>
+                    <div>
+                        <div class="perm-name">Accessibility</div>
+                        <div class="perm-desc">Type transcribed text into apps</div>
+                    </div>
+                </div>
+                <div class="permission-item" id="perm-input_monitoring">
+                    <span class="perm-icon">&#x274C;</span>
+                    <div>
+                        <div class="perm-name">Input Monitoring</div>
+                        <div class="perm-desc">Detect hotkey press to start recording</div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button id="open-settings-btn" class="btn btn-secondary">Open System Settings</button>
+                <button id="check-again-btn" class="btn btn-primary">Check Again</button>
+            </div>
+        </div>
     </div>
 
     <!-- Report Issue Modal -->

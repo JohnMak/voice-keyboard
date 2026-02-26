@@ -1,4 +1,3 @@
-# Voice Keyboard
 
 Push-to-talk voice keyboard with speech recognition. Supports both **cloud-based GPT-4o** (recommended for best quality) and **local Whisper** models.
 

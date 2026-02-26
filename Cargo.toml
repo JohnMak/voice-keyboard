@@ -6,6 +6,7 @@ authors = ["Alex Mak"]
 description = "Push-to-talk voice keyboard with local Whisper recognition"
 license = "LicenseRef-Proprietary"
 repository = "https://github.com/alexmak/voice-keyboard"
+autobins = false
 
 [dependencies]
 # Whisper speech recognition (optional, needs cmake)
