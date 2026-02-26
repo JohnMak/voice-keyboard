@@ -3600,8 +3600,9 @@ fn run_openai(
     // Pending retry job - saved when network error occurs, retried on next hotkey press
     let pending_retry_job: Arc<Mutex<Option<TranscriptionJob>>> = Arc::new(Mutex::new(None));
 
-    let stream = start_recording_persistent(Arc::clone(&samples), Arc::clone(&is_recording))
-        .expect("Failed to start audio recording");
+    // Stream is created on key press and destroyed on key release
+    // so macOS microphone indicator only shows during recording
+    let active_stream: Arc<Mutex<Option<cpal::Stream>>> = Arc::new(Mutex::new(None));
 
     // Transcription worker thread - processes jobs from queue
     let config_for_worker = Arc::clone(&config);
@@ -4488,6 +4489,7 @@ fn run_openai(
     let last_phrase_callback = Arc::clone(&last_phrase);
     let dev_vad_tx_callback = dev_vad_tx;
     let output_mode_clone = Arc::clone(&output_mode);
+    let active_stream_clone = Arc::clone(&active_stream);
     let pending_retry_callback = Arc::clone(&pending_retry_job);
 
     // Debounce state
@@ -4595,6 +4597,19 @@ fn run_openai(
                     is_recording_clone.store(true, Ordering::SeqCst);
                     *rec_state = RecordingState::Recording;
 
+                    // Start audio stream on-demand so macOS mic indicator only shows during recording
+                    match start_recording_persistent(Arc::clone(&samples_clone), Arc::clone(&is_recording_clone)) {
+                        Ok(stream) => {
+                            *active_stream_clone.lock().unwrap() = Some(stream);
+                        }
+                        Err(e) => {
+                            eprintln!("[{}] Failed to start audio: {}", timestamp(), e);
+                            is_recording_clone.store(false, Ordering::SeqCst);
+                            *rec_state = RecordingState::Idle;
+                            return;
+                        }
+                    }
+
                     // Clear context from previous session - new recording = new context
                     last_phrase_callback.lock().unwrap().clear();
 
@@ -4621,6 +4636,9 @@ fn run_openai(
                 if *rec_state == RecordingState::Recording {
                     is_recording_clone.store(false, Ordering::SeqCst);
                     *rec_state = RecordingState::Idle;
+
+                    // Drop audio stream to hide macOS microphone indicator
+                    *active_stream_clone.lock().unwrap() = None;
 
                     let recording_duration = recording_start_clone
                         .lock()
