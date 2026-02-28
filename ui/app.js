@@ -305,18 +305,30 @@ async function setupTauriListeners() {
     // Listen for model download progress
     await listen('model-download-progress', (event) => {
         const { model_id, downloaded, total } = event.payload;
+        console.log(`[download] progress event: model=${model_id}, downloaded=${downloaded}, total=${total}`);
         const bar = document.getElementById(`progress-${model_id}`);
         const text = document.getElementById(`progress-text-${model_id}`);
-        if (bar && total > 0) {
-            const pct = Math.round((downloaded / total) * 100);
-            bar.style.width = pct + '%';
-            if (text) text.textContent = pct + '%';
+        if (bar) {
+            if (total > 0) {
+                const pct = Math.round((downloaded / total) * 100);
+                bar.style.width = pct + '%';
+                if (text) text.textContent = pct + '%';
+            } else {
+                // No Content-Length — show downloaded size and animate bar
+                bar.style.width = '100%';
+                bar.style.opacity = '0.6';
+                const mb = (downloaded / 1048576).toFixed(1);
+                if (text) text.textContent = `${mb} MB`;
+            }
+        } else {
+            console.warn(`[download] progress bar element not found for model=${model_id}`);
         }
     });
 
     // Listen for model download completion
     await listen('model-download-complete', (event) => {
         const { model_id, success, error } = event.payload;
+        console.log(`[download] complete event: model=${model_id}, success=${success}, error=${error || 'none'}`);
         downloadingModels.delete(model_id);
         if (!success) {
             console.error(`Model download failed: ${error}`);
@@ -498,17 +510,26 @@ async function checkModelStatuses() {
 }
 
 async function downloadModel(modelId) {
+    console.log('[download] downloadModel called for:', modelId);
     downloadingModels.add(modelId);
     const actionEl = document.getElementById(`action-${modelId}`);
     if (actionEl) {
         actionEl.innerHTML = `<div class="model-progress"><div class="model-progress-bar" id="progress-${modelId}"></div></div><span class="model-progress-text" id="progress-text-${modelId}">0%</span>`;
     }
     try {
+        console.log('[download] invoking download_model...');
         await invoke('download_model', { modelId });
-    } catch (e) {
-        console.error('Failed to start download:', e);
+        console.log('[download] invoke returned OK — download complete');
+        // Command now runs the full download, so completion means success
         downloadingModels.delete(modelId);
         checkModelStatuses();
+    } catch (e) {
+        console.error('Failed to download model:', e);
+        downloadingModels.delete(modelId);
+        if (actionEl) {
+            actionEl.innerHTML = `<span class="model-status not-downloaded">Failed</span>`;
+        }
+        setTimeout(() => checkModelStatuses(), 2000);
     }
 }
 
@@ -583,14 +604,12 @@ function updateStatus(status, text) {
             label.innerHTML = 'Typing...';
             break;
         case 'done':
-            state.classList.add('idle');
-            icon.textContent = '✅';
-            label.innerHTML = 'Done';
-            // Auto-revert to idle after 3 seconds
+            // Skip "Done" display, go directly to idle
             if (doneTimeout) clearTimeout(doneTimeout);
-            doneTimeout = setTimeout(() => {
-                updateStatus('idle', 'Ready');
-            }, 3000);
+            doneTimeout = null;
+            state.classList.add('idle');
+            icon.textContent = '⏺';
+            label.innerHTML = `Press and hold <kbd>${getHotkeyName()}</kbd> to record`;
             break;
         case 'connecting':
             state.classList.add('idle');
@@ -832,9 +851,14 @@ function setupPermissionsListeners() {
 
     elements.checkAgainBtn.addEventListener('click', async () => {
         elements.checkAgainBtn.disabled = true;
-        elements.checkAgainBtn.textContent = 'Checking...';
+        elements.checkAgainBtn.textContent = 'Reloading...';
+        try {
+            await invoke('restart_voice_typer');
+        } catch (e) {
+            console.error('Failed to restart voice-typer:', e);
+        }
         await checkPermissions();
         elements.checkAgainBtn.disabled = false;
-        elements.checkAgainBtn.textContent = 'Check Again';
+        elements.checkAgainBtn.textContent = 'Reload and Check';
     });
 }
