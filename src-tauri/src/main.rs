@@ -591,6 +591,9 @@ fn check_microphone_permission() -> bool {
 fn restart_voice_typer(state: State<AppState>, app: AppHandle) -> Result<(), String> {
     stop_voice_typer(&state);
     start_voice_typer(&state, &app);
+    if state.voice_typer.lock().unwrap().is_none() {
+        return Err("voice-typer failed to start".to_string());
+    }
     Ok(())
 }
 

@@ -4304,9 +4304,11 @@ fn run_openai(
                 current_seq += 1;
             }
 
-            // Signal that all pending outputs have been typed
-            println!("[{}] Done", timestamp());
-            std::io::stdout().flush().ok();
+            // Signal that all pending consecutive outputs have been typed
+            if pending_outputs.is_empty() {
+                println!("[{}] Done", timestamp());
+                std::io::stdout().flush().ok();
+            }
         }
     });
 
@@ -4615,6 +4617,12 @@ fn run_openai(
                     // Start audio stream on-demand so macOS mic indicator only shows during recording
                     match start_recording_persistent(Arc::clone(&samples_clone), Arc::clone(&is_recording_clone)) {
                         Ok(stream) => {
+                            if let Err(e) = stream.play() {
+                                eprintln!("[{}] Failed to play audio stream: {}", timestamp(), e);
+                                is_recording_clone.store(false, Ordering::SeqCst);
+                                *rec_state = RecordingState::Idle;
+                                return;
+                            }
                             *active_stream_clone.lock().unwrap() = Some(stream);
                         }
                         Err(e) => {
@@ -5110,6 +5118,12 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                     // Start audio stream on-demand so macOS mic indicator only shows during recording
                     match start_recording_persistent(Arc::clone(&samples_clone), Arc::clone(&is_recording_clone)) {
                         Ok(stream) => {
+                            if let Err(e) = stream.play() {
+                                eprintln!("[{}] Failed to play audio stream: {}", timestamp(), e);
+                                is_recording_clone.store(false, Ordering::SeqCst);
+                                *rec_state = RecordingState::Idle;
+                                return;
+                            }
                             *active_stream_clone.lock().unwrap() = Some(stream);
                         }
                         Err(e) => {
