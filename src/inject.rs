@@ -107,7 +107,7 @@ impl TextInjector {
         Ok(())
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn inject_via_keyboard(&self, text: &str) -> Result<()> {
         use enigo::{Enigo, Keyboard, Settings};
 
@@ -119,14 +119,6 @@ impl TextInjector {
             .map_err(|e| VoiceKeyboardError::Injection(format!("Failed to type text: {e}")))?;
 
         Ok(())
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn inject_via_keyboard(&self, _text: &str) -> Result<()> {
-        warn!("Keyboard injection not available on this platform");
-        Err(VoiceKeyboardError::Injection(
-            "Keyboard injection requires macOS".to_string(),
-        ))
     }
 
     #[cfg(target_os = "macos")]
@@ -148,13 +140,53 @@ impl TextInjector {
             .key(Key::Meta, Direction::Release)
             .map_err(|e| VoiceKeyboardError::Injection(format!("Key release failed: {e}")))?;
 
-        debug!("Paste simulated");
+        debug!("Paste simulated (Cmd+V)");
         Ok(())
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     fn simulate_paste(&self) -> Result<()> {
-        warn!("Paste simulation not available on this platform, text is in clipboard");
+        use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+
+        let mut enigo = Enigo::new(&Settings::default())
+            .map_err(|e| VoiceKeyboardError::Injection(format!("Failed to create Enigo: {e}")))?;
+
+        enigo
+            .key(Key::Control, Direction::Press)
+            .map_err(|e| VoiceKeyboardError::Injection(format!("Key press failed: {e}")))?;
+
+        enigo
+            .key(Key::Unicode('v'), Direction::Click)
+            .map_err(|e| VoiceKeyboardError::Injection(format!("Key click failed: {e}")))?;
+
+        enigo
+            .key(Key::Control, Direction::Release)
+            .map_err(|e| VoiceKeyboardError::Injection(format!("Key release failed: {e}")))?;
+
+        debug!("Paste simulated (Ctrl+V)");
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn simulate_paste(&self) -> Result<()> {
+        use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+
+        let mut enigo = Enigo::new(&Settings::default())
+            .map_err(|e| VoiceKeyboardError::Injection(format!("Failed to create Enigo: {e}")))?;
+
+        enigo
+            .key(Key::Control, Direction::Press)
+            .map_err(|e| VoiceKeyboardError::Injection(format!("Key press failed: {e}")))?;
+
+        enigo
+            .key(Key::Unicode('v'), Direction::Click)
+            .map_err(|e| VoiceKeyboardError::Injection(format!("Key click failed: {e}")))?;
+
+        enigo
+            .key(Key::Control, Direction::Release)
+            .map_err(|e| VoiceKeyboardError::Injection(format!("Key release failed: {e}")))?;
+
+        debug!("Paste simulated (Ctrl+V)");
         Ok(())
     }
 }

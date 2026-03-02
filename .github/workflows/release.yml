@@ -9,7 +9,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Windows build with launcher + core app
+  # Windows CLI build with launcher + core app
   build-windows:
     runs-on: windows-latest
 
@@ -65,9 +65,84 @@ jobs:
           name: voice-typer-windows-x64
           path: voice-typer-windows-x64.zip
 
+  # Windows Tauri GUI app (NSIS installer)
+  build-tauri-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-tauri
+
+      - name: Build voice-typer sidecar
+        run: cargo build --release --bin voice-typer --features "whisper,opus" --target x86_64-pc-windows-msvc
+
+      - name: Copy sidecar binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries
+          Copy-Item "target/x86_64-pc-windows-msvc/release/voice-typer.exe" -Destination "src-tauri/binaries/voice-typer-x86_64-pc-windows-msvc.exe"
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build Tauri app
+        run: cargo tauri build --target x86_64-pc-windows-msvc
+
+      - name: Upload NSIS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-keyboard-windows-x64-setup
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+
+  # macOS Tauri GUI app (DMG)
+  build-tauri-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-tauri
+
+      - name: Build voice-typer sidecar
+        run: cargo build --release --bin voice-typer --features "whisper,opus"
+
+      - name: Copy sidecar binary
+        run: |
+          mkdir -p src-tauri/binaries
+          cp target/release/voice-typer "src-tauri/binaries/voice-typer-$(rustc -vV | grep host | cut -d' ' -f2)"
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build Tauri app
+        run: cargo tauri build --features macos-private-api
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-keyboard-macos-dmg
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+
   # Create GitHub Release
   release:
-    needs: [build-windows]
+    needs: [build-windows, build-tauri-windows, build-tauri-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -89,7 +164,7 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir -p release
-          find artifacts -type f -name "*.zip" -exec cp {} release/ \;
+          find artifacts -type f \( -name "*.zip" -o -name "*.dmg" -o -name "*.exe" \) -exec cp {} release/ \;
           echo "=== Release files ==="
           ls -la release/
 
@@ -118,22 +193,24 @@ jobs:
           prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
           generate_release_notes: true
           body: |
-            ## Windows Installation
+            ## Voice Keyboard App (Recommended)
 
-            1. Download `voice-typer-windows-x64.zip` and extract
-            2. Run `voice-typer-launcher.exe` (this handles updates)
-            3. Configure API key in Settings (system tray icon)
+            Desktop app with system tray, settings UI, and bundled voice-typer:
 
-            **Files included:**
-            - `voice-typer-launcher.exe` - Run this! Handles updates and launches the app
-            - `voice-typer.exe` - Core application (launched by launcher)
+            - **macOS:** Download `Voice.Keyboard_*.dmg`, open and drag to Applications
+            - **Windows:** Download `Voice.Keyboard_*_x64-setup.exe` and run the installer
 
-            Windows SmartScreen may warn about unknown publisher — click "More info" → "Run anyway"
+            Windows SmartScreen may warn about unknown publisher — click "More info" -> "Run anyway"
+
+            ## CLI-only (Advanced)
+
+            Standalone command-line binaries without the GUI:
+            - **Windows:** Download `voice-typer-windows-x64.zip` and extract
 
             ## Setup
 
             1. Get OpenAI API key from [platform.openai.com](https://platform.openai.com)
             2. Enter it in Settings
-            3. Hold **Right Ctrl** to record, release to transcribe
+            3. Hold **Right Ctrl** (Windows) or **Fn** (macOS) to record, release to transcribe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

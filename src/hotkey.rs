@@ -1,8 +1,7 @@
 //! Global hotkey listener
 //!
 //! Listens for keyboard shortcuts to trigger recording.
-//! On macOS uses rdev for cross-platform global keyboard hooks.
-//! On other platforms, provides a stub implementation for testing.
+//! Uses rdev for cross-platform global keyboard hooks (macOS, Windows, Linux).
 
 use crate::{Result, VoiceKeyboardError};
 use tokio::sync::mpsc;
@@ -62,8 +61,8 @@ impl HotkeyConfig {
     }
 }
 
-/// Global hotkey listener (macOS implementation)
-#[cfg(target_os = "macos")]
+/// Global hotkey listener
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub mod listener {
     use super::*;
     use rdev::{listen, Event, EventType, Key};
@@ -194,31 +193,8 @@ pub mod listener {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub use listener::HotkeyListener;
-
-/// Stub HotkeyListener for non-macOS platforms (testing only)
-#[cfg(not(target_os = "macos"))]
-pub struct HotkeyListener {
-    config: HotkeyConfig,
-}
-
-#[cfg(not(target_os = "macos"))]
-impl HotkeyListener {
-    pub fn new(config: HotkeyConfig) -> Self {
-        Self { config }
-    }
-
-    pub fn start(&self) -> Result<mpsc::Receiver<HotkeyAction>> {
-        info!("Hotkey listener not available on this platform (stub)");
-        let (_tx, rx) = mpsc::channel(1);
-        Ok(rx)
-    }
-
-    pub fn stop(&self) {
-        info!("Hotkey listener stopped (stub)");
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -1,8 +1,7 @@
 //! Audio recording module
 //!
 //! Records audio from microphone to a buffer or file.
-//! On macOS uses cpal for real-time capture.
-//! On other platforms, only file-based operations are available.
+//! Uses cpal for real-time capture (macOS CoreAudio, Windows WASAPI, Linux ALSA).
 
 use crate::{Result, VoiceKeyboardError};
 use std::path::Path;
@@ -11,8 +10,8 @@ use tracing::info;
 /// Target sample rate for Whisper (16kHz)
 pub const WHISPER_SAMPLE_RATE: u32 = 16000;
 
-/// Audio recorder for capturing microphone input (macOS only)
-#[cfg(target_os = "macos")]
+/// Audio recorder for capturing microphone input
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub mod recorder {
     use super::*;
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -145,44 +144,8 @@ pub mod recorder {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub use recorder::AudioRecorder;
-
-/// Stub AudioRecorder for non-macOS platforms (testing only)
-#[cfg(not(target_os = "macos"))]
-pub struct AudioRecorder;
-
-#[cfg(not(target_os = "macos"))]
-impl AudioRecorder {
-    pub fn new() -> Result<Self> {
-        Ok(Self)
-    }
-
-    pub fn start(&mut self) -> Result<()> {
-        Err(VoiceKeyboardError::Audio(
-            "Audio recording not available on this platform. Use file-based testing.".to_string(),
-        ))
-    }
-
-    pub fn stop(&mut self) -> Result<Vec<f32>> {
-        Ok(vec![])
-    }
-
-    pub fn is_recording(&self) -> bool {
-        false
-    }
-
-    pub fn duration_secs(&self) -> f32 {
-        0.0
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-impl Default for AudioRecorder {
-    fn default() -> Self {
-        Self
-    }
-}
 
 /// Save samples to a WAV file (useful for debugging and testing)
 pub fn save_wav(samples: &[f32], path: &Path) -> Result<()> {

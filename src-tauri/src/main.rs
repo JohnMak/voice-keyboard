@@ -597,11 +597,24 @@ fn restart_voice_typer(state: State<AppState>, app: AppHandle) -> Result<(), Str
     Ok(())
 }
 
-/// Open macOS Privacy & Security settings
+/// Open system privacy/security settings
 #[tauri::command]
 fn open_privacy_settings() -> Result<(), String> {
-    open::that("x-apple.systempreferences:com.apple.preference.security?Privacy")
-        .map_err(|e| e.to_string())
+    #[cfg(target_os = "macos")]
+    {
+        open::that("x-apple.systempreferences:com.apple.preference.security?Privacy")
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        open::that("ms-settings:privacy-microphone")
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // No standard settings URL on Linux
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -609,6 +622,11 @@ fn open_privacy_settings() -> Result<(), String> {
 // ============================================================================
 
 fn find_voice_typer_path() -> Result<PathBuf, String> {
+    #[cfg(target_os = "windows")]
+    const BINARY_NAME: &str = "voice-typer.exe";
+    #[cfg(not(target_os = "windows"))]
+    const BINARY_NAME: &str = "voice-typer";
+
     if let Ok(path) = std::env::var("VOICE_TYPER_PATH") {
         let p = PathBuf::from(path);
         if p.exists() {
@@ -621,23 +639,23 @@ fn find_voice_typer_path() -> Result<PathBuf, String> {
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("voice-typer"));
+            candidates.push(dir.join(BINARY_NAME));
             if let Some(target_dir) = dir.parent() {
-                candidates.push(target_dir.join("release").join("voice-typer"));
-                candidates.push(target_dir.join("debug").join("voice-typer"));
+                candidates.push(target_dir.join("release").join(BINARY_NAME));
+                candidates.push(target_dir.join("debug").join(BINARY_NAME));
             }
         }
         if let Some(src_tauri_dir) = exe.ancestors().find(|p| p.file_name().map(|n| n == "src-tauri").unwrap_or(false)) {
             if let Some(repo_root) = src_tauri_dir.parent() {
-                candidates.push(repo_root.join("target").join("release").join("voice-typer"));
-                candidates.push(repo_root.join("target").join("debug").join("voice-typer"));
+                candidates.push(repo_root.join("target").join("release").join(BINARY_NAME));
+                candidates.push(repo_root.join("target").join("debug").join(BINARY_NAME));
             }
         }
     }
 
     if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("target/release/voice-typer"));
-        candidates.push(cwd.join("target/debug/voice-typer"));
+        candidates.push(cwd.join("target").join("release").join(BINARY_NAME));
+        candidates.push(cwd.join("target").join("debug").join(BINARY_NAME));
     }
 
     for candidate in candidates {
@@ -1021,9 +1039,9 @@ fn main() {
             let tray_image = tauri::image::Image::new_owned(tray_rgba.into_raw(), tw, th);
             let _tray = TrayIconBuilder::new()
                 .icon(tray_image)
-                .icon_as_template(true)
+                .icon_as_template(true) // macOS: monochrome menu bar icon; ignored on other platforms
                 .menu(&menu)
-                .show_menu_on_left_click(true)
+                .show_menu_on_left_click(cfg!(target_os = "macos")) // macOS: left click = menu; Windows: right click = menu (default)
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {
                         "settings" => {

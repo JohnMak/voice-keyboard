@@ -12,7 +12,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 # Tauri
-tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
@@ -71,6 +71,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+macos-private-api = ["tauri/macos-private-api"]
 whisper = ["whisper-rs"]
 metal = ["whisper-rs/metal"]
 coreml = ["whisper-rs/coreml"]
