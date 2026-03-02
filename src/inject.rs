@@ -144,30 +144,7 @@ impl TextInjector {
         Ok(())
     }
 
-    #[cfg(target_os = "windows")]
-    fn simulate_paste(&self) -> Result<()> {
-        use enigo::{Direction, Enigo, Key, Keyboard, Settings};
-
-        let mut enigo = Enigo::new(&Settings::default())
-            .map_err(|e| VoiceKeyboardError::Injection(format!("Failed to create Enigo: {e}")))?;
-
-        enigo
-            .key(Key::Control, Direction::Press)
-            .map_err(|e| VoiceKeyboardError::Injection(format!("Key press failed: {e}")))?;
-
-        enigo
-            .key(Key::Unicode('v'), Direction::Click)
-            .map_err(|e| VoiceKeyboardError::Injection(format!("Key click failed: {e}")))?;
-
-        enigo
-            .key(Key::Control, Direction::Release)
-            .map_err(|e| VoiceKeyboardError::Injection(format!("Key release failed: {e}")))?;
-
-        debug!("Paste simulated (Ctrl+V)");
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn simulate_paste(&self) -> Result<()> {
         use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 

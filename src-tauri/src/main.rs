@@ -435,29 +435,36 @@ async fn download_model(app: AppHandle, model_id: String) -> Result<(), String> 
     let mut downloaded: u64 = 0;
     let mut chunk_count: u64 = 0;
 
+    let emit_fail = |err: &str| {
+        emit_to_window(&app, "model-download-complete", serde_json::json!({
+            "model_id": model_id,
+            "success": false,
+            "error": err
+        }));
+    };
+
     let tmp_dest = dest.with_extension("bin.tmp");
     eprintln!("[download] Creating tmp file: {}", tmp_dest.display());
     let mut file = File::create(&tmp_dest).map_err(|e| {
         eprintln!("[download] Failed to create tmp file: {}", e);
+        emit_fail(&e.to_string());
         e.to_string()
     })?;
 
     eprintln!("[download] Starting stream read...");
     let mut stream = response.bytes_stream();
+    let mut last_progress = std::time::Instant::now();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| {
             eprintln!("[download] Stream error after {} chunks, {} bytes: {}", chunk_count, downloaded, e);
             let _ = fs::remove_file(&tmp_dest);
-            emit_to_window(&app, "model-download-complete", serde_json::json!({
-                "model_id": model_id,
-                "success": false,
-                "error": e.to_string()
-            }));
+            emit_fail(&e.to_string());
             e.to_string()
         })?;
         file.write_all(&chunk).map_err(|e| {
             eprintln!("[download] Write error after {} chunks, {} bytes", chunk_count, downloaded);
             let _ = fs::remove_file(&tmp_dest);
+            emit_fail(&e.to_string());
             e.to_string()
         })?;
         downloaded += chunk.len() as u64;
@@ -467,17 +474,29 @@ async fn download_model(app: AppHandle, model_id: String) -> Result<(), String> 
                 chunk_count, chunk.len(), downloaded, total,
                 if total > 0 { downloaded as f64 / total as f64 * 100.0 } else { 0.0 });
         }
-        emit_to_window(&app, "model-download-progress", serde_json::json!({
-            "model_id": model_id,
-            "downloaded": downloaded,
-            "total": total
-        }));
+        // Throttle progress events to avoid IPC flood (~10 per second)
+        if last_progress.elapsed() >= std::time::Duration::from_millis(100) {
+            emit_to_window(&app, "model-download-progress", serde_json::json!({
+                "model_id": model_id,
+                "downloaded": downloaded,
+                "total": total
+            }));
+            last_progress = std::time::Instant::now();
+        }
     }
+
+    // Final progress emit at 100%
+    emit_to_window(&app, "model-download-progress", serde_json::json!({
+        "model_id": model_id,
+        "downloaded": downloaded,
+        "total": total
+    }));
 
     eprintln!("[download] Stream finished. Total: {} bytes in {} chunks", downloaded, chunk_count);
 
     fs::rename(&tmp_dest, &dest).map_err(|e| {
         let _ = fs::remove_file(&tmp_dest);
+        emit_fail(&e.to_string());
         e.to_string()
     })?;
 
