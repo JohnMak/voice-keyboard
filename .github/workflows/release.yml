@@ -122,7 +122,8 @@ jobs:
 
       - name: Build voice-typer sidecar
         env:
-          GGML_CPU_ARM_ARCH: armv8-a+dotprod
+          CFLAGS: "-march=armv8-a+dotprod"
+          CXXFLAGS: "-march=armv8-a+dotprod"
         run: cargo build --release --bin voice-typer --features "whisper,opus"
 
       - name: Copy sidecar binary
