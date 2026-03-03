@@ -406,7 +406,11 @@ async fn download_model(app: AppHandle, model_id: String) -> Result<(), String> 
     eprintln!("[download] Command called for model_id={}, dest={}", model_id, dest.display());
     eprintln!("[download] Starting download of {} from {}", model_id, url);
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| e.to_string())?;
     let response = client.get(&url).send().await.map_err(|e| {
         eprintln!("[download] Request failed: {}", e);
         emit_to_window(&app, "model-download-complete", serde_json::json!({

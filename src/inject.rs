@@ -2,9 +2,7 @@
 //!
 //! Injects transcribed text into the active application.
 //! Two methods: clipboard + paste (reliable) or direct keyboard simulation.
-//!
-//! Note: Full functionality requires macOS. On Linux, only clipboard-only mode
-//! works (no paste simulation).
+//! Supports macOS (Cmd+V), Windows and Linux (Ctrl+V) for paste simulation.
 
 use crate::{Result, VoiceKeyboardError};
 use arboard::Clipboard;
@@ -14,7 +12,7 @@ use tracing::{debug, info, warn};
 /// Text injection method
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InjectionMethod {
-    /// Copy to clipboard and simulate Cmd+V (most reliable)
+    /// Copy to clipboard and simulate paste shortcut (Cmd+V / Ctrl+V)
     #[default]
     Clipboard,
     /// Simulate keyboard typing (may have issues with special characters)
