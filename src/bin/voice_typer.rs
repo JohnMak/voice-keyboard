@@ -799,28 +799,39 @@ fn get_config_path() -> Option<PathBuf> {
     }
 }
 
-/// Get models directory (cross-platform)
+/// Get models directory (cross-platform, matches Tauri's dirs::data_dir())
 fn get_models_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         let appdata = env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
         PathBuf::from(appdata).join("voice-keyboard").join("models")
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home)
+            .join("Library/Application Support/voice-keyboard/models")
+    }
+    #[cfg(target_os = "linux")]
     {
         let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
         PathBuf::from(home).join(".local/share/voice-keyboard/models")
     }
 }
 
-/// Get data directory for logs (cross-platform)
+/// Get data directory for logs (cross-platform, matches Tauri's dirs::data_dir())
 fn get_data_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         let appdata = env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
         PathBuf::from(appdata).join("voice-keyboard")
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home).join("Library/Application Support/voice-keyboard")
+    }
+    #[cfg(target_os = "linux")]
     {
         let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
         PathBuf::from(home).join(".local/share/voice-keyboard")
@@ -4292,6 +4303,12 @@ fn run_openai(
                 next_output_seq_for_output.fetch_add(1, Ordering::SeqCst);
                 current_seq += 1;
             }
+
+            // Signal that all pending consecutive outputs have been typed
+            if pending_outputs.is_empty() {
+                println!("[{}] Done", timestamp());
+                std::io::stdout().flush().ok();
+            }
         }
     });
 
@@ -4600,6 +4617,12 @@ fn run_openai(
                     // Start audio stream on-demand so macOS mic indicator only shows during recording
                     match start_recording_persistent(Arc::clone(&samples_clone), Arc::clone(&is_recording_clone)) {
                         Ok(stream) => {
+                            if let Err(e) = stream.play() {
+                                eprintln!("[{}] Failed to play audio stream: {}", timestamp(), e);
+                                is_recording_clone.store(false, Ordering::SeqCst);
+                                *rec_state = RecordingState::Idle;
+                                return;
+                            }
                             *active_stream_clone.lock().unwrap() = Some(stream);
                         }
                         Err(e) => {
@@ -4649,7 +4672,6 @@ fn run_openai(
                     if recording_duration < Duration::from_millis(MIN_RECORDING_MS) {
                         println!("[{}] Recording too short, ignoring", timestamp());
                         std::io::stdout().flush().ok();
-                        play_error_beep();
                         return;
                     }
 
@@ -5074,6 +5096,9 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
         }
     });
 
+    let active_stream_clone = Arc::clone(&active_stream);
+    let active_stream_release = Arc::clone(&active_stream);
+
     let input_method_for_callback = input_method;
     let callback = move |event: Event| {
         use std::sync::atomic::Ordering;
@@ -5086,12 +5111,28 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                     vad_clone.lock().unwrap().reset();
                     samples_clone.lock().unwrap().clear();
 
-                    // Set atomic flag FIRST - recording starts INSTANTLY
-                    // No stream creation delay - stream is already running!
-                    is_recording_clone.store(true, Ordering::Relaxed);
-
                     *recording_start_clone.lock().unwrap() = Some(Instant::now());
+                    is_recording_clone.store(true, Ordering::SeqCst);
                     *rec_state = RecordingState::Recording;
+
+                    // Start audio stream on-demand so macOS mic indicator only shows during recording
+                    match start_recording_persistent(Arc::clone(&samples_clone), Arc::clone(&is_recording_clone)) {
+                        Ok(stream) => {
+                            if let Err(e) = stream.play() {
+                                eprintln!("[{}] Failed to play audio stream: {}", timestamp(), e);
+                                is_recording_clone.store(false, Ordering::SeqCst);
+                                *rec_state = RecordingState::Idle;
+                                return;
+                            }
+                            *active_stream_clone.lock().unwrap() = Some(stream);
+                        }
+                        Err(e) => {
+                            eprintln!("[{}] Failed to start audio: {}", timestamp(), e);
+                            is_recording_clone.store(false, Ordering::SeqCst);
+                            *rec_state = RecordingState::Idle;
+                            return;
+                        }
+                    }
 
                     println!("[{}] Recording (VAD mode)...", timestamp());
                 }
@@ -5102,7 +5143,10 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
 
                 if *rec_state == RecordingState::Recording {
                     // Stop recording INSTANTLY via atomic flag
-                    is_recording_clone.store(false, Ordering::Relaxed);
+                    is_recording_clone.store(false, Ordering::SeqCst);
+
+                    // Drop audio stream to hide macOS microphone indicator
+                    *active_stream_release.lock().unwrap() = None;
 
                     let recording_duration = recording_start_clone
                         .lock()
@@ -5116,7 +5160,6 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                     if recording_duration < Duration::from_millis(MIN_RECORDING_MS) {
                         println!("[{}] Recording too short, ignoring", timestamp());
                         std::io::stdout().flush().ok();
-                        play_error_beep();
                         samples_clone.lock().unwrap().clear();
                         return;
                     }

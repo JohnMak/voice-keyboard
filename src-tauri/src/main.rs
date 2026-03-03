@@ -372,10 +372,21 @@ fn check_model_exists(model_name: String) -> bool {
     models_dir.join(&model_name).exists()
 }
 
+/// Emit event to the main webview window
+fn emit_to_window(app: &AppHandle, event: &str, payload: serde_json::Value) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.emit(event, payload);
+    } else {
+        eprintln!("[emit] WARNING: main window not found for event {}", event);
+    }
+}
+
 /// Download a Whisper model from HuggingFace
 #[tauri::command]
 async fn download_model(app: AppHandle, model_id: String) -> Result<(), String> {
     use futures_util::StreamExt;
+
+    eprintln!("[download] download_model entered, model_id={}", model_id);
 
     let filename = format!("ggml-{}.bin", model_id);
     let url = format!(
@@ -391,93 +402,113 @@ async fn download_model(app: AppHandle, model_id: String) -> Result<(), String> 
     fs::create_dir_all(&models_dir).map_err(|e| e.to_string())?;
 
     let dest = models_dir.join(&filename);
-    let model_id_clone = model_id.clone();
 
-    tokio::spawn(async move {
-        let client = reqwest::Client::new();
-        let response = match client.get(&url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = app.emit("model-download-complete", serde_json::json!({
-                    "model_id": model_id_clone,
-                    "success": false,
-                    "error": e.to_string()
-                }));
-                return;
-            }
-        };
+    eprintln!("[download] Command called for model_id={}, dest={}", model_id, dest.display());
+    eprintln!("[download] Starting download of {} from {}", model_id, url);
 
-        if !response.status().is_success() {
-            let _ = app.emit("model-download-complete", serde_json::json!({
-                "model_id": model_id_clone,
-                "success": false,
-                "error": format!("HTTP {}", response.status())
-            }));
-            return;
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client.get(&url).send().await.map_err(|e| {
+        eprintln!("[download] Request failed: {}", e);
+        emit_to_window(&app, "model-download-complete", serde_json::json!({
+            "model_id": model_id,
+            "success": false,
+            "error": e.to_string()
+        }));
+        e.to_string()
+    })?;
+
+    eprintln!("[download] Got response: status={}", response.status());
+
+    if !response.status().is_success() {
+        eprintln!("[download] HTTP error: {}", response.status());
+        let err = format!("HTTP {}", response.status());
+        emit_to_window(&app, "model-download-complete", serde_json::json!({
+            "model_id": model_id,
+            "success": false,
+            "error": err
+        }));
+        return Err(err);
+    }
+
+    let total = response.content_length().unwrap_or(0);
+    eprintln!("[download] Content-Length: {} ({:.1} MB)", total, total as f64 / 1048576.0);
+    let mut downloaded: u64 = 0;
+    let mut chunk_count: u64 = 0;
+
+    let emit_fail = |err: &str| {
+        emit_to_window(&app, "model-download-complete", serde_json::json!({
+            "model_id": model_id,
+            "success": false,
+            "error": err
+        }));
+    };
+
+    let tmp_dest = dest.with_extension("bin.tmp");
+    eprintln!("[download] Creating tmp file: {}", tmp_dest.display());
+    let mut file = File::create(&tmp_dest).map_err(|e| {
+        eprintln!("[download] Failed to create tmp file: {}", e);
+        emit_fail(&e.to_string());
+        e.to_string()
+    })?;
+
+    eprintln!("[download] Starting stream read...");
+    let mut stream = response.bytes_stream();
+    let mut last_progress = std::time::Instant::now();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            eprintln!("[download] Stream error after {} chunks, {} bytes: {}", chunk_count, downloaded, e);
+            let _ = fs::remove_file(&tmp_dest);
+            emit_fail(&e.to_string());
+            e.to_string()
+        })?;
+        file.write_all(&chunk).map_err(|e| {
+            eprintln!("[download] Write error after {} chunks, {} bytes", chunk_count, downloaded);
+            let _ = fs::remove_file(&tmp_dest);
+            emit_fail(&e.to_string());
+            e.to_string()
+        })?;
+        downloaded += chunk.len() as u64;
+        chunk_count += 1;
+        if chunk_count <= 3 || chunk_count % 100 == 0 {
+            eprintln!("[download] chunk #{}: {} bytes (total: {}/{} = {:.1}%)",
+                chunk_count, chunk.len(), downloaded, total,
+                if total > 0 { downloaded as f64 / total as f64 * 100.0 } else { 0.0 });
         }
-
-        let total = response.content_length().unwrap_or(0);
-        let mut downloaded: u64 = 0;
-
-        let tmp_dest = dest.with_extension("bin.tmp");
-        let mut file = match File::create(&tmp_dest) {
-            Ok(f) => f,
-            Err(e) => {
-                let _ = app.emit("model-download-complete", serde_json::json!({
-                    "model_id": model_id_clone,
-                    "success": false,
-                    "error": e.to_string()
-                }));
-                return;
-            }
-        };
-
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = match chunk {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = fs::remove_file(&tmp_dest);
-                    let _ = app.emit("model-download-complete", serde_json::json!({
-                        "model_id": model_id_clone,
-                        "success": false,
-                        "error": e.to_string()
-                    }));
-                    return;
-                }
-            };
-            if file.write_all(&chunk).is_err() {
-                let _ = fs::remove_file(&tmp_dest);
-                let _ = app.emit("model-download-complete", serde_json::json!({
-                    "model_id": model_id_clone,
-                    "success": false,
-                    "error": "Write error"
-                }));
-                return;
-            }
-            downloaded += chunk.len() as u64;
-            let _ = app.emit("model-download-progress", serde_json::json!({
-                "model_id": model_id_clone,
+        // Throttle progress events to avoid IPC flood (~10 per second)
+        if last_progress.elapsed() >= std::time::Duration::from_millis(100) {
+            emit_to_window(&app, "model-download-progress", serde_json::json!({
+                "model_id": model_id,
                 "downloaded": downloaded,
                 "total": total
             }));
+            last_progress = std::time::Instant::now();
         }
+    }
 
-        if let Err(e) = fs::rename(&tmp_dest, &dest) {
-            let _ = fs::remove_file(&tmp_dest);
-            let _ = app.emit("model-download-complete", serde_json::json!({
-                "model_id": model_id_clone,
-                "success": false,
-                "error": e.to_string()
-            }));
-            return;
-        }
+    // Final progress emit at 100%
+    emit_to_window(&app, "model-download-progress", serde_json::json!({
+        "model_id": model_id,
+        "downloaded": downloaded,
+        "total": total
+    }));
 
-        let _ = app.emit("model-download-complete", serde_json::json!({
-            "model_id": model_id_clone,
-            "success": true
-        }));
-    });
+    eprintln!("[download] Stream finished. Total: {} bytes in {} chunks", downloaded, chunk_count);
+
+    fs::rename(&tmp_dest, &dest).map_err(|e| {
+        let _ = fs::remove_file(&tmp_dest);
+        emit_fail(&e.to_string());
+        e.to_string()
+    })?;
+
+    eprintln!("[download] File renamed to {}", dest.display());
+    emit_to_window(&app, "model-download-complete", serde_json::json!({
+        "model_id": model_id,
+        "success": true
+    }));
 
     Ok(())
 }
@@ -578,11 +609,35 @@ fn check_microphone_permission() -> bool {
     }
 }
 
-/// Open macOS Privacy & Security settings
+/// Restart voice-typer process (stop + start)
+#[tauri::command]
+fn restart_voice_typer(state: State<AppState>, app: AppHandle) -> Result<(), String> {
+    stop_voice_typer(&state);
+    start_voice_typer(&state, &app);
+    if state.voice_typer.lock().unwrap().is_none() {
+        return Err("voice-typer failed to start".to_string());
+    }
+    Ok(())
+}
+
+/// Open system privacy/security settings
 #[tauri::command]
 fn open_privacy_settings() -> Result<(), String> {
-    open::that("x-apple.systempreferences:com.apple.preference.security?Privacy")
-        .map_err(|e| e.to_string())
+    #[cfg(target_os = "macos")]
+    {
+        open::that("x-apple.systempreferences:com.apple.preference.security?Privacy")
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        open::that("ms-settings:privacy-microphone")
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // No standard settings URL on Linux
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -590,6 +645,11 @@ fn open_privacy_settings() -> Result<(), String> {
 // ============================================================================
 
 fn find_voice_typer_path() -> Result<PathBuf, String> {
+    #[cfg(target_os = "windows")]
+    const BINARY_NAME: &str = "voice-typer.exe";
+    #[cfg(not(target_os = "windows"))]
+    const BINARY_NAME: &str = "voice-typer";
+
     if let Ok(path) = std::env::var("VOICE_TYPER_PATH") {
         let p = PathBuf::from(path);
         if p.exists() {
@@ -602,23 +662,23 @@ fn find_voice_typer_path() -> Result<PathBuf, String> {
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("voice-typer"));
+            candidates.push(dir.join(BINARY_NAME));
             if let Some(target_dir) = dir.parent() {
-                candidates.push(target_dir.join("release").join("voice-typer"));
-                candidates.push(target_dir.join("debug").join("voice-typer"));
+                candidates.push(target_dir.join("release").join(BINARY_NAME));
+                candidates.push(target_dir.join("debug").join(BINARY_NAME));
             }
         }
         if let Some(src_tauri_dir) = exe.ancestors().find(|p| p.file_name().map(|n| n == "src-tauri").unwrap_or(false)) {
             if let Some(repo_root) = src_tauri_dir.parent() {
-                candidates.push(repo_root.join("target").join("release").join("voice-typer"));
-                candidates.push(repo_root.join("target").join("debug").join("voice-typer"));
+                candidates.push(repo_root.join("target").join("release").join(BINARY_NAME));
+                candidates.push(repo_root.join("target").join("debug").join(BINARY_NAME));
             }
         }
     }
 
     if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("target/release/voice-typer"));
-        candidates.push(cwd.join("target/debug/voice-typer"));
+        candidates.push(cwd.join("target").join("release").join(BINARY_NAME));
+        candidates.push(cwd.join("target").join("debug").join(BINARY_NAME));
     }
 
     for candidate in candidates {
@@ -980,6 +1040,10 @@ fn main() {
         .plugin(tauri_plugin_fs::init())
         .manage(state)
         .setup(|app| {
+            // Hide from Dock, live in tray only
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             let handle = app.handle().clone();
             let state = app.state::<AppState>();
             start_voice_typer(&state, &handle);
@@ -998,9 +1062,9 @@ fn main() {
             let tray_image = tauri::image::Image::new_owned(tray_rgba.into_raw(), tw, th);
             let _tray = TrayIconBuilder::new()
                 .icon(tray_image)
-                .icon_as_template(true)
+                .icon_as_template(true) // macOS: monochrome menu bar icon; ignored on other platforms
                 .menu(&menu)
-                .show_menu_on_left_click(true)
+                .show_menu_on_left_click(cfg!(target_os = "macos")) // macOS: left click = menu; Windows: right click = menu (default)
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {
                         "settings" => {
@@ -1039,6 +1103,7 @@ fn main() {
             open_github_issue,
             check_permissions,
             open_privacy_settings,
+            restart_voice_typer,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

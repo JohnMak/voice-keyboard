@@ -71,6 +71,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+macos-private-api = ["tauri/macos-private-api"]
 whisper = ["whisper-rs"]
 metal = ["whisper-rs/metal"]
 coreml = ["whisper-rs/coreml"]
