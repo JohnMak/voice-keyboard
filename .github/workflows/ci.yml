@@ -94,6 +94,8 @@ jobs:
             pkg-config
 
       - name: Build
+        env:
+          GGML_CPU_ARM_ARCH: ${{ startsWith(matrix.target, 'aarch64') && 'armv8-a+dotprod' || '' }}
         run: cargo build --release --bin voice-typer --features whisper --target ${{ matrix.target }}
 
       - name: Run unit tests
