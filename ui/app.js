@@ -305,7 +305,6 @@ async function setupTauriListeners() {
     // Listen for model download progress
     await listen('model-download-progress', (event) => {
         const { model_id, downloaded, total } = event.payload;
-        console.log(`[download] progress event: model=${model_id}, downloaded=${downloaded}, total=${total}`);
         const bar = document.getElementById(`progress-${model_id}`);
         const text = document.getElementById(`progress-text-${model_id}`);
         if (bar) {
@@ -328,7 +327,6 @@ async function setupTauriListeners() {
     // Listen for model download completion
     await listen('model-download-complete', (event) => {
         const { model_id, success, error } = event.payload;
-        console.log(`[download] complete event: model=${model_id}, success=${success}, error=${error || 'none'}`);
         downloadingModels.delete(model_id);
         if (!success) {
             console.error(`Model download failed: ${error}`);
@@ -510,16 +508,13 @@ async function checkModelStatuses() {
 }
 
 async function downloadModel(modelId) {
-    console.log('[download] downloadModel called for:', modelId);
     downloadingModels.add(modelId);
     const actionEl = document.getElementById(`action-${modelId}`);
     if (actionEl) {
         actionEl.innerHTML = `<div class="model-progress"><div class="model-progress-bar" id="progress-${modelId}"></div></div><span class="model-progress-text" id="progress-text-${modelId}">0%</span>`;
     }
     try {
-        console.log('[download] invoking download_model...');
         await invoke('download_model', { modelId });
-        console.log('[download] invoke returned OK — download complete');
         // Command now runs the full download, so completion means success
         downloadingModels.delete(modelId);
         checkModelStatuses();

@@ -377,7 +377,7 @@ fn emit_to_window(app: &AppHandle, event: &str, payload: serde_json::Value) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.emit(event, payload);
     } else {
-        eprintln!("[emit] WARNING: main window not found for event {}", event);
+        tracing::warn!("[emit] WARNING: main window not found for event {}", event);
     }
 }
 
@@ -386,7 +386,7 @@ fn emit_to_window(app: &AppHandle, event: &str, payload: serde_json::Value) {
 async fn download_model(app: AppHandle, model_id: String) -> Result<(), String> {
     use futures_util::StreamExt;
 
-    eprintln!("[download] download_model entered, model_id={}", model_id);
+    tracing::info!("[download] download_model entered, model_id={}", model_id);
 
     let filename = format!("ggml-{}.bin", model_id);
     let url = format!(
@@ -403,8 +403,8 @@ async fn download_model(app: AppHandle, model_id: String) -> Result<(), String> 
 
     let dest = models_dir.join(&filename);
 
-    eprintln!("[download] Command called for model_id={}, dest={}", model_id, dest.display());
-    eprintln!("[download] Starting download of {} from {}", model_id, url);
+    tracing::info!("[download] Command called for model_id={}, dest={}", model_id, dest.display());
+    tracing::info!("[download] Starting download of {} from {}", model_id, url);
 
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
@@ -412,7 +412,7 @@ async fn download_model(app: AppHandle, model_id: String) -> Result<(), String> 
         .build()
         .map_err(|e| e.to_string())?;
     let response = client.get(&url).send().await.map_err(|e| {
-        eprintln!("[download] Request failed: {}", e);
+        tracing::error!("[download] Request failed: {}", e);
         emit_to_window(&app, "model-download-complete", serde_json::json!({
             "model_id": model_id,
             "success": false,
@@ -421,10 +421,10 @@ async fn download_model(app: AppHandle, model_id: String) -> Result<(), String> 
         e.to_string()
     })?;
 
-    eprintln!("[download] Got response: status={}", response.status());
+    tracing::debug!("[download] Got response: status={}", response.status());
 
     if !response.status().is_success() {
-        eprintln!("[download] HTTP error: {}", response.status());
+        tracing::error!("[download] HTTP error: {}", response.status());
         let err = format!("HTTP {}", response.status());
         emit_to_window(&app, "model-download-complete", serde_json::json!({
             "model_id": model_id,
@@ -435,7 +435,7 @@ async fn download_model(app: AppHandle, model_id: String) -> Result<(), String> 
     }
 
     let total = response.content_length().unwrap_or(0);
-    eprintln!("[download] Content-Length: {} ({:.1} MB)", total, total as f64 / 1048576.0);
+    tracing::info!("[download] Content-Length: {} ({:.1} MB)", total, total as f64 / 1048576.0);
     let mut downloaded: u64 = 0;
     let mut chunk_count: u64 = 0;
 
@@ -448,25 +448,25 @@ async fn download_model(app: AppHandle, model_id: String) -> Result<(), String> 
     };
 
     let tmp_dest = dest.with_extension("bin.tmp");
-    eprintln!("[download] Creating tmp file: {}", tmp_dest.display());
+    tracing::debug!("[download] Creating tmp file: {}", tmp_dest.display());
     let mut file = File::create(&tmp_dest).map_err(|e| {
-        eprintln!("[download] Failed to create tmp file: {}", e);
+        tracing::error!("[download] Failed to create tmp file: {}", e);
         emit_fail(&e.to_string());
         e.to_string()
     })?;
 
-    eprintln!("[download] Starting stream read...");
+    tracing::debug!("[download] Starting stream read...");
     let mut stream = response.bytes_stream();
     let mut last_progress = std::time::Instant::now();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| {
-            eprintln!("[download] Stream error after {} chunks, {} bytes: {}", chunk_count, downloaded, e);
+            tracing::error!("[download] Stream error after {} chunks, {} bytes: {}", chunk_count, downloaded, e);
             let _ = fs::remove_file(&tmp_dest);
             emit_fail(&e.to_string());
             e.to_string()
         })?;
         file.write_all(&chunk).map_err(|e| {
-            eprintln!("[download] Write error after {} chunks, {} bytes", chunk_count, downloaded);
+            tracing::error!("[download] Write error after {} chunks, {} bytes", chunk_count, downloaded);
             let _ = fs::remove_file(&tmp_dest);
             emit_fail(&e.to_string());
             e.to_string()
@@ -474,7 +474,7 @@ async fn download_model(app: AppHandle, model_id: String) -> Result<(), String> 
         downloaded += chunk.len() as u64;
         chunk_count += 1;
         if chunk_count <= 3 || chunk_count % 100 == 0 {
-            eprintln!("[download] chunk #{}: {} bytes (total: {}/{} = {:.1}%)",
+            tracing::debug!("[download] chunk #{}: {} bytes (total: {}/{} = {:.1}%)",
                 chunk_count, chunk.len(), downloaded, total,
                 if total > 0 { downloaded as f64 / total as f64 * 100.0 } else { 0.0 });
         }
@@ -496,7 +496,7 @@ async fn download_model(app: AppHandle, model_id: String) -> Result<(), String> 
         "total": total
     }));
 
-    eprintln!("[download] Stream finished. Total: {} bytes in {} chunks", downloaded, chunk_count);
+    tracing::info!("[download] Stream finished. Total: {} bytes in {} chunks", downloaded, chunk_count);
 
     fs::rename(&tmp_dest, &dest).map_err(|e| {
         let _ = fs::remove_file(&tmp_dest);
@@ -504,7 +504,7 @@ async fn download_model(app: AppHandle, model_id: String) -> Result<(), String> 
         e.to_string()
     })?;
 
-    eprintln!("[download] File renamed to {}", dest.display());
+    tracing::info!("[download] File renamed to {}", dest.display());
     emit_to_window(&app, "model-download-complete", serde_json::json!({
         "model_id": model_id,
         "success": true
@@ -613,6 +613,8 @@ fn check_microphone_permission() -> bool {
 #[tauri::command]
 fn restart_voice_typer(state: State<AppState>, app: AppHandle) -> Result<(), String> {
     stop_voice_typer(&state);
+    // Small safety buffer after kill+wait to allow OS to release file handles/ports
+    std::thread::sleep(std::time::Duration::from_millis(500));
     start_voice_typer(&state, &app);
     if state.voice_typer.lock().unwrap().is_none() {
         return Err("voice-typer failed to start".to_string());
