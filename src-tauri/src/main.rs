@@ -227,51 +227,20 @@ fn save_config(app: AppHandle, state: State<AppState>, config: AppConfig) -> Res
 }
 
 /// Get available audio input devices.
-/// Uses system_profiler on macOS to avoid activating mic indicator.
+/// Uses cpal for consistent device names with voice-typer (which also uses cpal).
+/// Device enumeration does NOT activate the macOS microphone indicator.
 #[tauri::command]
 fn get_audio_devices() -> Vec<serde_json::Value> {
+    use cpal::traits::{DeviceTrait, HostTrait};
     let mut devices = vec![serde_json::json!({"id": "", "name": "System Default"})];
-
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(output) = std::process::Command::new("system_profiler")
-            .args(["SPAudioDataType", "-json"])
-            .output()
-        {
-            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                if let Some(categories) = json.get("SPAudioDataType").and_then(|v| v.as_array()) {
-                    for category in categories {
-                        if let Some(items) = category.get("_items").and_then(|v| v.as_array()) {
-                            for item in items {
-                                let has_input = item.get("coreaudio_device_input")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0) > 0;
-                                if has_input {
-                                    if let Some(name) = item.get("_name").and_then(|v| v.as_str()) {
-                                        devices.push(serde_json::json!({"id": name, "name": name}));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+    let host = cpal::default_host();
+    if let Ok(input_devices) = host.input_devices() {
+        for dev in input_devices {
+            if let Ok(name) = dev.name() {
+                devices.push(serde_json::json!({"id": name, "name": name}));
             }
         }
     }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        use cpal::traits::{DeviceTrait, HostTrait};
-        let host = cpal::default_host();
-        if let Ok(input_devices) = host.input_devices() {
-            for dev in input_devices {
-                if let Ok(name) = dev.name() {
-                    devices.push(serde_json::json!({"id": name, "name": name}));
-                }
-            }
-        }
-    }
-
     devices
 }
 

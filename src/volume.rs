@@ -45,11 +45,12 @@ fn get_system_volume() -> Option<u32> {
 
     #[cfg(target_os = "windows")]
     {
+        // Use nircmd (widely available) or fall back to none
         let output = Command::new("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
-                "[math]::Round((Get-AudioDevice -PlaybackVolume))",
+                "Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public class Vol { [DllImport(\"winmm.dll\")] public static extern int waveOutGetVolume(IntPtr hwo, out uint dwVolume); }'; $v = 0u; [Vol]::waveOutGetVolume([IntPtr]::Zero, [ref]$v); [math]::Round(($v -band 0xFFFF) / 65535 * 100)",
             ])
             .output()
             .ok()?;
@@ -83,7 +84,12 @@ fn set_system_volume(volume: u32) {
 
     #[cfg(target_os = "windows")]
     {
-        let cmd = format!("Set-AudioDevice -PlaybackVolume {}", vol);
+        let val = (vol as f64 / 100.0 * 65535.0) as u32;
+        let both = val | (val << 16);
+        let cmd = format!(
+            "Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public class Vol {{ [DllImport(\"winmm.dll\")] public static extern int waveOutSetVolume(IntPtr hwo, uint dwVolume); }}'; [Vol]::waveOutSetVolume([IntPtr]::Zero, 0x{:08X})",
+            both
+        );
         let _ = Command::new("powershell")
             .args(["-NoProfile", "-Command", &cmd])
             .output();

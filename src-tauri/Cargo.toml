@@ -58,9 +58,6 @@ urlencoding = "2"
 # Open URLs in browser
 open = "5"
 
-# Objective-C FFI (macOS permission checks)
-objc = "0.2"
-
 # HTTP client for model downloads
 reqwest = { version = "0.12", features = ["stream", "rustls-tls"], default-features = false }
 

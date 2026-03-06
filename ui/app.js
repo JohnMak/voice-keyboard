@@ -228,7 +228,11 @@ function setupEventListeners() {
     });
 
     elements.minRecordingMs.addEventListener('change', (e) => {
-        config.min_recording_ms = parseInt(e.target.value, 10) || 1000;
+        let val = parseInt(e.target.value, 10);
+        if (isNaN(val) || val < 100) val = 100;
+        if (val > 5000) val = 5000;
+        e.target.value = val;
+        config.min_recording_ms = val;
     });
 }
 
@@ -570,9 +574,14 @@ async function loadAudioDevices() {
     try {
         const devices = await invoke('get_audio_devices');
         const select = elements.audioDeviceSelect;
-        select.innerHTML = devices.map(d =>
-            `<option value="${d.id}" ${config.audio_device === d.id ? 'selected' : ''}>${d.name}</option>`
-        ).join('');
+        select.textContent = '';
+        for (const d of devices) {
+            const opt = document.createElement('option');
+            opt.value = d.id;
+            opt.textContent = d.name;
+            if (config.audio_device === d.id) opt.selected = true;
+            select.appendChild(opt);
+        }
     } catch (e) {
         console.error('Failed to load audio devices:', e);
     }
@@ -596,7 +605,10 @@ async function saveSettings() {
         config.audio_device = elements.audioDeviceSelect.value;
         config.lower_volume_on_record = elements.lowerVolume.checked;
         config.use_ogg_compression = elements.useOgg.checked;
-        config.min_recording_ms = parseInt(elements.minRecordingMs.value, 10) || 1000;
+        let minRec = parseInt(elements.minRecordingMs.value, 10);
+        if (isNaN(minRec) || minRec < 100) minRec = 100;
+        if (minRec > 5000) minRec = 5000;
+        config.min_recording_ms = minRec;
         await invoke('save_config', { config });
         elements.saveSettingsBtn.textContent = 'Saved!';
         setTimeout(() => {

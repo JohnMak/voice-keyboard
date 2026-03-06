@@ -2176,15 +2176,20 @@ fn main() {
             }
             "--min-recording" => {
                 if i + 1 < args.len() {
-                    if let Ok(ms) = args[i + 1].parse::<u64>() {
-                        min_recording_ms = ms;
+                    match args[i + 1].parse::<u64>() {
+                        Ok(ms) => min_recording_ms = ms,
+                        Err(_) => eprintln!("Warning: invalid --min-recording value '{}', using default {}ms",
+                            args[i + 1], DEFAULT_MIN_RECORDING_MS),
                     }
                     i += 1;
                 }
             }
             arg if arg.starts_with("--min-recording=") => {
-                if let Ok(ms) = arg.trim_start_matches("--min-recording=").parse::<u64>() {
-                    min_recording_ms = ms;
+                let val = arg.trim_start_matches("--min-recording=");
+                match val.parse::<u64>() {
+                    Ok(ms) => min_recording_ms = ms,
+                    Err(_) => eprintln!("Warning: invalid --min-recording value '{}', using default {}ms",
+                        val, DEFAULT_MIN_RECORDING_MS),
                 }
             }
             "--extra-keys" | "--experimental" => {
@@ -3785,6 +3790,7 @@ fn run_openai(
         Err(e) => {
             eprintln!("[{}] Failed to create audio stream: {}", timestamp(), e);
             eprintln!("[{}] Recording will not work. Check microphone permissions.", timestamp());
+            std::process::exit(1);
         }
     }
 
@@ -5083,6 +5089,8 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
         }
         Err(e) => {
             eprintln!("[{}] Failed to create audio stream: {}", timestamp(), e);
+            eprintln!("[{}] Recording will not work. Check microphone permissions.", timestamp());
+            std::process::exit(1);
         }
     }
 
