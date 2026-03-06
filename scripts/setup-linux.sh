@@ -115,11 +115,11 @@ echo -e "\n${BLUE}[4/6] Building (this may take a few minutes)...${NC}"
 # Check for CUDA (optional GPU acceleration)
 if command -v nvcc &> /dev/null; then
     echo "CUDA detected, building with GPU support..."
-    cargo build --release --features whisper
+    cargo build --release --features "whisper,opus"
     # Note: CUDA support in whisper-rs may require additional setup
 else
     echo "Building CPU-only version..."
-    cargo build --release --features whisper
+    cargo build --release --features "whisper,opus"
 fi
 echo -e "${GREEN}✓ Build complete${NC}"
 

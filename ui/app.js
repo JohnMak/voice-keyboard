@@ -34,7 +34,6 @@ let config = {
     sound_enabled: true,
     audio_device: '',
     lower_volume_on_record: true,
-    use_ogg_compression: true,
     min_recording_ms: 1000,
 };
 
@@ -111,7 +110,6 @@ function cacheElements() {
         soundEnabled: document.getElementById('sound-enabled'),
         audioDeviceSelect: document.getElementById('audio-device-select'),
         lowerVolume: document.getElementById('lower-volume'),
-        useOgg: document.getElementById('use-ogg'),
         minRecordingMs: document.getElementById('min-recording-ms'),
         saveSettingsBtn: document.getElementById('save-settings'),
         // Permissions modal
@@ -221,10 +219,6 @@ function setupEventListeners() {
 
     elements.lowerVolume.addEventListener('change', (e) => {
         config.lower_volume_on_record = e.target.checked;
-    });
-
-    elements.useOgg.addEventListener('change', (e) => {
-        config.use_ogg_compression = e.target.checked;
     });
 
     elements.minRecordingMs.addEventListener('change', (e) => {
@@ -391,7 +385,6 @@ async function loadConfig() {
     elements.soundEnabled.checked = config.sound_enabled !== false;
     await loadAudioDevices();
     elements.lowerVolume.checked = config.lower_volume_on_record !== false;
-    elements.useOgg.checked = config.use_ogg_compression !== false;
     elements.minRecordingMs.value = config.min_recording_ms || 1000;
     updateHotkeyHint();
     updateTestMode();
@@ -604,7 +597,6 @@ async function saveSettings() {
         config.sound_enabled = elements.soundEnabled.checked;
         config.audio_device = elements.audioDeviceSelect.value;
         config.lower_volume_on_record = elements.lowerVolume.checked;
-        config.use_ogg_compression = elements.useOgg.checked;
         let minRec = parseInt(elements.minRecordingMs.value, 10);
         if (isNaN(minRec) || minRec < 100) minRec = 100;
         if (minRec > 5000) minRec = 5000;

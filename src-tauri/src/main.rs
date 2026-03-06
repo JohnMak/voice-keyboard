@@ -93,8 +93,6 @@ pub struct AppConfig {
     pub audio_device: String,
     #[serde(default = "default_true")]
     pub lower_volume_on_record: bool,
-    #[serde(default = "default_true")]
-    pub use_ogg_compression: bool,
     #[serde(default = "default_min_recording_ms")]
     pub min_recording_ms: u64,
 }
@@ -120,7 +118,6 @@ impl Default for AppConfig {
             sound_enabled: true,
             audio_device: String::new(),
             lower_volume_on_record: true,
-            use_ogg_compression: true,
             min_recording_ms: 1000,
         }
     }
@@ -759,16 +756,14 @@ fn spawn_voice_typer(config: &AppConfig) -> Result<Child, String> {
         cmd.arg("--lower-volume");
     }
 
-    // OGG compression
-    if config.use_ogg_compression {
-        cmd.arg("--ogg");
-    }
+    // OGG compression always enabled
+    cmd.arg("--ogg");
 
     // Minimum recording duration
     cmd.arg("--min-recording").arg(config.min_recording_ms.to_string());
 
-    tracing::info!("[SPAWN] voice-typer config: sound={}, audio_device={:?}, lower_volume={}, ogg={}, min_rec={}ms",
-        config.sound_enabled, config.audio_device, config.lower_volume_on_record, config.use_ogg_compression, config.min_recording_ms);
+    tracing::info!("[SPAWN] voice-typer config: sound={}, audio_device={:?}, lower_volume={}, ogg=always, min_rec={}ms",
+        config.sound_enabled, config.audio_device, config.lower_volume_on_record, config.min_recording_ms);
 
     // Environment for OpenAI
     if !config.openai_api_key.trim().is_empty() {

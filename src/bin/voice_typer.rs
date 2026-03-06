@@ -1963,8 +1963,8 @@ fn main() {
     // Lower system volume during recording
     let mut lower_volume = false;
 
-    // Use OGG/Opus compression for API uploads
-    let mut use_ogg = false;
+    // Use OGG/Opus compression for API uploads (always enabled)
+    let use_ogg = true;
 
     // Minimum recording duration (ms)
     let mut min_recording_ms = DEFAULT_MIN_RECORDING_MS;
@@ -2172,7 +2172,7 @@ fn main() {
                 lower_volume = true;
             }
             "--ogg" => {
-                use_ogg = true;
+                // OGG is always enabled; flag kept for backward compatibility
             }
             "--min-recording" => {
                 if i + 1 < args.len() {

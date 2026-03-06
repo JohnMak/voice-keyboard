@@ -212,10 +212,10 @@ echo -e "${GREEN}✓ Repository ready${NC}"
 echo -e "\n${BLUE}[4/7] Building (this may take a few minutes)...${NC}"
 if [[ "$ARCH" == "arm64" ]]; then
     echo "Building with Metal acceleration for Apple Silicon..."
-    cargo build --release --features "whisper,metal"
+    cargo build --release --features "whisper,metal,opus"
 else
     echo "Building for Intel Mac..."
-    cargo build --release --features "whisper"
+    cargo build --release --features "whisper,opus"
 fi
 echo -e "${GREEN}✓ Build complete${NC}"
 

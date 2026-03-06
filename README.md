@@ -62,18 +62,22 @@ source ~/.cargo/env
 git clone https://github.com/alexmakeev/voice-keyboard.git
 cd voice-keyboard
 
-# Build with OpenAI support (recommended)
-cargo build --release --features opus
+# macOS Apple Silicon (M1/M2/M3/M4) — recommended
+cargo build --release --features "whisper,metal,opus"
 
-# Or build with local Whisper support
-cargo build --release --features whisper
+# macOS Intel
+cargo build --release --features "whisper,opus"
 
-# Or build with both
-cargo build --release --features "opus,whisper"
+# Linux
+cargo build --release --features "whisper,opus"
 
-# macOS with Metal acceleration
-cargo build --release --features "whisper,metal"
+# Windows
+cargo build --release --features "whisper,opus"
 ```
+
+> **IMPORTANT:** The `opus` feature is **required** for OGG/Opus audio compression.
+> Without it, audio is sent as uncompressed WAV (10x larger, slower uploads).
+> Always include `opus` in your build features.
 
 ### One-Line Install (macOS)
 
@@ -342,10 +346,10 @@ Grant these permissions in **System Settings → Privacy & Security**:
 
 ```bash
 # Metal (recommended for M1/M2/M3/M4)
-cargo build --release --features "whisper,metal"
+cargo build --release --features "whisper,metal,opus"
 
 # CoreML (alternative)
-cargo build --release --features "whisper,coreml"
+cargo build --release --features "whisper,coreml,opus"
 ```
 
 ### Linux
@@ -469,22 +473,103 @@ RUST_LOG=trace ./target/release/voice-typer
 
 ### Building from Source
 
+#### voice-typer (CLI binary)
+
 ```bash
-# Clone
 git clone https://github.com/alexmakeev/voice-keyboard.git
 cd voice-keyboard
 
-# Build with OpenAI support only
-cargo build --release --features opus
+# macOS Apple Silicon — full build
+cargo build --release --features "whisper,metal,opus"
 
-# Build with Whisper only
-cargo build --release --features whisper
+# macOS Intel
+cargo build --release --features "whisper,opus"
 
-# Build with both
-cargo build --release --features "opus,whisper"
+# Linux / Windows
+cargo build --release --features "whisper,opus"
 
 # Run tests
 cargo test
+```
+
+#### Tauri Desktop App (Voice Keyboard.app)
+
+The Tauri app wraps voice-typer in a native macOS/Linux/Windows desktop application with GUI settings, tray icon, and model management.
+
+```bash
+# Prerequisites: install Tauri CLI
+cargo install tauri-cli
+
+# Step 1: Build voice-typer with ALL required features
+cargo build --release --features "whisper,metal,opus"
+
+# Step 2: Build the Tauri app
+cargo tauri build
+
+# Step 3: Install (macOS)
+cp -R src-tauri/target/release/bundle/macos/Voice\ Keyboard.app /Applications/
+cp target/release/voice-typer /Applications/Voice\ Keyboard.app/Contents/MacOS/voice-typer
+```
+
+> **CRITICAL:** Step 1 must be done BEFORE `cargo tauri build`.
+> The Tauri app spawns `voice-typer` as a child process from `Contents/MacOS/voice-typer`.
+> If voice-typer was not built with `opus` feature, OGG compression will silently
+> fall back to WAV — the setting will appear to do nothing.
+
+### Build Features Reference
+
+| Feature | Required | Description |
+|---------|----------|-------------|
+| `opus` | **YES** | OGG/Opus audio compression. Without this, audio uploads are 10x larger (WAV). **Always include.** |
+| `whisper` | For local mode | Local Whisper speech recognition. Not needed if using only OpenAI API mode. |
+| `metal` | macOS ARM | Metal GPU acceleration for Whisper on Apple Silicon (M1/M2/M3/M4). |
+| `coreml` | macOS alt | CoreML acceleration for Whisper (alternative to Metal). |
+
+**Minimum build commands:**
+
+| Platform | Command |
+|----------|---------|
+| macOS Apple Silicon | `cargo build --release --features "whisper,metal,opus"` |
+| macOS Intel | `cargo build --release --features "whisper,opus"` |
+| Linux | `cargo build --release --features "whisper,opus"` |
+| Windows | `cargo build --release --features "whisper,opus"` |
+| OpenAI-only (any platform) | `cargo build --release --features opus` |
+
+### Critical Features Checklist
+
+Before releasing or deploying, verify these features work correctly:
+
+| # | Feature | How to Verify | What Breaks If Missing |
+|---|---------|---------------|----------------------|
+| 1 | **OGG/Opus compression** | Check logs for `audio.ogg` (not `audio.wav`). Build with `--features opus`. | Audio sent as WAV (10x larger), slow uploads, higher API costs |
+| 2 | **Push-to-talk hotkey** | Press and hold configured key → mic icon appears → release → text typed | Core functionality broken |
+| 3 | **Persistent audio stream** | Mic icon appears instantly on key press (not delayed 1-2 sec) | Mic activates late, recordings miss first words |
+| 4 | **Volume lowering** | Play music → press hotkey → music gets quiet → release → music restores | Music interferes with speech recognition |
+| 5 | **Audio device selection** | Select specific mic in settings → voice-typer uses that device | Wrong mic used (e.g. BT headset instead of built-in) |
+| 6 | **Min recording duration** | Quick tap (<1s) should be ignored, not sent to API | Accidental taps waste API calls |
+| 7 | **Whisper Metal acceleration** | On Apple Silicon, build with `metal` feature. Check logs for Metal init. | Whisper runs on CPU (10x slower) |
+| 8 | **Model download/delete** | In Tauri app settings, download and delete models | Users can't manage local models |
+| 9 | **Config save/reload** | Change settings → Save & Reload → voice-typer restarts with new config | Settings don't apply until manual restart |
+| 10 | **macOS permissions** | App prompts for Microphone, Accessibility, Input Monitoring | App silently fails to record or type |
+
+### Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Tauri App (src-tauri/src/main.rs)                           │
+│  ├── GUI: HTML/JS/CSS (ui/)                                  │
+│  ├── Tray icon, config management, model downloads           │
+│  └── Spawns voice-typer as child process                     │
+│         │                                                    │
+│         ▼                                                    │
+│  voice-typer (src/bin/voice_typer.rs)                        │
+│  ├── Global hotkey listener (rdev)                           │
+│  ├── Audio recording (cpal) — persistent stream              │
+│  ├── OGG/Opus encoding (ogg-opus) — REQUIRES opus feature    │
+│  ├── OpenAI API / Local Whisper transcription                │
+│  ├── Text injection (enigo) — keyboard or clipboard          │
+│  └── Volume control (src/volume.rs) — lower during recording │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### Project Structure
@@ -493,20 +578,29 @@ cargo test
 voice-keyboard/
 ├── src/
 │   ├── bin/
-│   │   ├── voice_typer.rs       # Main voice-to-text binary
+│   │   ├── voice_typer.rs       # Main voice-to-text binary (~5500 lines)
 │   │   ├── whisper_enhance.rs   # Audio preprocessing for Whisper
 │   │   └── voice_recorder.rs    # Audio recorder
 │   ├── lib.rs
+│   ├── volume.rs                # System volume control (lower during recording)
 │   ├── audio.rs                 # Audio recording (cpal)
 │   ├── transcribe.rs            # Whisper integration
 │   ├── hotkey.rs                # Global hotkey listener
 │   ├── inject.rs                # Text injection
 │   └── config.rs                # Configuration
+├── src-tauri/
+│   ├── src/main.rs              # Tauri app backend
+│   └── Cargo.toml               # Tauri dependencies
+├── ui/
+│   ├── index.html               # Settings UI
+│   ├── app.js                   # Settings logic
+│   └── styles.css               # UI styles
 ├── scripts/
 │   ├── setup-macos.sh           # macOS installer
 │   ├── setup-linux.sh           # Linux installer
-│   └── setup-windows.ps1        # Windows installer
-└── Cargo.toml
+│   ├── setup-windows.ps1        # Windows installer
+│   └── reset-permissions.sh     # Reset macOS TCC permissions
+└── Cargo.toml                   # Root crate with feature flags
 ```
 
 ---
