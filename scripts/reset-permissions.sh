@@ -19,10 +19,23 @@ sleep 1
 
 # 2. Reset TCC permissions (Microphone, Accessibility, Input Monitoring)
 echo "[2/5] Resetting TCC permissions..."
-tccutil reset Microphone "$BUNDLE_ID" 2>/dev/null && echo "  - Microphone: reset" || echo "  - Microphone: skipped"
-tccutil reset Accessibility "$BUNDLE_ID" 2>/dev/null && echo "  - Accessibility: reset" || echo "  - Accessibility: skipped"
-tccutil reset ListenEvent "$BUNDLE_ID" 2>/dev/null && echo "  - Input Monitoring: reset" || echo "  - Input Monitoring: skipped"
-tccutil reset ScreenCapture "$BUNDLE_ID" 2>/dev/null && echo "  - Screen Recording: reset" || echo "  - Screen Recording: skipped"
+
+# 2a. Reset by bundle ID (app installed via .app bundle)
+tccutil reset Microphone "$BUNDLE_ID" 2>/dev/null && echo "  - Microphone (bundle): reset" || echo "  - Microphone (bundle): skipped"
+tccutil reset Accessibility "$BUNDLE_ID" 2>/dev/null && echo "  - Accessibility (bundle): reset" || echo "  - Accessibility (bundle): skipped"
+tccutil reset ListenEvent "$BUNDLE_ID" 2>/dev/null && echo "  - Input Monitoring (bundle): reset" || echo "  - Input Monitoring (bundle): skipped"
+tccutil reset ScreenCapture "$BUNDLE_ID" 2>/dev/null && echo "  - Screen Recording (bundle): reset" || echo "  - Screen Recording (bundle): skipped"
+
+# 2b. Remove raw executable entries from TCC.db (registered by path, not bundle ID)
+#     These appear when running `voice-keyboard-app` or `voice-typer` directly.
+TCC_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+if [[ -f "$TCC_DB" ]]; then
+    echo "  Cleaning TCC database entries by path (requires sudo)..."
+    sudo sqlite3 "$TCC_DB" \
+        "DELETE FROM access WHERE client LIKE '%voice-keyboard%' OR client LIKE '%voice_keyboard%' OR client LIKE '%voice-typer%';" \
+        && echo "  - TCC path entries: removed" \
+        || echo "  - TCC path entries: failed (try running script with sudo)"
+fi
 
 # 3. Remove saved app state
 echo "[3/5] Clearing app state..."
