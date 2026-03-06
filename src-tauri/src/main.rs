@@ -89,6 +89,18 @@ pub struct AppConfig {
     pub transcription_mode: String,
     #[serde(default = "default_true")]
     pub sound_enabled: bool,
+    #[serde(default)]
+    pub audio_device: String,
+    #[serde(default = "default_true")]
+    pub lower_volume_on_record: bool,
+    #[serde(default = "default_true")]
+    pub use_ogg_compression: bool,
+    #[serde(default = "default_min_recording_ms")]
+    pub min_recording_ms: u64,
+}
+
+fn default_min_recording_ms() -> u64 {
+    1000
 }
 
 fn default_true() -> bool {
@@ -106,6 +118,10 @@ impl Default for AppConfig {
             openai_api_url: "https://api.openai.com/v1".to_string(),
             transcription_mode: "openai".to_string(),
             sound_enabled: true,
+            audio_device: String::new(),
+            lower_volume_on_record: true,
+            use_ogg_compression: true,
+            min_recording_ms: 1000,
         }
     }
 }
@@ -203,9 +219,60 @@ fn save_config(app: AppHandle, state: State<AppState>, config: AppConfig) -> Res
 
     // Restart background process to apply new settings
     stop_voice_typer(&state);
+    // Safety buffer after kill+wait to allow OS to release file handles/ports
+    std::thread::sleep(std::time::Duration::from_millis(500));
     start_voice_typer(&state, &app);
 
     Ok(())
+}
+
+/// Get available audio input devices.
+/// Uses system_profiler on macOS to avoid activating mic indicator.
+#[tauri::command]
+fn get_audio_devices() -> Vec<serde_json::Value> {
+    let mut devices = vec![serde_json::json!({"id": "", "name": "System Default"})];
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("system_profiler")
+            .args(["SPAudioDataType", "-json"])
+            .output()
+        {
+            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                if let Some(categories) = json.get("SPAudioDataType").and_then(|v| v.as_array()) {
+                    for category in categories {
+                        if let Some(items) = category.get("_items").and_then(|v| v.as_array()) {
+                            for item in items {
+                                let has_input = item.get("coreaudio_device_input")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0) > 0;
+                                if has_input {
+                                    if let Some(name) = item.get("_name").and_then(|v| v.as_str()) {
+                                        devices.push(serde_json::json!({"id": name, "name": name}));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        let host = cpal::default_host();
+        if let Ok(input_devices) = host.input_devices() {
+            for dev in input_devices {
+                if let Ok(name) = dev.name() {
+                    devices.push(serde_json::json!({"id": name, "name": name}));
+                }
+            }
+        }
+    }
+
+    devices
 }
 
 /// Get available languages
@@ -585,27 +652,18 @@ fn check_permissions() -> serde_json::Value {
     })
 }
 
-/// Try to create a cpal input stream to check microphone permission
+/// Check microphone permission.
+/// On macOS: always returns true — permission is enforced by macOS at stream creation time.
+/// If permission is denied, voice-typer will log an error when trying to record.
 fn check_microphone_permission() -> bool {
-    use cpal::traits::{DeviceTrait, HostTrait};
-    let host = cpal::default_host();
-    let device = match host.default_input_device() {
-        Some(d) => d,
-        None => return false,
-    };
-    let stream_config = match device.default_input_config() {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let config: cpal::StreamConfig = stream_config.into();
-    match device.build_input_stream(
-        &config,
-        |_data: &[f32], _: &cpal::InputCallbackInfo| {},
-        |_err| {},
-        None,
-    ) {
-        Ok(_stream) => true,
-        Err(_) => false,
+    #[cfg(target_os = "macos")]
+    {
+        true
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use cpal::traits::HostTrait;
+        cpal::default_host().default_input_device().is_some()
     }
 }
 
@@ -721,6 +779,27 @@ fn spawn_voice_typer(config: &AppConfig) -> Result<Child, String> {
     if !config.sound_enabled {
         cmd.arg("--silent");
     }
+
+    // Audio device
+    if !config.audio_device.is_empty() {
+        cmd.arg("--audio-device").arg(&config.audio_device);
+    }
+
+    // Lower volume during recording
+    if config.lower_volume_on_record {
+        cmd.arg("--lower-volume");
+    }
+
+    // OGG compression
+    if config.use_ogg_compression {
+        cmd.arg("--ogg");
+    }
+
+    // Minimum recording duration
+    cmd.arg("--min-recording").arg(config.min_recording_ms.to_string());
+
+    tracing::info!("[SPAWN] voice-typer config: sound={}, audio_device={:?}, lower_volume={}, ogg={}, min_rec={}ms",
+        config.sound_enabled, config.audio_device, config.lower_volume_on_record, config.use_ogg_compression, config.min_recording_ms);
 
     // Environment for OpenAI
     if !config.openai_api_key.trim().is_empty() {
@@ -1106,6 +1185,7 @@ fn main() {
             check_permissions,
             open_privacy_settings,
             restart_voice_typer,
+            get_audio_devices,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

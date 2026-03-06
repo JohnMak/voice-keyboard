@@ -32,6 +32,10 @@ let config = {
     openai_api_url: 'https://api.openai.com/v1',
     transcription_mode: 'openai',
     sound_enabled: true,
+    audio_device: '',
+    lower_volume_on_record: true,
+    use_ogg_compression: true,
+    min_recording_ms: 1000,
 };
 
 // Models configuration
@@ -105,6 +109,10 @@ function cacheElements() {
         openaiKeyInput: document.getElementById('openai-key'),
         openaiUrlInput: document.getElementById('openai-url'),
         soundEnabled: document.getElementById('sound-enabled'),
+        audioDeviceSelect: document.getElementById('audio-device-select'),
+        lowerVolume: document.getElementById('lower-volume'),
+        useOgg: document.getElementById('use-ogg'),
+        minRecordingMs: document.getElementById('min-recording-ms'),
         saveSettingsBtn: document.getElementById('save-settings'),
         // Permissions modal
         permissionsModal: document.getElementById('permissions-modal'),
@@ -205,6 +213,22 @@ function setupEventListeners() {
 
     elements.soundEnabled.addEventListener('change', (e) => {
         config.sound_enabled = e.target.checked;
+    });
+
+    elements.audioDeviceSelect.addEventListener('change', (e) => {
+        config.audio_device = e.target.value;
+    });
+
+    elements.lowerVolume.addEventListener('change', (e) => {
+        config.lower_volume_on_record = e.target.checked;
+    });
+
+    elements.useOgg.addEventListener('change', (e) => {
+        config.use_ogg_compression = e.target.checked;
+    });
+
+    elements.minRecordingMs.addEventListener('change', (e) => {
+        config.min_recording_ms = parseInt(e.target.value, 10) || 1000;
     });
 }
 
@@ -361,6 +385,10 @@ async function loadConfig() {
     elements.openaiUrlInput.value = config.openai_api_url || '';
     updateApiKeyHint();
     elements.soundEnabled.checked = config.sound_enabled !== false;
+    await loadAudioDevices();
+    elements.lowerVolume.checked = config.lower_volume_on_record !== false;
+    elements.useOgg.checked = config.use_ogg_compression !== false;
+    elements.minRecordingMs.value = config.min_recording_ms || 1000;
     updateHotkeyHint();
     updateTestMode();
 
@@ -538,6 +566,18 @@ async function deleteModel(modelId) {
     }
 }
 
+async function loadAudioDevices() {
+    try {
+        const devices = await invoke('get_audio_devices');
+        const select = elements.audioDeviceSelect;
+        select.innerHTML = devices.map(d =>
+            `<option value="${d.id}" ${config.audio_device === d.id ? 'selected' : ''}>${d.name}</option>`
+        ).join('');
+    } catch (e) {
+        console.error('Failed to load audio devices:', e);
+    }
+}
+
 function renderLanguages() {
     elements.languageSelect.innerHTML = LANGUAGES.map(lang =>
         `<option value="${lang.code}" ${config.language === lang.code ? 'selected' : ''}>${lang.name}</option>`
@@ -553,6 +593,10 @@ async function saveSettings() {
         config.openai_api_key = elements.openaiKeyInput.value.trim();
         config.openai_api_url = elements.openaiUrlInput.value.trim();
         config.sound_enabled = elements.soundEnabled.checked;
+        config.audio_device = elements.audioDeviceSelect.value;
+        config.lower_volume_on_record = elements.lowerVolume.checked;
+        config.use_ogg_compression = elements.useOgg.checked;
+        config.min_recording_ms = parseInt(elements.minRecordingMs.value, 10) || 1000;
         await invoke('save_config', { config });
         elements.saveSettingsBtn.textContent = 'Saved!';
         setTimeout(() => {

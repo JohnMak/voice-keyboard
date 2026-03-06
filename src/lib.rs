@@ -10,6 +10,7 @@ pub mod audio;
 pub mod config;
 pub mod hotkey;
 pub mod inject;
+pub mod volume;
 
 #[cfg(feature = "whisper")]
 pub mod transcribe;

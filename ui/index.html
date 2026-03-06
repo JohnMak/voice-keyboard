@@ -172,6 +172,37 @@
                 </label>
             </div>
 
+            <div class="settings-group">
+                <h2>Microphone</h2>
+                <select id="audio-device-select" class="select">
+                    <option value="">System Default</option>
+                    <!-- Devices loaded dynamically -->
+                </select>
+                <label class="toggle-field">
+                    <span class="toggle-label">Lower volume during recording</span>
+                    <input type="checkbox" id="lower-volume" checked>
+                    <span class="toggle-switch"></span>
+                </label>
+            </div>
+
+            <div class="settings-group">
+                <h2>Audio Compression</h2>
+                <label class="toggle-field">
+                    <span class="toggle-label">OGG/Opus compression</span>
+                    <input type="checkbox" id="use-ogg" checked>
+                    <span class="toggle-switch"></span>
+                </label>
+            </div>
+
+            <div class="settings-group">
+                <h2>Recording</h2>
+                <label class="field">
+                    <span class="field-label">Minimum duration (ms)</span>
+                    <input id="min-recording-ms" class="input" type="number" min="100" max="5000" step="100" value="1000">
+                    <p class="field-note">Recordings shorter than this are ignored (avoids accidental taps).</p>
+                </label>
+            </div>
+
             <div class="settings-actions">
                 <button id="save-settings" class="btn btn-primary">Save & Reload</button>
             </div>
