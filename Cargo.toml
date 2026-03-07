@@ -84,6 +84,7 @@ muda = { version = "0.15", optional = true }
 cocoa = "0.26"          # macOS clipboard for files
 objc = "0.2"            # Objective-C runtime
 core-graphics = { version = "0.24", features = ["elcapitan"] }  # CGEvent with post_to_pid
+core-foundation = "0.9"  # CFString for Accessibility API
 
 # Windows-only dependencies (tray)
 [target.'cfg(target_os = "windows")'.dependencies]

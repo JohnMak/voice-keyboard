@@ -35,6 +35,10 @@ let config = {
     audio_device: '',
     lower_volume_on_record: true,
     min_recording_ms: 1000,
+    preprompt_default: '',
+    preprompt_1: '',
+    preprompt_2: '',
+    preprompt_3: '',
 };
 
 // Models configuration
@@ -111,6 +115,10 @@ function cacheElements() {
         audioDeviceSelect: document.getElementById('audio-device-select'),
         lowerVolume: document.getElementById('lower-volume'),
         minRecordingMs: document.getElementById('min-recording-ms'),
+        prepromptDefault: document.getElementById('preprompt-default'),
+        preprompt1: document.getElementById('preprompt-1'),
+        preprompt2: document.getElementById('preprompt-2'),
+        preprompt3: document.getElementById('preprompt-3'),
         saveSettingsBtn: document.getElementById('save-settings'),
         // Permissions modal
         permissionsModal: document.getElementById('permissions-modal'),
@@ -386,6 +394,10 @@ async function loadConfig() {
     await loadAudioDevices();
     elements.lowerVolume.checked = config.lower_volume_on_record !== false;
     elements.minRecordingMs.value = config.min_recording_ms || 1000;
+    elements.prepromptDefault.value = config.preprompt_default || '';
+    elements.preprompt1.value = config.preprompt_1 || '';
+    elements.preprompt2.value = config.preprompt_2 || '';
+    elements.preprompt3.value = config.preprompt_3 || '';
     updateHotkeyHint();
     updateTestMode();
 
@@ -601,6 +613,10 @@ async function saveSettings() {
         if (isNaN(minRec) || minRec < 100) minRec = 100;
         if (minRec > 5000) minRec = 5000;
         config.min_recording_ms = minRec;
+        config.preprompt_default = elements.prepromptDefault.value;
+        config.preprompt_1 = elements.preprompt1.value;
+        config.preprompt_2 = elements.preprompt2.value;
+        config.preprompt_3 = elements.preprompt3.value;
         await invoke('save_config', { config });
         elements.saveSettingsBtn.textContent = 'Saved!';
         setTimeout(() => {
@@ -640,6 +656,11 @@ function updateStatus(status, text) {
             state.classList.add('processing');
             icon.textContent = '⏳';
             label.innerHTML = 'Transcribing...';
+            break;
+        case 'improving':
+            state.classList.add('processing');
+            icon.textContent = '✨';
+            label.innerHTML = 'Improving...';
             break;
         case 'typing':
             state.classList.add('processing');
@@ -687,6 +708,7 @@ function updateConnectionBadge(status) {
         case 'recording':
         case 'sending':
         case 'processing':
+        case 'improving':
         case 'typing':
             el.className = 'info-value connected';
             el.textContent = 'Connected';

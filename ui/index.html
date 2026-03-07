@@ -194,6 +194,27 @@
                 <p class="field-note">Recordings shorter than this are ignored (avoids accidental taps).</p>
             </div>
 
+            <div class="settings-group">
+                <h2>Preprompts</h2>
+                <p class="field-note">GPT processes transcription with a preprompt before typing. Leave empty for plain transcription.</p>
+                <label class="field">
+                    <span class="field-label">Default (Hotkey alone)</span>
+                    <textarea id="preprompt-default" class="input" rows="3" placeholder="e.g. Translate to English"></textarea>
+                </label>
+                <label class="field">
+                    <span class="field-label">Preprompt 1 (Hotkey + 1)</span>
+                    <textarea id="preprompt-1" class="input" rows="3" placeholder="e.g. Fix grammar and punctuation"></textarea>
+                </label>
+                <label class="field">
+                    <span class="field-label">Preprompt 2 (Hotkey + 2)</span>
+                    <textarea id="preprompt-2" class="input" rows="3" placeholder="e.g. Summarize in bullet points"></textarea>
+                </label>
+                <label class="field">
+                    <span class="field-label">Preprompt 3 (Hotkey + 3)</span>
+                    <textarea id="preprompt-3" class="input" rows="3" placeholder="e.g. Rewrite formally"></textarea>
+                </label>
+            </div>
+
             <div class="settings-actions">
                 <button id="save-settings" class="btn btn-primary">Save & Reload</button>
             </div>

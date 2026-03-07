@@ -95,6 +95,14 @@ pub struct AppConfig {
     pub lower_volume_on_record: bool,
     #[serde(default = "default_min_recording_ms")]
     pub min_recording_ms: u64,
+    #[serde(default)]
+    pub preprompt_default: String,
+    #[serde(default)]
+    pub preprompt_1: String,
+    #[serde(default)]
+    pub preprompt_2: String,
+    #[serde(default)]
+    pub preprompt_3: String,
 }
 
 fn default_min_recording_ms() -> u64 {
@@ -119,6 +127,10 @@ impl Default for AppConfig {
             audio_device: String::new(),
             lower_volume_on_record: true,
             min_recording_ms: 1000,
+            preprompt_default: String::new(),
+            preprompt_1: String::new(),
+            preprompt_2: String::new(),
+            preprompt_3: String::new(),
         }
     }
 }
@@ -773,6 +785,12 @@ fn spawn_voice_typer(config: &AppConfig) -> Result<Child, String> {
         cmd.env("OPENAI_API_URL", config.openai_api_url.trim());
     }
 
+    // Preprompts (passed as env vars to support multi-line values)
+    cmd.env("PREPROMPT_DEFAULT", &config.preprompt_default);
+    cmd.env("PREPROMPT_1", &config.preprompt_1);
+    cmd.env("PREPROMPT_2", &config.preprompt_2);
+    cmd.env("PREPROMPT_3", &config.preprompt_3);
+
     cmd.spawn().map_err(|e| format!("Failed to start {}: {}", path.display(), e))
 }
 
@@ -799,7 +817,7 @@ fn classify_line(line: &str) -> &'static str {
         return "error";
     }
     // Transcription output
-    if line.starts_with("[TRANSCRIPTION") || line.contains("+\"") || line.contains("ctx:") {
+    if line.starts_with("[TRANSCRIPTION") || line.starts_with("[IMPROVE MODE") || line.starts_with("[PREPROMPT") || line.contains("+\"") || line.contains("ctx:") {
         return "transcription";
     }
     // Recording state
@@ -871,6 +889,9 @@ fn extract_status(line: &str) -> Option<(&'static str, String)> {
     }
     if lower.contains("sending") {
         return Some(("sending", "Sending...".into()));
+    }
+    if lower.contains("[improve]") && lower.contains("improving") {
+        return Some(("improving", "Improving...".into()));
     }
     if lower.contains("processing") || lower.contains("[worker]") {
         return Some(("processing", "Processing...".into()));
@@ -963,8 +984,8 @@ fn start_voice_typer(state: &AppState, app: &AppHandle) {
                                 let category = classify_line(&line);
                                 emit_debug_line(&app_h, &dl, &line, category);
 
-                                // Track transcription blocks
-                                if line.starts_with("[TRANSCRIPTION") {
+                                // Track transcription/improve blocks
+                                if line.starts_with("[TRANSCRIPTION") || line.starts_with("[IMPROVE MODE") {
                                     in_transcription_block = true;
                                     continue;
                                 }

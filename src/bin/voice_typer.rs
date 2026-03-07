@@ -1282,6 +1282,19 @@ RULES:
 - Just translate, no formatting changes, no additions
 - Output ONLY the translation, nothing else";
 
+/// System prompt for text improvement mode (voice instruction + selected text)
+const CHAT_IMPROVE_TEXT_PROMPT: &str = "\
+You are a text editor. You receive SELECTED TEXT and a VOICE INSTRUCTION describing how to change it.
+
+RULES:
+- Apply the voice instruction to the selected text
+- Output ONLY the improved text, nothing else
+- No preamble, no explanation, no quotes around the result
+- Preserve original formatting (line breaks, indentation) unless the instruction says otherwise
+- Preserve the original language unless the instruction explicitly asks for translation
+- Handle any instruction: grammar fix, rewrite, shorten, lengthen, translate, change tone, etc.
+- If the instruction is unclear, make the most reasonable improvement";
+
 /// System prompt for GPT-4.1 Chat API - Summary + Structure (same language)
 /// Uses Telegram-compatible Markdown
 const CHAT_SUMMARY_STRUCTURE_PROMPT: &str = "\
@@ -1474,6 +1487,19 @@ fn structure_text_english(config: &OpenAIConfig, text: &str) -> Result<String, S
 /// Helper: Translate text to English
 fn translate_to_english(config: &OpenAIConfig, text: &str) -> Result<String, String> {
     call_chat_api(config, CHAT_TRANSLATION_PROMPT, text, "Translation to EN")
+}
+
+/// Helper: Improve selected text using voice instruction
+fn improve_text_with_chat_api(
+    config: &OpenAIConfig,
+    selected_text: &str,
+    voice_instruction: &str,
+) -> Result<String, String> {
+    let user_message = format!(
+        "SELECTED TEXT:\n{}\n\nVOICE INSTRUCTION:\n{}",
+        selected_text, voice_instruction
+    );
+    call_chat_api(config, CHAT_IMPROVE_TEXT_PROMPT, &user_message, "Improve text")
 }
 
 fn resolve_model_path(model: &str) -> PathBuf {
@@ -3022,6 +3048,74 @@ fn get_frontmost_app_pid() -> Option<i32> {
     }
 }
 
+/// Replace currently-selected text with new text.
+/// On macOS uses CGEvent post_to_pid for reliable delivery; falls back to enigo.
+fn replace_selected_text(
+    new_text: &str,
+    old_char_count: usize,
+    #[cfg(target_os = "macos")] target_pid: Option<i32>,
+) {
+    #[cfg(target_os = "macos")]
+    {
+        use core_graphics::event::CGEvent;
+        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+        if let Some(pid) = target_pid {
+            if let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) {
+                // Step 1: Right arrow to deselect (move cursor to end of selection)
+                if let Ok(ev) = CGEvent::new_keyboard_event(source.clone(), 0x7C, true) {
+                    ev.post_to_pid(pid);
+                }
+                if let Ok(ev) = CGEvent::new_keyboard_event(source.clone(), 0x7C, false) {
+                    ev.post_to_pid(pid);
+                }
+                std::thread::sleep(Duration::from_millis(30));
+
+                // Step 2: Backspace × N to delete original text
+                for _ in 0..old_char_count {
+                    if let Ok(ev) = CGEvent::new_keyboard_event(source.clone(), 0x33, true) {
+                        ev.post_to_pid(pid);
+                    }
+                    if let Ok(ev) = CGEvent::new_keyboard_event(source.clone(), 0x33, false) {
+                        ev.post_to_pid(pid);
+                    }
+                    std::thread::sleep(Duration::from_millis(3));
+                }
+                std::thread::sleep(Duration::from_millis(30));
+
+                // Step 3: Type new text via post_to_pid
+                let utf16: Vec<u16> = new_text.encode_utf16().collect();
+                for chunk in utf16.chunks(20) {
+                    if let Ok(ev) = CGEvent::new_keyboard_event(source.clone(), 0, true) {
+                        ev.set_string_from_utf16_unchecked(chunk);
+                        ev.post_to_pid(pid);
+                    }
+                    if let Ok(ev) = CGEvent::new_keyboard_event(source.clone(), 0, false) {
+                        ev.post_to_pid(pid);
+                    }
+                    if utf16.len() > 20 {
+                        std::thread::sleep(Duration::from_millis(4));
+                    }
+                }
+                println!("[{}] [WORKER] Text replaced via post_to_pid (pid={})", timestamp(), pid);
+                return;
+            }
+        }
+        eprintln!("[{}] [WORKER] ✗ No target PID, falling back to enigo", timestamp());
+    }
+
+    // Fallback (non-macOS or no PID)
+    if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+        let _ = enigo.key(EnigoKey::RightArrow, Direction::Click);
+    }
+    std::thread::sleep(Duration::from_millis(30));
+    let _ = delete_chars(old_char_count);
+    std::thread::sleep(Duration::from_millis(30));
+    if let Err(e) = paste_text(new_text) {
+        eprintln!("[{}] [WORKER] ✗ paste_text failed: {}", timestamp(), e);
+    }
+}
+
 /// Delete N characters by sending backspace keys (cross-platform)
 /// Uses global mutex to prevent concurrent keyboard operations
 fn delete_chars(count: usize) -> Result<(), String> {
@@ -3040,6 +3134,92 @@ fn delete_chars(count: usize) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Detect selected text using macOS Accessibility API (AXUIElement).
+/// Reads AXSelectedText directly from the focused UI element — no clipboard
+/// manipulation or keyboard simulation needed.
+#[cfg(target_os = "macos")]
+fn detect_selected_text() -> Option<String> {
+    use core_foundation::base::TCFType;
+    use core_foundation::string::{CFString, CFStringRef};
+    use std::ffi::c_void;
+
+    // AXError success code
+    const AX_ERROR_SUCCESS: i32 = 0;
+
+    extern "C" {
+        fn AXUIElementCreateSystemWide() -> *mut c_void;
+        fn AXUIElementCopyAttributeValue(
+            element: *mut c_void,
+            attribute: CFStringRef,
+            value: *mut *mut c_void,
+        ) -> i32;
+        fn CFRelease(cf: *const c_void);
+    }
+
+    println!("[{}] [IMPROVE] Detecting selected text (AX API)...", timestamp());
+
+    unsafe {
+        let system = AXUIElementCreateSystemWide();
+        if system.is_null() {
+            println!("[{}] [IMPROVE] AXUIElementCreateSystemWide failed", timestamp());
+            return None;
+        }
+
+        // Get focused UI element
+        let attr_focused = CFString::new("AXFocusedUIElement");
+        let mut focused_element: *mut c_void = std::ptr::null_mut();
+        let err = AXUIElementCopyAttributeValue(
+            system,
+            attr_focused.as_concrete_TypeRef(),
+            &mut focused_element,
+        );
+        CFRelease(system);
+
+        if err != AX_ERROR_SUCCESS || focused_element.is_null() {
+            println!("[{}] [IMPROVE] No focused element (AXError={})", timestamp(), err);
+            return None;
+        }
+
+        // Get selected text from focused element
+        let attr_selected = CFString::new("AXSelectedText");
+        let mut selected_value: *mut c_void = std::ptr::null_mut();
+        let err = AXUIElementCopyAttributeValue(
+            focused_element,
+            attr_selected.as_concrete_TypeRef(),
+            &mut selected_value,
+        );
+        CFRelease(focused_element);
+
+        if err != AX_ERROR_SUCCESS || selected_value.is_null() {
+            println!("[{}] [IMPROVE] No selected text (AXError={})", timestamp(), err);
+            return None;
+        }
+
+        // Convert CFStringRef to Rust String
+        let cf_str = CFString::wrap_under_create_rule(selected_value as CFStringRef);
+        let result = cf_str.to_string();
+
+        if result.is_empty() {
+            println!("[{}] [IMPROVE] Selection is empty", timestamp());
+            None
+        } else {
+            println!(
+                "[{}] [IMPROVE] Detected selected text ({} chars): \"{}\"",
+                timestamp(),
+                result.len(),
+                result.chars().take(50).collect::<String>()
+            );
+            Some(result)
+        }
+    }
+}
+
+/// Fallback for non-macOS: no selection detection
+#[cfg(not(target_os = "macos"))]
+fn detect_selected_text() -> Option<String> {
+    None
 }
 
 /// Paste text using clipboard + Ctrl/Cmd+V (cross-platform)
@@ -3244,6 +3424,13 @@ struct TranscriptionJob {
     end_sample: usize,
     /// Output mode: OUTPUT_MODE_PLAIN, OUTPUT_MODE_STRUCTURED, or OUTPUT_MODE_TRANSLATE
     output_mode: u8,
+    /// Selected text for improve mode (None = normal transcription)
+    selected_text: Option<String>,
+    /// Preprompt index: 0=default, 1/2/3=numbered preprompt
+    preprompt_index: u8,
+    /// PID of frontmost app at hotkey press time (for targeted key delivery)
+    #[cfg(target_os = "macos")]
+    target_pid: Option<i32>,
 }
 
 /// Completed transcription result
@@ -3721,6 +3908,31 @@ fn run_openai(
     // Output mode: PLAIN, STRUCTURED, or TRANSLATE (activated by different hotkeys)
     let output_mode = Arc::new(AtomicU8::new(OUTPUT_MODE_PLAIN));
 
+    // Preprompts loaded from environment (set by Tauri app)
+    let preprompts: Arc<[String; 4]> = Arc::new([
+        env::var("PREPROMPT_DEFAULT").unwrap_or_default(),
+        env::var("PREPROMPT_1").unwrap_or_default(),
+        env::var("PREPROMPT_2").unwrap_or_default(),
+        env::var("PREPROMPT_3").unwrap_or_default(),
+    ]);
+    {
+        let configured: Vec<&str> = ["default", "1", "2", "3"]
+            .iter()
+            .zip(preprompts.iter())
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, _)| *k)
+            .collect();
+        if configured.is_empty() {
+            println!("[{}] [PREPROMPT] No preprompts configured", timestamp());
+        } else {
+            println!("[{}] [PREPROMPT] Configured: {}", timestamp(), configured.join(", "));
+        }
+        std::io::stdout().flush().ok();
+    }
+
+    // Active preprompt index: 0=default, 1/2/3=numbered (set by pressing number key during recording)
+    let active_preprompt_index = Arc::new(AtomicU8::new(0));
+
     // Sequence number for ordering transcription results
     let next_sequence = Arc::new(AtomicU64::new(0));
 
@@ -3765,6 +3977,9 @@ fn run_openai(
     // Pending retry job - saved when network error occurs, retried on next hotkey press
     let pending_retry_job: Arc<Mutex<Option<TranscriptionJob>>> = Arc::new(Mutex::new(None));
 
+    // Selected text for improve mode — captured on hotkey press, consumed on release
+    let selected_text_for_improve: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
     // Volume controller — lowers system volume while recording
     let volume_controller = Arc::new(voice_keyboard::volume::VolumeController::new(lower_volume));
 
@@ -3796,6 +4011,7 @@ fn run_openai(
 
     // Transcription worker thread - processes jobs from queue
     let config_for_worker = Arc::clone(&config);
+    let preprompts_for_worker = Arc::clone(&preprompts);
     let last_phrase_for_worker = Arc::clone(&last_phrase);
     let processing_count_worker = Arc::clone(&processing_count);
     let dev_frag_tx_worker = dev_frag_tx;
@@ -3806,6 +4022,65 @@ fn run_openai(
         use std::sync::atomic::Ordering;
 
         for job in job_rx {
+            // Text-only job (no audio): selected text + preprompt, skip transcription
+            if job.samples.is_empty() {
+                if let Some(ref selected) = job.selected_text {
+                    let preprompt = &preprompts_for_worker[job.preprompt_index as usize];
+                    println!(
+                        "\n[{}] ═══════════════════════════════════════════════════════════",
+                        timestamp()
+                    );
+                    println!("[PREPROMPT+SELECTED #{} (index={}, text-only)]", job.sequence_num, job.preprompt_index);
+                    println!("Selected: {}", selected.chars().take(80).collect::<String>());
+                    println!(
+                        "═══════════════════════════════════════════════════════════\n"
+                    );
+
+                    match call_chat_api(
+                        &config_for_worker,
+                        preprompt,
+                        selected,
+                        "Preprompt+Selected",
+                    ) {
+                        Ok(result) => {
+                            println!(
+                                "[{}] [WORKER] Preprompt+selected result ({} chars): \"{}\"",
+                                timestamp(),
+                                result.len(),
+                                result.chars().take(80).collect::<String>()
+                            );
+                            // Replace selected text with result
+                            std::thread::sleep(Duration::from_millis(100));
+                            replace_selected_text(
+                                &result,
+                                selected.chars().count(),
+                                #[cfg(target_os = "macos")]
+                                job.target_pid,
+                            );
+                            let _ = result_tx.send(TranscriptionOutput {
+                                text: String::new(),
+                                is_continuation: false,
+                                sequence_num: job.sequence_num,
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[{}] [WORKER] ✗ Preprompt+selected API failed: {}",
+                                timestamp(), e
+                            );
+                            play_error_beep();
+                            let _ = result_tx.send(TranscriptionOutput {
+                                text: String::new(),
+                                is_continuation: false,
+                                sequence_num: job.sequence_num,
+                            });
+                        }
+                    }
+                }
+                processing_count_worker.fetch_sub(1, Ordering::SeqCst);
+                continue;
+            }
+
             let duration_secs = job.samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
             println!(
                 "[{}] Processing phrase #{} ({:.1}s)...",
@@ -4169,25 +4444,216 @@ fn run_openai(
                             }
 
                             _ => {
-                                // PLAIN MODE: Just send transcribed text
-                                println!(
-                                    "\n[{}] ═══════════════════════════════════════════════════════════",
-                                    timestamp()
-                                );
-                                println!("[TRANSCRIPTION #{}]", job.sequence_num);
-                                println!("{}", transcribed_text);
-                                println!(
-                                    "═══════════════════════════════════════════════════════════\n"
-                                );
+                                if job.selected_text.is_some() && job.preprompt_index > 0
+                                    && !preprompts_for_worker[job.preprompt_index as usize].is_empty()
+                                {
+                                    // PREPROMPT+SELECTED MODE: Apply preprompt to selected text
+                                    let selected = job.selected_text.as_ref().unwrap();
+                                    let preprompt = &preprompts_for_worker[job.preprompt_index as usize];
+                                    let user_message = if transcribed_text.is_empty() || transcribed_text.trim() == "-" {
+                                        selected.clone()
+                                    } else {
+                                        format!("{}\n\nAdditional instruction: {}", selected, transcribed_text)
+                                    };
+                                    println!(
+                                        "\n[{}] ═══════════════════════════════════════════════════════════",
+                                        timestamp()
+                                    );
+                                    println!("[PREPROMPT+SELECTED #{} (index={})]", job.sequence_num, job.preprompt_index);
+                                    println!("Selected: {}", selected.chars().take(80).collect::<String>());
+                                    if !transcribed_text.is_empty() && transcribed_text.trim() != "-" {
+                                        println!("Voice: {}", transcribed_text.chars().take(80).collect::<String>());
+                                    }
+                                    println!(
+                                        "═══════════════════════════════════════════════════════════\n"
+                                    );
 
-                                if let Err(e) = result_tx.send(TranscriptionOutput {
-                                    text: transcribed_text.clone(),
-                                    is_continuation,
-                                    sequence_num: job.sequence_num,
-                                }) {
-                                    eprintln!("[{}] [WORKER] ✗ Failed to send: {}", timestamp(), e);
+                                    match call_chat_api(
+                                        &config_for_worker,
+                                        preprompt,
+                                        &user_message,
+                                        "Preprompt+Selected",
+                                    ) {
+                                        Ok(result) => {
+                                            println!(
+                                                "[{}] [WORKER] Preprompt+selected result ({} chars): \"{}\"",
+                                                timestamp(),
+                                                result.len(),
+                                                result.chars().take(80).collect::<String>()
+                                            );
+                                            std::thread::sleep(Duration::from_millis(100));
+                                            replace_selected_text(
+                                                &result,
+                                                selected.chars().count(),
+                                                #[cfg(target_os = "macos")]
+                                                job.target_pid,
+                                            );
+                                            let _ = result_tx.send(TranscriptionOutput {
+                                                text: String::new(),
+                                                is_continuation: false,
+                                                sequence_num: job.sequence_num,
+                                            });
+                                            (result, None)
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "[{}] [WORKER] ✗ Preprompt+selected API failed: {}",
+                                                timestamp(), e
+                                            );
+                                            play_error_beep();
+                                            let _ = result_tx.send(TranscriptionOutput {
+                                                text: String::new(),
+                                                is_continuation: false,
+                                                sequence_num: job.sequence_num,
+                                            });
+                                            (transcribed_text.clone(), Some(e))
+                                        }
+                                    }
+                                } else if let Some(ref selected) = job.selected_text {
+                                    // IMPROVE MODE: Use voice as instruction to improve selected text
+                                    println!(
+                                        "\n[{}] ═══════════════════════════════════════════════════════════",
+                                        timestamp()
+                                    );
+                                    println!("[IMPROVE MODE #{}]", job.sequence_num);
+                                    println!("{}", selected);
+                                    println!(
+                                        "═══════════════════════════════════════════════════════════\n"
+                                    );
+                                    println!(
+                                        "[{}] [IMPROVE] Improving text with instruction: \"{}\"",
+                                        timestamp(),
+                                        transcribed_text
+                                    );
+
+                                    match improve_text_with_chat_api(
+                                        &config_for_worker,
+                                        selected,
+                                        &transcribed_text,
+                                    ) {
+                                        Ok(improved) => {
+                                            println!(
+                                                "[{}] [WORKER] Improved text ({} chars): \"{}\"",
+                                                timestamp(),
+                                                improved.len(),
+                                                improved.chars().take(80).collect::<String>()
+                                            );
+                                            std::thread::sleep(Duration::from_millis(100));
+                                            replace_selected_text(
+                                                &improved,
+                                                selected.chars().count(),
+                                                #[cfg(target_os = "macos")]
+                                                job.target_pid,
+                                            );
+
+                                            // Send empty output to advance sequence counter
+                                            let _ = result_tx.send(TranscriptionOutput {
+                                                text: String::new(),
+                                                is_continuation: false,
+                                                sequence_num: job.sequence_num,
+                                            });
+
+                                            (improved, None)
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "[{}] [WORKER] ✗ Improve API failed: {}",
+                                                timestamp(),
+                                                e
+                                            );
+                                            play_error_beep();
+
+                                            // Send empty output to advance sequence counter
+                                            let _ = result_tx.send(TranscriptionOutput {
+                                                text: String::new(),
+                                                is_continuation: false,
+                                                sequence_num: job.sequence_num,
+                                            });
+
+                                            (transcribed_text.clone(), Some(e))
+                                        }
+                                    }
+                                } else if !preprompts_for_worker[job.preprompt_index as usize].is_empty() {
+                                    // PREPROMPT MODE: Process transcription through GPT with preprompt
+                                    let preprompt = &preprompts_for_worker[job.preprompt_index as usize];
+                                    println!(
+                                        "\n[{}] ═══════════════════════════════════════════════════════════",
+                                        timestamp()
+                                    );
+                                    println!("[PREPROMPT #{} (index={})]", job.sequence_num, job.preprompt_index);
+                                    println!("Transcription: {}", transcribed_text);
+                                    println!(
+                                        "═══════════════════════════════════════════════════════════\n"
+                                    );
+                                    println!(
+                                        "[{}] [PREPROMPT] Applying preprompt {} to transcription ({} chars)",
+                                        timestamp(),
+                                        job.preprompt_index,
+                                        transcribed_text.len()
+                                    );
+
+                                    match call_chat_api(
+                                        &config_for_worker,
+                                        preprompt,
+                                        &transcribed_text,
+                                        "Preprompt",
+                                    ) {
+                                        Ok(result) => {
+                                            println!(
+                                                "[{}] [WORKER] Preprompt result ({} chars): \"{}\"",
+                                                timestamp(),
+                                                result.len(),
+                                                result.chars().take(80).collect::<String>()
+                                            );
+
+                                            if let Err(e) = result_tx.send(TranscriptionOutput {
+                                                text: result.clone(),
+                                                is_continuation,
+                                                sequence_num: job.sequence_num,
+                                            }) {
+                                                eprintln!("[{}] [WORKER] ✗ Failed to send: {}", timestamp(), e);
+                                            }
+                                            (result, None)
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "[{}] [WORKER] ⚠ Preprompt API failed: {}, falling back to raw transcription",
+                                                timestamp(),
+                                                e
+                                            );
+
+                                            // Fallback: type raw transcription
+                                            if let Err(send_err) = result_tx.send(TranscriptionOutput {
+                                                text: transcribed_text.clone(),
+                                                is_continuation,
+                                                sequence_num: job.sequence_num,
+                                            }) {
+                                                eprintln!("[{}] [WORKER] ✗ Failed to send: {}", timestamp(), send_err);
+                                            }
+                                            (transcribed_text.clone(), Some(e))
+                                        }
+                                    }
+                                } else {
+                                    // PLAIN MODE: Just send transcribed text
+                                    println!(
+                                        "\n[{}] ═══════════════════════════════════════════════════════════",
+                                        timestamp()
+                                    );
+                                    println!("[TRANSCRIPTION #{}]", job.sequence_num);
+                                    println!("{}", transcribed_text);
+                                    println!(
+                                        "═══════════════════════════════════════════════════════════\n"
+                                    );
+
+                                    if let Err(e) = result_tx.send(TranscriptionOutput {
+                                        text: transcribed_text.clone(),
+                                        is_continuation,
+                                        sequence_num: job.sequence_num,
+                                    }) {
+                                        eprintln!("[{}] [WORKER] ✗ Failed to send: {}", timestamp(), e);
+                                    }
+                                    (transcribed_text.clone(), None)
                                 }
-                                (transcribed_text.clone(), None)
                             }
                         };
 
@@ -4255,6 +4721,10 @@ fn run_openai(
                             start_sample: job.start_sample,
                             end_sample: job.end_sample,
                             output_mode: job.output_mode,
+                            selected_text: job.selected_text.clone(),
+                            preprompt_index: job.preprompt_index,
+                            #[cfg(target_os = "macos")]
+                            target_pid: job.target_pid,
                         });
                         println!(
                             "[{}] [WORKER] Job #{} saved for retry (press hotkey to retry)",
@@ -4668,6 +5138,10 @@ fn run_openai(
                     start_sample: start_pos,
                     end_sample: end_pos,
                     output_mode: current_mode,
+                    selected_text: None,
+                    preprompt_index: 0,
+                    #[cfg(target_os = "macos")]
+                    target_pid: None,
                 });
             }
         }
@@ -4690,6 +5164,8 @@ fn run_openai(
     let persistent_stream_clone = Arc::clone(&persistent_stream);
     let pending_retry_callback = Arc::clone(&pending_retry_job);
     let volume_controller_clone = Arc::clone(&volume_controller);
+    let selected_text_callback = Arc::clone(&selected_text_for_improve);
+    let active_preprompt_callback = Arc::clone(&active_preprompt_index);
 
     // Debounce state
     let key_debounce = Arc::new(AtomicBool::new(false));
@@ -4739,10 +5215,20 @@ fn run_openai(
                 };
                 output_mode_clone.store(mode, Ordering::SeqCst);
 
+                // Detect selected text for improve mode (only in PLAIN mode).
+                // Uses macOS Accessibility API — instant, no keyboard simulation.
+                let captured_selection = if mode == OUTPUT_MODE_PLAIN {
+                    detect_selected_text()
+                } else {
+                    None
+                };
+                *selected_text_callback.lock().unwrap() = captured_selection;
+
                 // Debug: log which key was pressed and mode
                 let mode_name = match mode {
                     OUTPUT_MODE_TRANSLATE => "translate",
                     OUTPUT_MODE_STRUCTURED => "structured",
+                    _ if selected_text_callback.lock().unwrap().is_some() => "improve",
                     _ => "plain",
                 };
                 println!(
@@ -4792,6 +5278,7 @@ fn run_openai(
                     vad_clone.lock().unwrap().reset();
                     next_sequence_clone.store(0, Ordering::SeqCst); // Reset sequence for new session
                     next_output_seq_for_callback.store(0, Ordering::SeqCst); // Reset output sequence too
+                    active_preprompt_callback.store(0, Ordering::SeqCst); // Reset preprompt index
                     *recording_start_clone.lock().unwrap() = Some(Instant::now());
                     is_recording_clone.store(true, Ordering::SeqCst);
                     *rec_state = RecordingState::Recording;
@@ -4833,6 +5320,50 @@ fn run_openai(
                     // No start beep - it would be captured in the recording
                 }
             }
+            // Number keys 1/2/3 during recording → select preprompt
+            EventType::KeyPress(key)
+                if matches!(key, Key::Num1 | Key::Num2 | Key::Num3) =>
+            {
+                let is_rec = {
+                    *state_clone.lock().unwrap() == RecordingState::Recording
+                };
+                if is_rec {
+                    let idx = match key {
+                        Key::Num1 => 1u8,
+                        Key::Num2 => 2u8,
+                        Key::Num3 => 3u8,
+                        _ => 0u8,
+                    };
+                    active_preprompt_callback.store(idx, Ordering::SeqCst);
+                    println!("[{}] [PREPROMPT] Selected preprompt {}", timestamp(), idx);
+                    std::io::stdout().flush().ok();
+
+                    // Undo the typed digit via Cmd+Z sent directly to the frontmost app
+                    // (post_to_pid bypasses our event listener, avoiding re-trigger)
+                    #[cfg(target_os = "macos")]
+                    {
+                        let pid = get_frontmost_app_pid();
+                        thread::spawn(move || {
+                            thread::sleep(Duration::from_millis(30));
+                            if let Some(pid) = pid {
+                                use core_graphics::event::{CGEvent, CGEventFlags};
+                                use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+                                if let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) {
+                                    // Cmd+Z: keycode 6 = 'z'
+                                    if let Ok(ev) = CGEvent::new_keyboard_event(source.clone(), 6, true) {
+                                        ev.set_flags(CGEventFlags::CGEventFlagCommand);
+                                        ev.post_to_pid(pid);
+                                    }
+                                    if let Ok(ev) = CGEvent::new_keyboard_event(source, 6, false) {
+                                        ev.set_flags(CGEventFlags::CGEventFlagCommand);
+                                        ev.post_to_pid(pid);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+            }
             EventType::KeyRelease(key)
                 if key == target_key || target_key2 == Some(key) || target_key3 == Some(key) =>
             {
@@ -4862,7 +5393,34 @@ fn run_openai(
                         .unwrap_or(Duration::ZERO);
 
                     if recording_duration < Duration::from_millis(min_recording_ms) {
+                        // If we have selected text + preprompt, still process (text-only, no audio)
+                        let preprompt_idx = active_preprompt_callback.load(Ordering::SeqCst);
+                        let has_selected = selected_text_callback.lock().unwrap().is_some();
+                        if preprompt_idx > 0 && has_selected {
+                            println!(
+                                "[{}] Recording too short but have selected text + preprompt {}, sending text-only job",
+                                timestamp(), preprompt_idx
+                            );
+                            let seq = next_sequence_clone.fetch_add(1, Ordering::SeqCst);
+                            processing_count_clone.fetch_add(1, Ordering::SeqCst);
+                            let selected = selected_text_callback.lock().unwrap().take();
+                            play_stop_beep();
+                            drop(rec_state);
+                            let _ = job_tx_callback.send(TranscriptionJob {
+                                samples: vec![], // empty — no audio to transcribe
+                                sequence_num: seq,
+                                start_sample: 0,
+                                end_sample: 0,
+                                output_mode: output_mode_clone.load(Ordering::SeqCst),
+                                selected_text: selected,
+                                preprompt_index: preprompt_idx,
+                                #[cfg(target_os = "macos")]
+                                target_pid: get_frontmost_app_pid(),
+                            });
+                            return;
+                        }
                         println!("[{}] Recording too short, ignoring", timestamp());
+                        selected_text_callback.lock().unwrap().take(); // Clear stale selection
                         std::io::stdout().flush().ok();
                         return;
                     }
@@ -4922,6 +5480,7 @@ fn run_openai(
                                     voice_percent * 100.0,
                                     MIN_VOICE_RATIO_FOR_SPEECH * 100.0
                                 );
+                                selected_text_callback.lock().unwrap().take(); // Clear stale selection
                                 play_error_beep();
                                 return;
                             }
@@ -4956,12 +5515,25 @@ fn run_openai(
                         ));
 
                         let current_mode = output_mode_clone.load(Ordering::SeqCst);
+                        let current_preprompt_idx = active_preprompt_callback.load(Ordering::SeqCst);
+                        // Preprompt mode takes priority over improve mode —
+                        // don't replace selected text when a number key was pressed
+                        let selected = if current_preprompt_idx > 0 {
+                            selected_text_callback.lock().unwrap().take(); // discard
+                            None
+                        } else {
+                            selected_text_callback.lock().unwrap().take()
+                        };
                         let _ = job_tx_callback.send(TranscriptionJob {
                             samples: phrase_samples,
                             sequence_num: seq,
                             start_sample: start_pos,
                             end_sample: end_pos,
                             output_mode: current_mode,
+                            selected_text: selected,
+                            preprompt_index: current_preprompt_idx,
+                            #[cfg(target_os = "macos")]
+                            target_pid: get_frontmost_app_pid(),
                         });
                     } else {
                         println!("[{}] No remaining audio to transcribe", timestamp());
