@@ -772,7 +772,8 @@ fn spawn_voice_typer(config: &AppConfig) -> Result<Child, String> {
     cmd.arg("--ogg");
 
     // Minimum recording duration
-    cmd.arg("--min-recording").arg(config.min_recording_ms.to_string());
+    let min_rec = config.min_recording_ms.max(100).min(5000);
+    cmd.arg("--min-recording").arg(min_rec.to_string());
 
     tracing::info!("[SPAWN] voice-typer config: sound={}, audio_device={:?}, lower_volume={}, ogg=always, min_rec={}ms",
         config.sound_enabled, config.audio_device, config.lower_volume_on_record, config.min_recording_ms);
@@ -985,7 +986,7 @@ fn start_voice_typer(state: &AppState, app: &AppHandle) {
                                 emit_debug_line(&app_h, &dl, &line, category);
 
                                 // Track transcription/improve blocks
-                                if line.starts_with("[TRANSCRIPTION") || line.starts_with("[IMPROVE MODE") {
+                                if line.starts_with("[TRANSCRIPTION") || line.starts_with("[IMPROVE MODE") || line.starts_with("[PREPROMPT") {
                                     in_transcription_block = true;
                                     continue;
                                 }

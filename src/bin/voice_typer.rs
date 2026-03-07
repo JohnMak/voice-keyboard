@@ -2192,6 +2192,9 @@ fn main() {
                 if i + 1 < args.len() {
                     audio_device_name = args[i + 1].clone();
                     i += 1;
+                } else {
+                    eprintln!("Error: --audio-device requires an argument");
+                    std::process::exit(1);
                 }
             }
             "--lower-volume" => {
@@ -2872,10 +2875,11 @@ fn start_recording_persistent(
         host.input_devices()
             .ok()
             .and_then(|mut devs| devs.find(|d| d.name().ok().as_deref() == Some(name)))
-            .unwrap_or_else(|| {
+            .or_else(|| {
                 eprintln!("[WARN] Audio device \"{}\" not found, using default", name);
-                host.default_input_device().expect("No input device found")
+                host.default_input_device()
             })
+            .ok_or_else(|| "No input device found".to_string())?
     } else {
         host.default_input_device().ok_or("No input device found")?
     };
@@ -4516,14 +4520,15 @@ fn run_openai(
                                         timestamp()
                                     );
                                     println!("[IMPROVE MODE #{}]", job.sequence_num);
-                                    println!("{}", selected);
+                                    println!("Selected ({} chars): {}...", selected.len(), selected.chars().take(80).collect::<String>());
                                     println!(
                                         "═══════════════════════════════════════════════════════════\n"
                                     );
                                     println!(
-                                        "[{}] [IMPROVE] Improving text with instruction: \"{}\"",
+                                        "[{}] [IMPROVE] Improving text with instruction ({} chars): \"{}\"",
                                         timestamp(),
-                                        transcribed_text
+                                        transcribed_text.len(),
+                                        transcribed_text.chars().take(80).collect::<String>()
                                     );
 
                                     match improve_text_with_chat_api(
@@ -5166,6 +5171,7 @@ fn run_openai(
     let volume_controller_clone = Arc::clone(&volume_controller);
     let selected_text_callback = Arc::clone(&selected_text_for_improve);
     let active_preprompt_callback = Arc::clone(&active_preprompt_index);
+    let preprompts_callback = Arc::clone(&preprompts);
 
     // Debounce state
     let key_debounce = Arc::new(AtomicBool::new(false));
@@ -5396,7 +5402,9 @@ fn run_openai(
                         // If we have selected text + preprompt, still process (text-only, no audio)
                         let preprompt_idx = active_preprompt_callback.load(Ordering::SeqCst);
                         let has_selected = selected_text_callback.lock().unwrap().is_some();
-                        if preprompt_idx > 0 && has_selected {
+                        let preprompt_configured = preprompt_idx > 0
+                            && !preprompts_callback[preprompt_idx as usize].is_empty();
+                        if preprompt_configured && has_selected {
                             println!(
                                 "[{}] Recording too short but have selected text + preprompt {}, sending text-only job",
                                 timestamp(), preprompt_idx
@@ -5516,14 +5524,7 @@ fn run_openai(
 
                         let current_mode = output_mode_clone.load(Ordering::SeqCst);
                         let current_preprompt_idx = active_preprompt_callback.load(Ordering::SeqCst);
-                        // Preprompt mode takes priority over improve mode —
-                        // don't replace selected text when a number key was pressed
-                        let selected = if current_preprompt_idx > 0 {
-                            selected_text_callback.lock().unwrap().take(); // discard
-                            None
-                        } else {
-                            selected_text_callback.lock().unwrap().take()
-                        };
+                        let selected = selected_text_callback.lock().unwrap().take();
                         let _ = job_tx_callback.send(TranscriptionJob {
                             samples: phrase_samples,
                             sequence_num: seq,
