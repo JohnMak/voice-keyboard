@@ -32,6 +32,13 @@ let config = {
     openai_api_url: 'https://api.openai.com/v1',
     transcription_mode: 'openai',
     sound_enabled: true,
+    audio_device: '',
+    lower_volume_on_record: true,
+    min_recording_ms: 1000,
+    preprompt_default: '',
+    preprompt_1: '',
+    preprompt_2: '',
+    preprompt_3: '',
 };
 
 // Models configuration
@@ -105,6 +112,13 @@ function cacheElements() {
         openaiKeyInput: document.getElementById('openai-key'),
         openaiUrlInput: document.getElementById('openai-url'),
         soundEnabled: document.getElementById('sound-enabled'),
+        audioDeviceSelect: document.getElementById('audio-device-select'),
+        lowerVolume: document.getElementById('lower-volume'),
+        minRecordingMs: document.getElementById('min-recording-ms'),
+        prepromptDefault: document.getElementById('preprompt-default'),
+        preprompt1: document.getElementById('preprompt-1'),
+        preprompt2: document.getElementById('preprompt-2'),
+        preprompt3: document.getElementById('preprompt-3'),
         saveSettingsBtn: document.getElementById('save-settings'),
         // Permissions modal
         permissionsModal: document.getElementById('permissions-modal'),
@@ -205,6 +219,22 @@ function setupEventListeners() {
 
     elements.soundEnabled.addEventListener('change', (e) => {
         config.sound_enabled = e.target.checked;
+    });
+
+    elements.audioDeviceSelect.addEventListener('change', (e) => {
+        config.audio_device = e.target.value;
+    });
+
+    elements.lowerVolume.addEventListener('change', (e) => {
+        config.lower_volume_on_record = e.target.checked;
+    });
+
+    elements.minRecordingMs.addEventListener('change', (e) => {
+        let val = parseInt(e.target.value, 10);
+        if (isNaN(val) || val < 100) val = 100;
+        if (val > 5000) val = 5000;
+        e.target.value = val;
+        config.min_recording_ms = val;
     });
 }
 
@@ -361,6 +391,13 @@ async function loadConfig() {
     elements.openaiUrlInput.value = config.openai_api_url || '';
     updateApiKeyHint();
     elements.soundEnabled.checked = config.sound_enabled !== false;
+    await loadAudioDevices();
+    elements.lowerVolume.checked = config.lower_volume_on_record !== false;
+    elements.minRecordingMs.value = config.min_recording_ms || 1000;
+    elements.prepromptDefault.value = config.preprompt_default || '';
+    elements.preprompt1.value = config.preprompt_1 || '';
+    elements.preprompt2.value = config.preprompt_2 || '';
+    elements.preprompt3.value = config.preprompt_3 || '';
     updateHotkeyHint();
     updateTestMode();
 
@@ -538,6 +575,23 @@ async function deleteModel(modelId) {
     }
 }
 
+async function loadAudioDevices() {
+    try {
+        const devices = await invoke('get_audio_devices');
+        const select = elements.audioDeviceSelect;
+        select.textContent = '';
+        for (const d of devices) {
+            const opt = document.createElement('option');
+            opt.value = d.id;
+            opt.textContent = d.name;
+            if (config.audio_device === d.id) opt.selected = true;
+            select.appendChild(opt);
+        }
+    } catch (e) {
+        console.error('Failed to load audio devices:', e);
+    }
+}
+
 function renderLanguages() {
     elements.languageSelect.innerHTML = LANGUAGES.map(lang =>
         `<option value="${lang.code}" ${config.language === lang.code ? 'selected' : ''}>${lang.name}</option>`
@@ -553,6 +607,16 @@ async function saveSettings() {
         config.openai_api_key = elements.openaiKeyInput.value.trim();
         config.openai_api_url = elements.openaiUrlInput.value.trim();
         config.sound_enabled = elements.soundEnabled.checked;
+        config.audio_device = elements.audioDeviceSelect.value;
+        config.lower_volume_on_record = elements.lowerVolume.checked;
+        let minRec = parseInt(elements.minRecordingMs.value, 10);
+        if (isNaN(minRec) || minRec < 100) minRec = 100;
+        if (minRec > 5000) minRec = 5000;
+        config.min_recording_ms = minRec;
+        config.preprompt_default = elements.prepromptDefault.value;
+        config.preprompt_1 = elements.preprompt1.value;
+        config.preprompt_2 = elements.preprompt2.value;
+        config.preprompt_3 = elements.preprompt3.value;
         await invoke('save_config', { config });
         elements.saveSettingsBtn.textContent = 'Saved!';
         setTimeout(() => {
@@ -592,6 +656,11 @@ function updateStatus(status, text) {
             state.classList.add('processing');
             icon.textContent = '⏳';
             label.innerHTML = 'Transcribing...';
+            break;
+        case 'improving':
+            state.classList.add('processing');
+            icon.textContent = '✨';
+            label.innerHTML = 'Improving...';
             break;
         case 'typing':
             state.classList.add('processing');
@@ -639,6 +708,7 @@ function updateConnectionBadge(status) {
         case 'recording':
         case 'sending':
         case 'processing':
+        case 'improving':
         case 'typing':
             el.className = 'info-value connected';
             el.textContent = 'Connected';

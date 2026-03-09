@@ -150,7 +150,7 @@ Write-Step 5 6 "Building (this may take several minutes)..."
 
 Push-Location $InstallDir
 try {
-    cargo build --release --features whisper
+    cargo build --release --features "whisper,opus"
     Write-Success "Build complete"
 } catch {
     Write-Error "Build failed: $_"
