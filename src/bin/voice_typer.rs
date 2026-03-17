@@ -917,6 +917,13 @@ fn save_audio_segment(samples: &[f32], sample_rate: u32) -> Option<String> {
 // OpenAI Transcription API Support
 // ============================================================================
 
+/// Cloud transcription backend kind
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BackendKind {
+    OpenAI,
+    OpenRouter,
+}
+
 /// OpenAI API configuration loaded from .env file
 #[derive(Clone)]
 struct OpenAIConfig {
@@ -1077,10 +1084,13 @@ impl OpenRouterConfig {
             })
             .unwrap_or_else(|| "google/gemini-2.5-flash".to_string());
 
-        if !OPENROUTER_SUPPORTED_MODELS.contains(&model.as_str()) {
+        // Strip routing suffix (e.g. `:nitro`, `:free`, `:extended`) before validation.
+        // OpenRouter uses these as routing hints; the base model name is what matters.
+        let model_base = model.split(':').next().unwrap_or(&model);
+        if !OPENROUTER_SUPPORTED_MODELS.contains(&model_base) {
             eprintln!("[ERROR] Unsupported OpenRouter model: {}", model);
             eprintln!(
-                "        Supported models: {}",
+                "        Supported models: {} (suffixes like :nitro, :free, :extended are allowed)",
                 OPENROUTER_SUPPORTED_MODELS.join(", ")
             );
             return None;
@@ -1170,7 +1180,12 @@ fn transcribe_openrouter_single_attempt(
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("No content in OpenRouter response: {}", response_text))?;
 
-    Ok(content.trim().to_string())
+    let trimmed = content.trim();
+    if trimmed.is_empty() || trimmed == "-" {
+        return Err(format!("Empty transcription from OpenRouter (raw content: {:?})", content));
+    }
+
+    Ok(trimmed.to_string())
 }
 
 /// Retry wrapper for OpenRouter transcription
@@ -1229,6 +1244,93 @@ fn transcribe_openrouter_internal(
         "OpenRouter failed after {} retries: {}",
         API_MAX_RETRIES, last_error
     ))
+}
+
+/// Transcription backend configuration for fallback logic
+#[derive(Clone)]
+enum BackendConfig {
+    OpenAI(OpenAIConfig),
+    OpenRouter(OpenRouterConfig),
+}
+
+/// Transcribe with primary backend, falling back to secondary on failure.
+/// Returns Ok(text) on success, or Err with CONNECTION_LOST prefix if both fail with network errors.
+fn transcribe_with_fallback(
+    primary: &BackendConfig,
+    fallback: Option<&BackendConfig>,
+    ogg_bytes: &[u8],
+    samples: &[f32],
+    prompt: Option<&str>,
+    use_ogg: bool,
+) -> Result<String, String> {
+    // Try primary backend
+    let primary_result = match primary {
+        BackendConfig::OpenRouter(config) => {
+            transcribe_openrouter_internal(config, ogg_bytes)
+        }
+        BackendConfig::OpenAI(config) => {
+            transcribe_openai_internal(config, samples, WHISPER_SAMPLE_RATE, prompt, use_ogg)
+                .map(|(text, _raw)| text)
+        }
+    };
+
+    match primary_result {
+        Ok(text) => return Ok(text),
+        Err(e) => {
+            let primary_name = match primary {
+                BackendConfig::OpenRouter(_) => "OpenRouter",
+                BackendConfig::OpenAI(_) => "OpenAI",
+            };
+            eprintln!("[{}] {} failed: {}", timestamp(), primary_name, e);
+
+            // If no fallback configured, propagate the error
+            let fallback = match fallback {
+                Some(fb) => fb,
+                None => return Err(e),
+            };
+
+            let fallback_name = match fallback {
+                BackendConfig::OpenRouter(_) => "OpenRouter",
+                BackendConfig::OpenAI(_) => "OpenAI",
+            };
+
+            // Sleep before trying fallback
+            println!(
+                "[{}] Trying fallback: {}...",
+                timestamp(),
+                fallback_name
+            );
+            std::thread::sleep(Duration::from_secs(1));
+
+            // Try fallback backend
+            let fallback_result = match fallback {
+                BackendConfig::OpenRouter(config) => {
+                    transcribe_openrouter_internal(config, ogg_bytes)
+                }
+                BackendConfig::OpenAI(config) => {
+                    transcribe_openai_internal(config, samples, WHISPER_SAMPLE_RATE, prompt, use_ogg)
+                        .map(|(text, _raw)| text)
+                }
+            };
+
+            match fallback_result {
+                Ok(text) => {
+                    println!("[{}] Fallback {} succeeded", timestamp(), fallback_name);
+                    Ok(text)
+                }
+                Err(fallback_err) => {
+                    eprintln!("[{}] Fallback {} also failed: {}", timestamp(), fallback_name, fallback_err);
+                    // If either error is a network error, mark as CONNECTION_LOST for pending retry
+                    if e.starts_with(CONNECTION_LOST_PREFIX) || fallback_err.starts_with(CONNECTION_LOST_PREFIX) {
+                        print_connection_lost();
+                        Err(format!("{}Both backends failed: primary={}, fallback={}", CONNECTION_LOST_PREFIX, e, fallback_err))
+                    } else {
+                        Err(format!("Both backends failed: primary={}, fallback={}", e, fallback_err))
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Maximum number of retries for API errors (non-network)
@@ -1813,6 +1915,9 @@ fn print_usage() {
     println!("                     Supported models: google/gemini-2.5-flash (default),");
     println!("                                       google/gemini-2.5-flash-lite");
     println!("                     Set model via OPENROUTER_MODEL env var");
+    println!("                     Combine both flags for fallback (first flag = primary):");
+    println!("                       --openrouter --openai  → OR primary, OAI fallback");
+    println!("                       --openai --openrouter  → OAI primary, OR fallback");
     println!("  --list-models      List available model presets");
     println!("  --list-keys        List available hotkey options");
     println!("  --version, -V      Show version information");
@@ -1824,6 +1929,7 @@ fn print_usage() {
     println!("  voice-typer --model turbo --volume 0.5  # Louder beeps for demos");
     println!("  voice-typer --model tiny --silent    # No beep sounds");
     println!("  voice-typer --key ctrlright --clipboard");
+    println!("  voice-typer --cli --openrouter --openai  # OpenRouter with OpenAI fallback");
     println!();
     println!(
         "Config file: {}",
@@ -2204,6 +2310,7 @@ fn main() {
     let mut model_arg: Option<String> = config.model.clone();
     let mut use_openai = false;
     let mut use_openrouter = false;
+    let mut backend_order: Vec<BackendKind> = Vec::new();
     let mut cli_mode = false; // CLI mode (advanced, requires --cli flag)
 
     let mut input_method = match config.input_method.as_deref() {
@@ -2300,9 +2407,15 @@ fn main() {
             }
             "--openai" => {
                 use_openai = true;
+                if !backend_order.contains(&BackendKind::OpenAI) {
+                    backend_order.push(BackendKind::OpenAI);
+                }
             }
             "--openrouter" => {
                 use_openrouter = true;
+                if !backend_order.contains(&BackendKind::OpenRouter) {
+                    backend_order.push(BackendKind::OpenRouter);
+                }
             }
             "--model" => {
                 if i + 1 < args.len() {
@@ -2536,80 +2649,146 @@ fn main() {
     // Microphone permission is checked by the Tauri app via AVCaptureDevice API.
     // No dummy stream needed here — first real recording will trigger the dialog if needed.
 
-    // Mutual exclusion check
-    if use_openai && use_openrouter {
-        eprintln!("Error: --openai and --openrouter cannot be used together");
-        std::process::exit(1);
-    }
+    // Cloud transcription dispatch
+    match backend_order.len() {
+        2 => {
+            // Two backends: primary + fallback
+            let openai_config = if backend_order.contains(&BackendKind::OpenAI) {
+                match OpenAIConfig::load() {
+                    Some(c) => {
+                        println!("OpenAI: {} ({})", c.model, mask_api_key(&c.api_key));
+                        print!("Testing OpenAI connection... ");
+                        std::io::stdout().flush().ok();
+                        if c.test_connection() {
+                            println!("OK");
+                            Some(c)
+                        } else {
+                            println!("FAILED (will skip as fallback if needed)");
+                            None
+                        }
+                    }
+                    None => {
+                        eprintln!("OpenAI configured but OPENAI_API_KEY not found.");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                None
+            };
 
-    // OpenAI mode: use gpt-4o-transcribe API
-    if use_openai {
-        match OpenAIConfig::load() {
-            Some(openai_config) => {
-                println!("Transcription: OpenAI API ({})", openai_config.model);
-                println!("API URL: {}", openai_config.api_url);
-                println!("API Key: {}", mask_api_key(&openai_config.api_key));
+            let openrouter_config = if backend_order.contains(&BackendKind::OpenRouter) {
+                match OpenRouterConfig::load() {
+                    Some(c) => {
+                        println!("OpenRouter: {} ({})", c.model, mask_api_key(&c.api_key));
+                        Some(c)
+                    }
+                    None => {
+                        eprintln!("OpenRouter configured but OPENROUTER_API_KEY not found.");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                None
+            };
 
-                print!("Testing connection... ");
-                std::io::stdout().flush().ok();
+            let (primary, fallback) = match (backend_order[0], backend_order[1]) {
+                (BackendKind::OpenAI, BackendKind::OpenRouter) => {
+                    let p = BackendConfig::OpenAI(openai_config.expect("OpenAI config required"));
+                    let f = BackendConfig::OpenRouter(openrouter_config.expect("OpenRouter config required"));
+                    (p, f)
+                }
+                (BackendKind::OpenRouter, BackendKind::OpenAI) => {
+                    let p = BackendConfig::OpenRouter(openrouter_config.expect("OpenRouter config required"));
+                    let f = BackendConfig::OpenAI(openai_config.expect("OpenAI config required"));
+                    (p, f)
+                }
+                _ => unreachable!(),
+            };
 
-                if openai_config.test_connection() {
-                    println!("OK\n");
+            println!();
+            run_cloud(
+                primary,
+                fallback,
+                input_method,
+                hotkey,
+                audio_device_name.clone(),
+                lower_volume,
+                min_recording_ms,
+                use_ogg,
+            );
+            return;
+        }
+        1 if backend_order[0] == BackendKind::OpenAI => {
+            // OpenAI only (unchanged behavior)
+            match OpenAIConfig::load() {
+                Some(openai_config) => {
+                    println!("Transcription: OpenAI API ({})", openai_config.model);
+                    println!("API URL: {}", openai_config.api_url);
+                    println!("API Key: {}", mask_api_key(&openai_config.api_key));
+
+                    print!("Testing connection... ");
                     std::io::stdout().flush().ok();
-                    run_openai(
-                        openai_config,
-                        input_method,
-                        hotkey,
-                        hotkey2,
-                        config.streaming,
-                        extra_keys,
-                        audio_device_name.clone(),
-                        lower_volume,
-                        use_ogg,
-                        min_recording_ms,
-                    );
-                } else {
-                    println!("FAILED");
-                    std::io::stdout().flush().ok();
-                    eprintln!("\nCannot connect to OpenAI API.");
-                    eprintln!("Check your OPENAI_API_KEY and OPENAI_API_URL.");
+
+                    if openai_config.test_connection() {
+                        println!("OK\n");
+                        std::io::stdout().flush().ok();
+                        run_openai(
+                            openai_config,
+                            input_method,
+                            hotkey,
+                            hotkey2,
+                            config.streaming,
+                            extra_keys,
+                            audio_device_name.clone(),
+                            lower_volume,
+                            use_ogg,
+                            min_recording_ms,
+                        );
+                    } else {
+                        println!("FAILED");
+                        std::io::stdout().flush().ok();
+                        eprintln!("\nCannot connect to OpenAI API.");
+                        eprintln!("Check your OPENAI_API_KEY and OPENAI_API_URL.");
+                        std::process::exit(1);
+                    }
+                }
+                None => {
+                    eprintln!("OpenAI mode requires OPENAI_API_KEY.");
+                    eprintln!("\nCreate a .env file with:");
+                    eprintln!("  OPENAI_API_KEY=sk-...");
+                    eprintln!("  OPENAI_API_URL=https://api.openai.com/v1  # or your proxy");
                     std::process::exit(1);
                 }
             }
-            None => {
-                eprintln!("OpenAI mode requires OPENAI_API_KEY.");
-                eprintln!("\nCreate a .env file with:");
-                eprintln!("  OPENAI_API_KEY=sk-...");
-                eprintln!("  OPENAI_API_URL=https://api.openai.com/v1  # or your proxy");
-                std::process::exit(1);
-            }
+            return;
         }
-        return;
-    }
-
-    // OpenRouter mode: use Chat Completions API with audio
-    if use_openrouter {
-        match OpenRouterConfig::load() {
-            Some(openrouter_config) => {
-                println!("Transcription: OpenRouter API ({})", openrouter_config.model);
-                println!("API Key: {}", mask_api_key(&openrouter_config.api_key));
-                run_openrouter(
-                    openrouter_config,
-                    input_method,
-                    hotkey,
-                    audio_device_name.clone(),
-                    lower_volume,
-                    min_recording_ms,
-                );
+        1 if backend_order[0] == BackendKind::OpenRouter => {
+            // OpenRouter only
+            match OpenRouterConfig::load() {
+                Some(openrouter_config) => {
+                    println!("Transcription: OpenRouter API ({})", openrouter_config.model);
+                    println!("API Key: {}", mask_api_key(&openrouter_config.api_key));
+                    run_openrouter(
+                        openrouter_config,
+                        input_method,
+                        hotkey,
+                        audio_device_name.clone(),
+                        lower_volume,
+                        min_recording_ms,
+                    );
+                }
+                None => {
+                    eprintln!("OpenRouter mode requires OPENROUTER_API_KEY.");
+                    eprintln!("\nSet environment variable:");
+                    eprintln!("  OPENROUTER_API_KEY=sk-or-...");
+                    std::process::exit(1);
+                }
             }
-            None => {
-                eprintln!("OpenRouter mode requires OPENROUTER_API_KEY.");
-                eprintln!("\nSet environment variable:");
-                eprintln!("  OPENROUTER_API_KEY=sk-or-...");
-                std::process::exit(1);
-            }
+            return;
         }
-        return;
+        _ => {
+            // No cloud backend selected — continue to local Whisper below
+        }
     }
 
     // Local Whisper mode
@@ -3709,6 +3888,12 @@ struct TranscriptionJob {
     /// PID of frontmost app at hotkey press time (for targeted key delivery)
     #[cfg(target_os = "macos")]
     target_pid: Option<i32>,
+}
+
+/// Job for OpenRouter-only worker thread
+struct OpenRouterJob {
+    ogg_bytes: Vec<u8>,
+    duration_secs: f32,
 }
 
 /// Completed transcription result
@@ -6440,7 +6625,8 @@ fn run_openrouter(
     lower_volume: bool,
     min_recording_ms: u64,
 ) {
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
 
     let config = Arc::new(openrouter_config);
     let target_key = hotkey.to_rdev_key();
@@ -6450,12 +6636,10 @@ fn run_openrouter(
     let recording_start: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
     let is_recording = Arc::new(AtomicBool::new(false));
-
     let vad: Arc<Mutex<VadPhraseDetector>> = Arc::new(Mutex::new(VadPhraseDetector::new()));
-
     let volume_controller = Arc::new(voice_keyboard::volume::VolumeController::new(lower_volume));
 
-    // Resolve audio device name at startup
+    // Resolve audio device
     let preferred_device_name: Option<String> = if audio_device_name == "__builtin__" {
         select_builtin_device_name()
     } else if audio_device_name.is_empty() {
@@ -6465,7 +6649,7 @@ fn run_openrouter(
         Some(audio_device_name)
     };
 
-    // Create persistent audio stream ONCE at startup (in paused state)
+    // Create persistent audio stream
     let persistent_stream: Arc<Mutex<Option<cpal::Stream>>> = Arc::new(Mutex::new(None));
     match start_recording_persistent(
         Arc::clone(&samples),
@@ -6483,6 +6667,66 @@ fn run_openrouter(
         }
     }
 
+    // Worker channel
+    let (job_tx, job_rx) = mpsc::channel::<OpenRouterJob>();
+
+    // Pending retry job
+    let pending_retry_job: Arc<Mutex<Option<OpenRouterJob>>> = Arc::new(Mutex::new(None));
+    let pending_retry_for_worker = Arc::clone(&pending_retry_job);
+
+    // Worker thread
+    let config_for_worker = Arc::clone(&config);
+    thread::spawn(move || {
+        for job in job_rx {
+            println!(
+                "[{}] [WORKER] Processing {:.1}s audio with OpenRouter...",
+                timestamp(),
+                job.duration_secs
+            );
+
+            match transcribe_openrouter_internal(&config_for_worker, &job.ogg_bytes) {
+                Ok(text) => {
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() || trimmed == "-" {
+                        println!("[{}] Empty transcription, skipping", timestamp());
+                    } else {
+                        println!(
+                            "\n[{}] ═══════════════════════════════════════════════════════════",
+                            timestamp()
+                        );
+                        println!("[TRANSCRIPTION]");
+                        println!("{}", trimmed);
+                        println!(
+                            "═══════════════════════════════════════════════════════════\n"
+                        );
+
+                        if let Err(e) = insert_text(trimmed, input_method) {
+                            eprintln!("[{}] Failed to insert text: {}", timestamp(), e);
+                        } else {
+                            println!("[{}] +\"{}\"", timestamp(), trimmed);
+                        }
+                    }
+                }
+                Err(e) => {
+                    if e.starts_with(CONNECTION_LOST_PREFIX) {
+                        let mut pending = pending_retry_for_worker.lock().unwrap();
+                        *pending = Some(OpenRouterJob {
+                            ogg_bytes: job.ogg_bytes.clone(),
+                            duration_secs: job.duration_secs,
+                        });
+                        println!(
+                            "[{}] [WORKER] Job saved for retry (press hotkey to retry)",
+                            timestamp()
+                        );
+                    }
+                    eprintln!("[{}] OpenRouter transcription error: {}", timestamp(), e);
+                    play_error_beep();
+                }
+            }
+        }
+    });
+
+    // Clones for callback
     let state_clone = Arc::clone(&state);
     let samples_clone = Arc::clone(&samples);
     let recording_start_clone = Arc::clone(&recording_start);
@@ -6491,13 +6735,25 @@ fn run_openrouter(
     let persistent_stream_clone = Arc::clone(&persistent_stream);
     let persistent_stream_release = Arc::clone(&persistent_stream);
     let volume_controller_clone = Arc::clone(&volume_controller);
-    let config_clone = Arc::clone(&config);
+    let pending_retry_callback = Arc::clone(&pending_retry_job);
+    let job_tx_callback = job_tx;
 
     let callback = move |event: Event| {
-        use std::sync::atomic::Ordering;
-
         match event.event_type {
             EventType::KeyPress(key) if key == target_key => {
+                // Check for pending retry job
+                {
+                    let mut pending = pending_retry_callback.lock().unwrap();
+                    if let Some(job) = pending.take() {
+                        play_retry_beep();
+                        println!(
+                            "[{}] [RETRY] Retrying previous failed job...",
+                            timestamp()
+                        );
+                        let _ = job_tx_callback.send(job);
+                    }
+                }
+
                 let mut rec_state = state_clone.lock().unwrap();
                 if *rec_state == RecordingState::Idle {
                     samples_clone.lock().unwrap().clear();
@@ -6506,7 +6762,6 @@ fn run_openrouter(
                     is_recording_clone.store(true, Ordering::SeqCst);
                     *rec_state = RecordingState::Recording;
 
-                    // Resume persistent audio stream
                     {
                         let stream_guard = persistent_stream_clone.lock().unwrap();
                         if let Some(ref stream) = *stream_guard {
@@ -6525,7 +6780,6 @@ fn run_openrouter(
                     }
 
                     volume_controller_clone.lower();
-
                     println!("[{}] Recording...", timestamp());
                     std::io::stdout().flush().ok();
                 }
@@ -6537,7 +6791,6 @@ fn run_openrouter(
                 if *rec_state == RecordingState::Recording {
                     is_recording_clone.store(false, Ordering::SeqCst);
 
-                    // Pause persistent stream
                     {
                         let stream_guard = persistent_stream_release.lock().unwrap();
                         if let Some(ref stream) = *stream_guard {
@@ -6580,13 +6833,13 @@ fn run_openrouter(
 
                     let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
                     println!(
-                        "[{}] Transcribing {:.1}s audio with OpenRouter...",
+                        "[{}] Encoding {:.1}s audio...",
                         timestamp(),
                         duration_secs
                     );
                     std::io::stdout().flush().ok();
 
-                    // Encode as OGG/Opus (requires opus feature)
+                    // Encode as OGG/Opus
                     #[cfg(feature = "opus")]
                     let ogg_result = {
                         let resampled = resample_48k_to_16k(&phrase_samples);
@@ -6613,35 +6866,11 @@ fn run_openrouter(
                         }
                     };
 
-                    let config_ref = Arc::clone(&config_clone);
-                    match transcribe_openrouter_internal(&config_ref, &ogg_bytes) {
-                        Ok(text) => {
-                            let trimmed = text.trim();
-                            if trimmed.is_empty() || trimmed == "-" {
-                                println!("[{}] Empty transcription, skipping", timestamp());
-                            } else {
-                                println!(
-                                    "\n[{}] ═══════════════════════════════════════════════════════════",
-                                    timestamp()
-                                );
-                                println!("[TRANSCRIPTION]");
-                                println!("{}", trimmed);
-                                println!(
-                                    "═══════════════════════════════════════════════════════════\n"
-                                );
-
-                                if let Err(e) = insert_text(trimmed, input_method) {
-                                    eprintln!("[{}] Failed to insert text: {}", timestamp(), e);
-                                } else {
-                                    println!("[{}] +\"{}\"", timestamp(), trimmed);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[{}] OpenRouter transcription error: {}", timestamp(), e);
-                            play_error_beep();
-                        }
-                    }
+                    // Send to worker thread
+                    let _ = job_tx_callback.send(OpenRouterJob {
+                        ogg_bytes,
+                        duration_secs,
+                    });
 
                     std::io::stdout().flush().ok();
                     samples_clone.lock().unwrap().clear();
@@ -6665,24 +6894,341 @@ fn run_openrouter(
 
     if let Err(e) = listen(callback) {
         eprintln!("Error: {:?}", e);
-
-        #[cfg(target_os = "macos")]
-        {
-            eprintln!("\nGrant Input Monitoring permission:");
-            eprintln!("System Settings → Privacy & Security → Input Monitoring");
-        }
-
         #[cfg(target_os = "linux")]
         {
-            eprintln!("\nOn Linux, you may need to:");
-            eprintln!("1. Run with sudo, OR");
-            eprintln!("2. Add yourself to the 'input' group:");
-            eprintln!("   sudo usermod -aG input $USER && newgrp input");
+            eprintln!();
+            eprintln!("On Linux, make sure you have the necessary permissions.");
+            eprintln!("Try running with sudo or adding your user to the 'input' group:");
+            eprintln!("  sudo usermod -aG input $USER");
+            eprintln!("Then log out and back in.");
         }
+    }
+}
 
-        #[cfg(target_os = "windows")]
+/// Cloud transcription with primary + fallback backends.
+/// Worker thread tries primary backend first, then fallback, with pending retry on total failure.
+fn run_cloud(
+    primary: BackendConfig,
+    fallback: BackendConfig,
+    input_method: InputMethod,
+    hotkey: HotkeyType,
+    audio_device_name: String,
+    lower_volume: bool,
+    min_recording_ms: u64,
+    use_ogg: bool,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+
+    let primary_name = match &primary {
+        BackendConfig::OpenRouter(_) => "OpenRouter",
+        BackendConfig::OpenAI(_) => "OpenAI",
+    };
+    let fallback_name = match &fallback {
+        BackendConfig::OpenRouter(_) => "OpenRouter",
+        BackendConfig::OpenAI(_) => "OpenAI",
+    };
+    println!(
+        "[{}] Cloud mode: primary={}, fallback={}",
+        timestamp(),
+        primary_name,
+        fallback_name
+    );
+
+    let primary = Arc::new(primary);
+    let fallback = Arc::new(fallback);
+    let target_key = hotkey.to_rdev_key();
+
+    let state: Arc<Mutex<RecordingState>> = Arc::new(Mutex::new(RecordingState::Idle));
+    let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+    let recording_start: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+
+    let is_recording = Arc::new(AtomicBool::new(false));
+    let vad: Arc<Mutex<VadPhraseDetector>> = Arc::new(Mutex::new(VadPhraseDetector::new()));
+    let volume_controller = Arc::new(voice_keyboard::volume::VolumeController::new(lower_volume));
+
+    // Resolve audio device
+    let preferred_device_name: Option<String> = if audio_device_name == "__builtin__" {
+        select_builtin_device_name()
+    } else if audio_device_name.is_empty() {
+        None
+    } else {
+        println!("[{}] Using audio device: \"{}\"", timestamp(), audio_device_name);
+        Some(audio_device_name)
+    };
+
+    // Create persistent audio stream
+    let persistent_stream: Arc<Mutex<Option<cpal::Stream>>> = Arc::new(Mutex::new(None));
+    match start_recording_persistent(
+        Arc::clone(&samples),
+        Arc::clone(&is_recording),
+        preferred_device_name.as_deref(),
+    ) {
+        Ok(stream) => {
+            println!("[{}] Audio stream ready (paused)", timestamp());
+            *persistent_stream.lock().unwrap() = Some(stream);
+        }
+        Err(e) => {
+            eprintln!("[{}] Failed to create audio stream: {}", timestamp(), e);
+            eprintln!("[{}] Recording will not work. Check microphone permissions.", timestamp());
+            std::process::exit(1);
+        }
+    }
+
+    // Job struct for cloud mode — holds both OGG bytes and raw samples for either backend
+    struct CloudJob {
+        ogg_bytes: Vec<u8>,
+        samples_16k: Vec<f32>,
+        duration_secs: f32,
+    }
+
+    // Worker channel
+    let (job_tx, job_rx) = mpsc::channel::<CloudJob>();
+
+    // Pending retry job
+    let pending_retry_job: Arc<Mutex<Option<CloudJob>>> = Arc::new(Mutex::new(None));
+    let pending_retry_for_worker = Arc::clone(&pending_retry_job);
+
+    // Worker thread
+    let primary_for_worker = Arc::clone(&primary);
+    let fallback_for_worker = Arc::clone(&fallback);
+    thread::spawn(move || {
+        for job in job_rx {
+            println!(
+                "[{}] [WORKER] Processing {:.1}s audio (cloud mode)...",
+                timestamp(),
+                job.duration_secs
+            );
+
+            match transcribe_with_fallback(
+                &primary_for_worker,
+                Some(&fallback_for_worker),
+                &job.ogg_bytes,
+                &job.samples_16k,
+                None,
+                use_ogg,
+            ) {
+                Ok(text) => {
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() || trimmed == "-" {
+                        println!("[{}] Empty transcription, skipping", timestamp());
+                    } else {
+                        println!(
+                            "\n[{}] ═══════════════════════════════════════════════════════════",
+                            timestamp()
+                        );
+                        println!("[TRANSCRIPTION]");
+                        println!("{}", trimmed);
+                        println!(
+                            "═══════════════════════════════════════════════════════════\n"
+                        );
+
+                        if let Err(e) = insert_text(trimmed, input_method) {
+                            eprintln!("[{}] Failed to insert text: {}", timestamp(), e);
+                        } else {
+                            println!("[{}] +\"{}\"", timestamp(), trimmed);
+                        }
+                    }
+                }
+                Err(e) => {
+                    if e.starts_with(CONNECTION_LOST_PREFIX) {
+                        let mut pending = pending_retry_for_worker.lock().unwrap();
+                        *pending = Some(CloudJob {
+                            ogg_bytes: job.ogg_bytes.clone(),
+                            samples_16k: job.samples_16k.clone(),
+                            duration_secs: job.duration_secs,
+                        });
+                        println!(
+                            "[{}] [WORKER] Job saved for retry (press hotkey to retry)",
+                            timestamp()
+                        );
+                    }
+                    eprintln!("[{}] Cloud transcription error: {}", timestamp(), e);
+                    play_error_beep();
+                }
+            }
+        }
+    });
+
+    // Clones for callback
+    let state_clone = Arc::clone(&state);
+    let samples_clone = Arc::clone(&samples);
+    let recording_start_clone = Arc::clone(&recording_start);
+    let vad_clone = Arc::clone(&vad);
+    let is_recording_clone = Arc::clone(&is_recording);
+    let persistent_stream_clone = Arc::clone(&persistent_stream);
+    let persistent_stream_release = Arc::clone(&persistent_stream);
+    let volume_controller_clone = Arc::clone(&volume_controller);
+    let pending_retry_callback = Arc::clone(&pending_retry_job);
+    let job_tx_callback = job_tx;
+
+    let callback = move |event: Event| {
+        match event.event_type {
+            EventType::KeyPress(key) if key == target_key => {
+                // Check for pending retry job
+                {
+                    let mut pending = pending_retry_callback.lock().unwrap();
+                    if let Some(job) = pending.take() {
+                        play_retry_beep();
+                        println!(
+                            "[{}] [RETRY] Retrying previous failed job...",
+                            timestamp()
+                        );
+                        let _ = job_tx_callback.send(job);
+                    }
+                }
+
+                let mut rec_state = state_clone.lock().unwrap();
+                if *rec_state == RecordingState::Idle {
+                    samples_clone.lock().unwrap().clear();
+                    vad_clone.lock().unwrap().reset();
+                    *recording_start_clone.lock().unwrap() = Some(Instant::now());
+                    is_recording_clone.store(true, Ordering::SeqCst);
+                    *rec_state = RecordingState::Recording;
+
+                    {
+                        let stream_guard = persistent_stream_clone.lock().unwrap();
+                        if let Some(ref stream) = *stream_guard {
+                            if let Err(e) = stream.play() {
+                                eprintln!("[{}] Failed to play audio stream: {}", timestamp(), e);
+                                is_recording_clone.store(false, Ordering::SeqCst);
+                                *rec_state = RecordingState::Idle;
+                                return;
+                            }
+                        } else {
+                            eprintln!("[{}] No audio stream available", timestamp());
+                            is_recording_clone.store(false, Ordering::SeqCst);
+                            *rec_state = RecordingState::Idle;
+                            return;
+                        }
+                    }
+
+                    volume_controller_clone.lower();
+                    println!("[{}] Recording...", timestamp());
+                    std::io::stdout().flush().ok();
+                }
+            }
+
+            EventType::KeyRelease(key) if key == target_key => {
+                let mut rec_state = state_clone.lock().unwrap();
+
+                if *rec_state == RecordingState::Recording {
+                    is_recording_clone.store(false, Ordering::SeqCst);
+
+                    {
+                        let stream_guard = persistent_stream_release.lock().unwrap();
+                        if let Some(ref stream) = *stream_guard {
+                            let _ = stream.pause();
+                        }
+                    }
+
+                    volume_controller_clone.restore();
+
+                    let recording_duration = recording_start_clone
+                        .lock()
+                        .unwrap()
+                        .map(|start| start.elapsed())
+                        .unwrap_or(Duration::ZERO);
+
+                    *rec_state = RecordingState::Idle;
+                    *recording_start_clone.lock().unwrap() = None;
+
+                    if recording_duration < Duration::from_millis(min_recording_ms) {
+                        println!("[{}] Recording too short, ignoring", timestamp());
+                        std::io::stdout().flush().ok();
+                        samples_clone.lock().unwrap().clear();
+                        return;
+                    }
+
+                    play_stop_beep();
+
+                    let phrase_samples = {
+                        let samples = samples_clone.lock().unwrap();
+                        let vad = vad_clone.lock().unwrap();
+                        vad.get_remaining(&samples)
+                            .map(|(s, _, _)| s)
+                            .unwrap_or_else(|| samples.clone())
+                    };
+
+                    if phrase_samples.is_empty() {
+                        println!("[{}] No audio captured", timestamp());
+                        return;
+                    }
+
+                    let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
+                    println!(
+                        "[{}] Encoding {:.1}s audio...",
+                        timestamp(),
+                        duration_secs
+                    );
+                    std::io::stdout().flush().ok();
+
+                    // Resample to 16kHz (needed for both backends)
+                    let resampled = resample_48k_to_16k(&phrase_samples);
+
+                    // Encode as OGG/Opus (needed for OpenRouter, optional for OpenAI)
+                    #[cfg(feature = "opus")]
+                    let ogg_result = {
+                        let samples_i16: Vec<i16> = resampled
+                            .iter()
+                            .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                            .collect();
+                        ogg_opus::encode::<16000, 1>(&samples_i16)
+                            .map_err(|e| format!("OGG encoding failed: {:?}", e))
+                    };
+
+                    #[cfg(not(feature = "opus"))]
+                    let ogg_result: Result<Vec<u8>, String> = Err(
+                        "Cloud mode requires OGG/Opus encoding. Build with --features opus".to_string()
+                    );
+
+                    let ogg_bytes = match ogg_result {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            eprintln!("[{}] Audio encoding error: {}", timestamp(), e);
+                            play_error_beep();
+                            samples_clone.lock().unwrap().clear();
+                            return;
+                        }
+                    };
+
+                    // Send to worker thread with both formats
+                    let _ = job_tx_callback.send(CloudJob {
+                        ogg_bytes,
+                        samples_16k: resampled,
+                        duration_secs,
+                    });
+
+                    std::io::stdout().flush().ok();
+                    samples_clone.lock().unwrap().clear();
+                    vad_clone.lock().unwrap().reset();
+                }
+            }
+
+            _ => {}
+        }
+    };
+
+    println!(
+        "[{}] Ready! Hold {} to record, release to transcribe.",
+        timestamp(),
+        hotkey.name()
+    );
+    println!(
+        "Cloud mode: primary={}, fallback={}",
+        primary_name,
+        fallback_name
+    );
+
+    if let Err(e) = listen(callback) {
+        eprintln!("Error: {:?}", e);
+        #[cfg(target_os = "linux")]
         {
-            eprintln!("\nOn Windows, try running as Administrator.");
+            eprintln!();
+            eprintln!("On Linux, make sure you have the necessary permissions.");
+            eprintln!("Try running with sudo or adding your user to the 'input' group:");
+            eprintln!("  sudo usermod -aG input $USER");
+            eprintln!("Then log out and back in.");
         }
     }
 }
