@@ -59,6 +59,14 @@ pub struct Config {
     /// Enable extra hotkeys (Right Cmd = structured, Right Option = translate)
     #[serde(default)]
     pub extra_keys_enabled: bool,
+
+    /// OpenRouter API key (optional, can also use OPENROUTER_API_KEY env var)
+    #[serde(default)]
+    pub openrouter_api_key: String,
+
+    /// OpenRouter model (default: google/gemini-2.5-flash)
+    #[serde(default = "default_openrouter_model")]
+    pub openrouter_model: String,
 }
 
 fn default_language() -> String {
@@ -67,6 +75,10 @@ fn default_language() -> String {
 
 fn default_openai_api_url() -> String {
     "https://api.openai.com/v1".to_string()
+}
+
+fn default_openrouter_model() -> String {
+    "google/gemini-2.5-flash".to_string()
 }
 
 fn default_true() -> bool {
@@ -176,6 +188,16 @@ impl Config {
                     if let Some(lang) = value.get("language").and_then(|v| v.as_str()) {
                         config.language = lang.to_string();
                     }
+                    if let Some(key) = value.get("openrouter_api_key").and_then(|v| v.as_str()) {
+                        if !key.is_empty() {
+                            config.openrouter_api_key = key.to_string();
+                        }
+                    }
+                    if let Some(model) = value.get("openrouter_model").and_then(|v| v.as_str()) {
+                        if !model.is_empty() {
+                            config.openrouter_model = model.to_string();
+                        }
+                    }
                     Ok(config)
                 }
             }
@@ -251,6 +273,8 @@ impl Default for Config {
             update_channel: UpdateChannel::default(),
             update_url: None,
             extra_keys_enabled: false,
+            openrouter_api_key: String::new(),
+            openrouter_model: default_openrouter_model(),
         }
     }
 }

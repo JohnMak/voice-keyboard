@@ -32,6 +32,7 @@ fn get_typing_mutex() -> &'static Mutex<()> {
 
 // Cross-platform imports
 use arboard::Clipboard;
+use base64::Engine as _;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use enigo::{Direction, Enigo, Key as EnigoKey, Keyboard, Settings};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -997,6 +998,233 @@ fn mask_api_key(key: &str) -> String {
     format!("{}...{}", &trimmed[..4], &trimmed[trimmed.len() - 4..])
 }
 
+// ============================================================================
+// OpenRouter Transcription API Support
+// ============================================================================
+
+/// Supported OpenRouter models for audio transcription
+const OPENROUTER_SUPPORTED_MODELS: &[&str] = &[
+    "google/gemini-2.5-flash",
+    "google/gemini-2.5-flash-lite",
+];
+
+/// OpenRouter API configuration
+#[derive(Clone)]
+struct OpenRouterConfig {
+    api_key: String,
+    model: String,
+    transcription_prompt: String,
+}
+
+impl OpenRouterConfig {
+    /// Load OpenRouter configuration from config file or environment
+    fn load() -> Option<Self> {
+        // First, try to load from config file
+        let config = voice_keyboard::config::Config::load().ok();
+
+        // Try to load .env file from current directory or home
+        let _ = dotenvy::dotenv();
+
+        // Also try from data directory
+        let env_path = get_data_dir().join(".env");
+        if env_path.exists() {
+            let _ = dotenvy::from_path(&env_path);
+        }
+
+        // Priority: env var > config file
+        let api_key = env::var("OPENROUTER_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+            .or_else(|| {
+                config.as_ref().and_then(|c| {
+                    if c.openrouter_api_key.is_empty() {
+                        None
+                    } else {
+                        Some(c.openrouter_api_key.clone())
+                    }
+                })
+            });
+
+        let api_key = match api_key {
+            Some(key) => {
+                println!("[CONFIG] OpenRouter API key loaded (length: {})", key.len());
+                key
+            }
+            None => {
+                eprintln!("[ERROR] No OpenRouter API key found in config or environment");
+                eprintln!("        Set OPENROUTER_API_KEY or configure in GUI settings");
+                return None;
+            }
+        };
+
+        let model = env::var("OPENROUTER_MODEL")
+            .ok()
+            .filter(|m| !m.is_empty())
+            .or_else(|| {
+                config.as_ref().and_then(|c| {
+                    if c.openrouter_model.is_empty() {
+                        None
+                    } else {
+                        Some(c.openrouter_model.clone())
+                    }
+                })
+            })
+            .unwrap_or_else(|| "google/gemini-2.5-flash".to_string());
+
+        if !OPENROUTER_SUPPORTED_MODELS.contains(&model.as_str()) {
+            eprintln!("[ERROR] Unsupported OpenRouter model: {}", model);
+            eprintln!(
+                "        Supported models: {}",
+                OPENROUTER_SUPPORTED_MODELS.join(", ")
+            );
+            return None;
+        }
+
+        println!("[CONFIG] OpenRouter model: {}", model);
+
+        let transcription_prompt = get_openai_prompt();
+
+        Some(Self {
+            api_key,
+            model,
+            transcription_prompt,
+        })
+    }
+}
+
+/// Single attempt to transcribe OGG/Opus audio using OpenRouter Chat Completions API
+/// Takes pre-encoded OGG bytes (not raw samples)
+fn transcribe_openrouter_single_attempt(
+    config: &OpenRouterConfig,
+    ogg_bytes: &[u8],
+) -> Result<String, String> {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(ogg_bytes);
+
+    let request_body = serde_json::json!({
+        "model": config.model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": config.transcription_prompt
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:audio/ogg;base64,{}", encoded)
+                    }
+                }
+            ]
+        }],
+        "temperature": 0
+    });
+
+    let body = serde_json::to_string(&request_body)
+        .map_err(|e| format!("Failed to serialize OpenRouter request: {}", e))?;
+
+    let client = Client::new();
+    let url = "https://openrouter.ai/api/v1/chat/completions";
+
+    println!(
+        "[{}] Sending to OpenRouter: model={}, audio={:.0} KB",
+        timestamp(),
+        config.model,
+        ogg_bytes.len() as f64 / 1024.0
+    );
+    std::io::stdout().flush().ok();
+
+    let response = client
+        .post(url)
+        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("Content-Type", "application/json")
+        .body(body)
+        .timeout(Duration::from_secs(60))
+        .send()
+        .map_err(|e| format!("OpenRouter request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().unwrap_or_default();
+        return Err(format!("OpenRouter API error {}: {}", status, error_text));
+    }
+
+    let response_text = response
+        .text()
+        .map_err(|e| format!("Failed to read OpenRouter response: {}", e))?;
+
+    let json: serde_json::Value = serde_json::from_str(&response_text)
+        .map_err(|e| format!("Failed to parse OpenRouter JSON: {} (response: {})", e, response_text))?;
+
+    let content = json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("No content in OpenRouter response: {}", response_text))?;
+
+    Ok(content.trim().to_string())
+}
+
+/// Retry wrapper for OpenRouter transcription
+/// Returns transcribed text on success
+fn transcribe_openrouter_internal(
+    config: &OpenRouterConfig,
+    ogg_bytes: &[u8],
+) -> Result<String, String> {
+    let mut last_error: String;
+
+    // First attempt
+    match transcribe_openrouter_single_attempt(config, ogg_bytes) {
+        Ok(text) => return Ok(text),
+        Err(e) => {
+            // Network error - stop immediately
+            if is_network_error(&e) {
+                print_connection_lost();
+                return Err(format!("{}{}", CONNECTION_LOST_PREFIX, e));
+            }
+            last_error = e.clone();
+            eprintln!("[{}] OpenRouter error (attempt 1): {}", timestamp(), e);
+        }
+    }
+
+    // Retry loop for non-network errors
+    for attempt in 1..API_MAX_RETRIES {
+        let delay = API_RETRY_DELAY_MS * (1 << (attempt - 1));
+        println!(
+            "[{}] OpenRouter retry {}/{} after {}ms...",
+            timestamp(),
+            attempt + 1,
+            API_MAX_RETRIES,
+            delay
+        );
+        thread::sleep(Duration::from_millis(delay));
+
+        match transcribe_openrouter_single_attempt(config, ogg_bytes) {
+            Ok(text) => return Ok(text),
+            Err(e) => {
+                if is_network_error(&e) {
+                    print_connection_lost();
+                    return Err(format!("{}{}", CONNECTION_LOST_PREFIX, e));
+                }
+                last_error = e.clone();
+                eprintln!(
+                    "[{}] OpenRouter error (attempt {}): {}",
+                    timestamp(),
+                    attempt + 1,
+                    e
+                );
+            }
+        }
+    }
+
+    Err(format!(
+        "OpenRouter failed after {} retries: {}",
+        API_MAX_RETRIES, last_error
+    ))
+}
+
 /// Maximum number of retries for API errors (non-network)
 const API_MAX_RETRIES: u32 = 3;
 /// Base delay between retries in milliseconds
@@ -1574,6 +1802,11 @@ fn print_usage() {
     println!("  --keyboard         Use keyboard simulation (default in CLI mode)");
     println!("  --openai           Use OpenAI API instead of local Whisper (CLI mode)");
     println!("                     Requires OPENAI_API_KEY in .env file or environment");
+    println!("  --openrouter       Use OpenRouter API for transcription (CLI mode)");
+    println!("                     Requires OPENROUTER_API_KEY in environment");
+    println!("                     Supported models: google/gemini-2.5-flash (default),");
+    println!("                                       google/gemini-2.5-flash-lite");
+    println!("                     Set model via OPENROUTER_MODEL env var");
     println!("  --list-models      List available model presets");
     println!("  --list-keys        List available hotkey options");
     println!("  --version, -V      Show version information");
@@ -1964,6 +2197,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let mut model_arg: Option<String> = config.model.clone();
     let mut use_openai = false;
+    let mut use_openrouter = false;
     let mut cli_mode = false; // CLI mode (advanced, requires --cli flag)
 
     let mut input_method = match config.input_method.as_deref() {
@@ -2060,6 +2294,9 @@ fn main() {
             }
             "--openai" => {
                 use_openai = true;
+            }
+            "--openrouter" => {
+                use_openrouter = true;
             }
             "--model" => {
                 if i + 1 < args.len() {
@@ -2293,6 +2530,12 @@ fn main() {
     // Microphone permission is checked by the Tauri app via AVCaptureDevice API.
     // No dummy stream needed here — first real recording will trigger the dialog if needed.
 
+    // Mutual exclusion check
+    if use_openai && use_openrouter {
+        eprintln!("Error: --openai and --openrouter cannot be used together");
+        std::process::exit(1);
+    }
+
     // OpenAI mode: use gpt-4o-transcribe API
     if use_openai {
         match OpenAIConfig::load() {
@@ -2332,6 +2575,31 @@ fn main() {
                 eprintln!("\nCreate a .env file with:");
                 eprintln!("  OPENAI_API_KEY=sk-...");
                 eprintln!("  OPENAI_API_URL=https://api.openai.com/v1  # or your proxy");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // OpenRouter mode: use Chat Completions API with audio
+    if use_openrouter {
+        match OpenRouterConfig::load() {
+            Some(openrouter_config) => {
+                println!("Transcription: OpenRouter API ({})", openrouter_config.model);
+                println!("API Key: {}", mask_api_key(&openrouter_config.api_key));
+                run_openrouter(
+                    openrouter_config,
+                    input_method,
+                    hotkey,
+                    audio_device_name.clone(),
+                    lower_volume,
+                    min_recording_ms,
+                );
+            }
+            None => {
+                eprintln!("OpenRouter mode requires OPENROUTER_API_KEY.");
+                eprintln!("\nSet environment variable:");
+                eprintln!("  OPENROUTER_API_KEY=sk-or-...");
                 std::process::exit(1);
             }
         }
@@ -6129,6 +6397,265 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
         "VAD mode: phrases transcribed on {}ms silence",
         VAD_SILENCE_MS
     );
+
+    if let Err(e) = listen(callback) {
+        eprintln!("Error: {:?}", e);
+
+        #[cfg(target_os = "macos")]
+        {
+            eprintln!("\nGrant Input Monitoring permission:");
+            eprintln!("System Settings → Privacy & Security → Input Monitoring");
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            eprintln!("\nOn Linux, you may need to:");
+            eprintln!("1. Run with sudo, OR");
+            eprintln!("2. Add yourself to the 'input' group:");
+            eprintln!("   sudo usermod -aG input $USER && newgrp input");
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            eprintln!("\nOn Windows, try running as Administrator.");
+        }
+    }
+}
+
+// ============================================================================
+// OpenRouter Run Loop
+// ============================================================================
+
+fn run_openrouter(
+    openrouter_config: OpenRouterConfig,
+    input_method: InputMethod,
+    hotkey: HotkeyType,
+    audio_device_name: String,
+    lower_volume: bool,
+    min_recording_ms: u64,
+) {
+    use std::sync::atomic::AtomicBool;
+
+    let config = Arc::new(openrouter_config);
+    let target_key = hotkey.to_rdev_key();
+
+    let state: Arc<Mutex<RecordingState>> = Arc::new(Mutex::new(RecordingState::Idle));
+    let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+    let recording_start: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+
+    let is_recording = Arc::new(AtomicBool::new(false));
+
+    let vad: Arc<Mutex<VadPhraseDetector>> = Arc::new(Mutex::new(VadPhraseDetector::new()));
+
+    let volume_controller = Arc::new(voice_keyboard::volume::VolumeController::new(lower_volume));
+
+    // Resolve audio device name at startup
+    let preferred_device_name: Option<String> = if audio_device_name == "__builtin__" {
+        select_builtin_device_name()
+    } else if audio_device_name.is_empty() {
+        None
+    } else {
+        println!("[{}] Using audio device: \"{}\"", timestamp(), audio_device_name);
+        Some(audio_device_name)
+    };
+
+    // Create persistent audio stream ONCE at startup (in paused state)
+    let persistent_stream: Arc<Mutex<Option<cpal::Stream>>> = Arc::new(Mutex::new(None));
+    match start_recording_persistent(
+        Arc::clone(&samples),
+        Arc::clone(&is_recording),
+        preferred_device_name.as_deref(),
+    ) {
+        Ok(stream) => {
+            println!("[{}] Audio stream ready (paused)", timestamp());
+            *persistent_stream.lock().unwrap() = Some(stream);
+        }
+        Err(e) => {
+            eprintln!("[{}] Failed to create audio stream: {}", timestamp(), e);
+            eprintln!("[{}] Recording will not work. Check microphone permissions.", timestamp());
+            std::process::exit(1);
+        }
+    }
+
+    let state_clone = Arc::clone(&state);
+    let samples_clone = Arc::clone(&samples);
+    let recording_start_clone = Arc::clone(&recording_start);
+    let vad_clone = Arc::clone(&vad);
+    let is_recording_clone = Arc::clone(&is_recording);
+    let persistent_stream_clone = Arc::clone(&persistent_stream);
+    let persistent_stream_release = Arc::clone(&persistent_stream);
+    let volume_controller_clone = Arc::clone(&volume_controller);
+    let config_clone = Arc::clone(&config);
+
+    let callback = move |event: Event| {
+        use std::sync::atomic::Ordering;
+
+        match event.event_type {
+            EventType::KeyPress(key) if key == target_key => {
+                let mut rec_state = state_clone.lock().unwrap();
+                if *rec_state == RecordingState::Idle {
+                    samples_clone.lock().unwrap().clear();
+                    vad_clone.lock().unwrap().reset();
+                    *recording_start_clone.lock().unwrap() = Some(Instant::now());
+                    is_recording_clone.store(true, Ordering::SeqCst);
+                    *rec_state = RecordingState::Recording;
+
+                    // Resume persistent audio stream
+                    {
+                        let stream_guard = persistent_stream_clone.lock().unwrap();
+                        if let Some(ref stream) = *stream_guard {
+                            if let Err(e) = stream.play() {
+                                eprintln!("[{}] Failed to play audio stream: {}", timestamp(), e);
+                                is_recording_clone.store(false, Ordering::SeqCst);
+                                *rec_state = RecordingState::Idle;
+                                return;
+                            }
+                        } else {
+                            eprintln!("[{}] No audio stream available", timestamp());
+                            is_recording_clone.store(false, Ordering::SeqCst);
+                            *rec_state = RecordingState::Idle;
+                            return;
+                        }
+                    }
+
+                    volume_controller_clone.lower();
+
+                    println!("[{}] Recording...", timestamp());
+                    std::io::stdout().flush().ok();
+                }
+            }
+
+            EventType::KeyRelease(key) if key == target_key => {
+                let mut rec_state = state_clone.lock().unwrap();
+
+                if *rec_state == RecordingState::Recording {
+                    is_recording_clone.store(false, Ordering::SeqCst);
+
+                    // Pause persistent stream
+                    {
+                        let stream_guard = persistent_stream_release.lock().unwrap();
+                        if let Some(ref stream) = *stream_guard {
+                            let _ = stream.pause();
+                        }
+                    }
+
+                    volume_controller_clone.restore();
+
+                    let recording_duration = recording_start_clone
+                        .lock()
+                        .unwrap()
+                        .map(|start| start.elapsed())
+                        .unwrap_or(Duration::ZERO);
+
+                    *rec_state = RecordingState::Idle;
+                    *recording_start_clone.lock().unwrap() = None;
+
+                    if recording_duration < Duration::from_millis(min_recording_ms) {
+                        println!("[{}] Recording too short, ignoring", timestamp());
+                        std::io::stdout().flush().ok();
+                        samples_clone.lock().unwrap().clear();
+                        return;
+                    }
+
+                    play_stop_beep();
+
+                    let phrase_samples = {
+                        let samples = samples_clone.lock().unwrap();
+                        let vad = vad_clone.lock().unwrap();
+                        vad.get_remaining(&samples)
+                            .map(|(s, _, _)| s)
+                            .unwrap_or_else(|| samples.clone())
+                    };
+
+                    if phrase_samples.is_empty() {
+                        println!("[{}] No audio captured", timestamp());
+                        return;
+                    }
+
+                    let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
+                    println!(
+                        "[{}] Transcribing {:.1}s audio with OpenRouter...",
+                        timestamp(),
+                        duration_secs
+                    );
+                    std::io::stdout().flush().ok();
+
+                    // Encode as OGG/Opus (requires opus feature)
+                    #[cfg(feature = "opus")]
+                    let ogg_result = {
+                        let resampled = resample_48k_to_16k(&phrase_samples);
+                        let samples_i16: Vec<i16> = resampled
+                            .iter()
+                            .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                            .collect();
+                        ogg_opus::encode::<16000, 1>(&samples_i16)
+                            .map_err(|e| format!("OGG encoding failed: {:?}", e))
+                    };
+
+                    #[cfg(not(feature = "opus"))]
+                    let ogg_result: Result<Vec<u8>, String> = Err(
+                        "OpenRouter mode requires OGG/Opus encoding. Build with --features opus".to_string()
+                    );
+
+                    let ogg_bytes = match ogg_result {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            eprintln!("[{}] Audio encoding error: {}", timestamp(), e);
+                            play_error_beep();
+                            samples_clone.lock().unwrap().clear();
+                            return;
+                        }
+                    };
+
+                    let config_ref = Arc::clone(&config_clone);
+                    match transcribe_openrouter_internal(&config_ref, &ogg_bytes) {
+                        Ok(text) => {
+                            let trimmed = text.trim();
+                            if trimmed.is_empty() || trimmed == "-" {
+                                println!("[{}] Empty transcription, skipping", timestamp());
+                            } else {
+                                println!(
+                                    "\n[{}] ═══════════════════════════════════════════════════════════",
+                                    timestamp()
+                                );
+                                println!("[TRANSCRIPTION]");
+                                println!("{}", trimmed);
+                                println!(
+                                    "═══════════════════════════════════════════════════════════\n"
+                                );
+
+                                if let Err(e) = insert_text(trimmed, input_method) {
+                                    eprintln!("[{}] Failed to insert text: {}", timestamp(), e);
+                                } else {
+                                    println!("[{}] +\"{}\"", timestamp(), trimmed);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[{}] OpenRouter transcription error: {}", timestamp(), e);
+                            play_error_beep();
+                        }
+                    }
+
+                    std::io::stdout().flush().ok();
+                    samples_clone.lock().unwrap().clear();
+                    vad_clone.lock().unwrap().reset();
+                }
+            }
+
+            _ => {}
+        }
+    };
+
+    println!(
+        "[{}] Ready! Hold {} to record, release to transcribe.",
+        timestamp(),
+        hotkey.name()
+    );
+    #[cfg(feature = "opus")]
+    println!("OpenRouter mode: OGG/Opus compression enabled");
+    #[cfg(not(feature = "opus"))]
+    println!("WARNING: OpenRouter mode requires --features opus for OGG/Opus encoding");
 
     if let Err(e) = listen(callback) {
         eprintln!("Error: {:?}", e);
