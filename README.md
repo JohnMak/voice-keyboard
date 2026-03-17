@@ -1,5 +1,5 @@
 
-Push-to-talk voice keyboard with speech recognition. Supports both **cloud-based GPT-4o** (recommended for best quality) and **local Whisper** models.
+Push-to-talk voice keyboard with speech recognition. Supports **cloud-based GPT-4o**, **OpenRouter** (cheap cloud alternative), and **local Whisper** models.
 
 ## How It Works
 
@@ -30,10 +30,11 @@ Push-to-talk voice keyboard with speech recognition. Supports both **cloud-based
 
 ## Transcription Modes
 
-| Mode | Quality | Speed | Privacy | Requirements |
-|------|---------|-------|---------|--------------|
-| **GPT-4o** (recommended) | Excellent | Fast | Cloud | OpenAI API key |
-| **Whisper Local** | Very Good | Varies | Local | ~3GB RAM |
+| Mode | Quality | Speed | Privacy | Cost | Requirements |
+|------|---------|-------|---------|------|--------------|
+| **GPT-4o** (recommended) | Excellent | Fast | Cloud | ~$0.001/req | OpenAI API key |
+| **OpenRouter** (cheap) | Excellent | Fast | Cloud | ~$0.0001–0.0004/req | OpenRouter API key |
+| **Whisper Local** | Very Good | Varies | Local | Free | ~3GB RAM |
 
 ## Quick Start
 
@@ -126,7 +127,52 @@ source ~/.zshrc
 
 ---
 
-## Mode 2: Local Whisper Transcription
+## Mode 2: OpenRouter Transcription (Cheap Cloud)
+
+High-quality transcription via [OpenRouter](https://openrouter.ai/) using multimodal models. Very affordable — typically $0.0001–$0.0004 per transcription. Sends OGG/Opus audio encoded as base64 to the Chat Completions API.
+
+### Setup
+
+1. Get an API key from [OpenRouter](https://openrouter.ai/keys)
+
+2. Set the environment variable:
+```bash
+export OPENROUTER_API_KEY="sk-or-your-api-key-here"
+```
+
+Or add to your shell profile (`~/.bashrc`, `~/.zshrc`):
+```bash
+echo 'export OPENROUTER_API_KEY="sk-or-your-api-key-here"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+3. Run with OpenRouter mode:
+```bash
+./target/release/voice-typer --openrouter
+```
+
+### Model Selection
+
+The default model is `google/gemini-2.5-flash`. Override with `OPENROUTER_MODEL`:
+
+```bash
+# Default (recommended)
+OPENROUTER_MODEL="google/gemini-2.5-flash" ./target/release/voice-typer --openrouter
+
+# Lighter/faster variant
+OPENROUTER_MODEL="google/gemini-2.5-flash-lite" ./target/release/voice-typer --openrouter
+```
+
+### OpenRouter Advantages
+
+- **Very cheap** — ~$0.0001–$0.0004 per transcription
+- **No local model** required
+- **Multiple model options** through a single API
+- **Good accuracy** for Russian, English, and mixed language
+
+---
+
+## Mode 3: Local Whisper Transcription
 
 All processing happens locally on your device — no data is sent to the cloud.
 
@@ -185,6 +231,8 @@ curl -L -O https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.b
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `OPENAI_API_KEY` | OpenAI API key for GPT-4o mode | `sk-...` |
+| `OPENROUTER_API_KEY` | OpenRouter API key for OpenRouter mode | `sk-or-...` |
+| `OPENROUTER_MODEL` | OpenRouter model to use (default: `google/gemini-2.5-flash`) | `google/gemini-2.5-flash-lite` |
 | `MODEL_PATH` | Path to Whisper model file | `~/.local/share/voice-keyboard/models/ggml-large-v3-turbo.bin` |
 | `VOICE_KEYBOARD_LANGUAGES` | Languages for auto-detection (default: Russian, English) | `Russian, English, German` |
 | `VOICE_KEYBOARD_DEV` | Enable dev mode (save reports) | `1` |
@@ -215,6 +263,7 @@ Usage: voice-typer [OPTIONS]
 
 Transcription Mode:
   --openai             Use OpenAI GPT-4o API (requires OPENAI_API_KEY)
+  --openrouter         Use OpenRouter API (requires OPENROUTER_API_KEY)
   --model <MODEL>      Use local Whisper model (tiny, base, small, medium, large-v3-turbo, large-v3)
 
 Model Management:
@@ -281,6 +330,12 @@ This ensures no voice recordings are lost due to temporary network issues.
 ```bash
 # GPT-4o mode (best quality)
 OPENAI_API_KEY="sk-..." ./target/release/voice-typer --openai
+
+# OpenRouter mode (cheap cloud)
+OPENROUTER_API_KEY="sk-or-..." ./target/release/voice-typer --openrouter
+
+# OpenRouter with a specific model
+OPENROUTER_API_KEY="sk-or-..." OPENROUTER_MODEL="google/gemini-2.5-flash-lite" ./target/release/voice-typer --openrouter
 
 # Local Whisper with turbo model
 ./target/release/voice-typer --model large-v3-turbo
