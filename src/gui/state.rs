@@ -135,12 +135,12 @@ impl AppState {
             .unwrap_or_else(|| std::env::var("OPENAI_API_KEY").unwrap_or_default());
 
         // Load API URL: config takes priority, then env var, then default
-        let api_url = if config.openai_api_url.is_empty() {
-            std::env::var("OPENAI_API_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string())
-        } else {
-            config.openai_api_url.clone()
-        };
+        let api_url = config
+            .openai_api_url
+            .clone()
+            .filter(|url| !url.is_empty())
+            .or_else(|| std::env::var("OPENAI_API_URL").ok())
+            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
 
         // Parse input method from config
         let input_method = match &config.injection_method {
@@ -203,7 +203,11 @@ impl AppState {
             } else {
                 Some(self.api_key.clone())
             },
-            openai_api_url: self.api_url.clone(),
+            openai_api_url: if self.api_url.is_empty() {
+                None
+            } else {
+                Some(self.api_url.clone())
+            },
             model_path: PathBuf::new(), // TODO: get from whisper settings
             model_size: crate::config::ModelSizeConfig::LargeV3Turbo,
             language: "auto".to_string(),

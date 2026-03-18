@@ -967,7 +967,7 @@ impl OpenAIConfig {
 
         let api_url = config
             .as_ref()
-            .map(|c| c.openai_api_url.clone())
+            .and_then(|c| c.openai_api_url.clone())
             .filter(|url| !url.is_empty())
             .or_else(|| env::var("OPENAI_API_URL").ok())
             .unwrap_or_else(|| "https://api.openai.com/v1".to_string());

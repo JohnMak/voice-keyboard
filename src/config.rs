@@ -13,9 +13,9 @@ pub struct Config {
     #[serde(default)]
     pub openai_api_key: Option<String>,
 
-    /// OpenAI API URL (optional, defaults to https://api.openai.com/v1)
-    #[serde(default = "default_openai_api_url")]
-    pub openai_api_url: String,
+    /// OpenAI API URL (optional, falls back to OPENAI_API_URL env var then https://api.openai.com/v1)
+    #[serde(default)]
+    pub openai_api_url: Option<String>,
 
     /// Path to Whisper model file
     pub model_path: PathBuf,
@@ -71,10 +71,6 @@ pub struct Config {
 
 fn default_language() -> String {
     "auto".to_string()
-}
-
-fn default_openai_api_url() -> String {
-    "https://api.openai.com/v1".to_string()
 }
 
 fn default_openrouter_model() -> String {
@@ -182,7 +178,7 @@ impl Config {
                     }
                     if let Some(url) = value.get("openai_api_url").and_then(|v| v.as_str()) {
                         if !url.is_empty() {
-                            config.openai_api_url = url.to_string();
+                            config.openai_api_url = Some(url.to_string());
                         }
                     }
                     if let Some(lang) = value.get("language").and_then(|v| v.as_str()) {
@@ -261,7 +257,7 @@ impl Default for Config {
 
         Self {
             openai_api_key: None,
-            openai_api_url: default_openai_api_url(),
+            openai_api_url: None,
             model_path: models_dir.join("ggml-large-v3-turbo.bin"),
             model_size: ModelSizeConfig::LargeV3Turbo,
             language: "auto".to_string(),
