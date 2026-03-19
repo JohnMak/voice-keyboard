@@ -35,7 +35,11 @@ use arboard::Clipboard;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use enigo::{Direction, Enigo, Key as EnigoKey, Keyboard, Settings};
 use indicatif::{ProgressBar, ProgressStyle};
-use rdev::{listen, Event, EventType, Key};
+use rdev::{Event, EventType, Key};
+#[cfg(target_os = "macos")]
+use rdev::grab;
+#[cfg(not(target_os = "macos"))]
+use rdev::listen;
 use reqwest::blocking::Client;
 use std::process::Command;
 
@@ -1379,6 +1383,15 @@ TEXT RULES:
 
 LANGUAGE: OUTPUT EVERYTHING IN ENGLISH regardless of input language.
 NO intro, NO meta - just content.";
+
+/// Suffix appended to every user-configurable preprompt.
+/// Ensures the API returns only the processed message text without any preamble.
+const PREPROMPT_NO_PREAMBLE_SUFFIX: &str = "\n\nIMPORTANT: Return ONLY the resulting text. Do not add any introductory phrases, explanations, labels, or commentary. Output nothing but the final message.";
+
+/// Wrap a user-configured preprompt with the no-preamble instruction.
+fn wrap_preprompt(preprompt: &str) -> String {
+    format!("{}{}", preprompt, PREPROMPT_NO_PREAMBLE_SUFFIX)
+}
 
 /// Call GPT-4.1 Chat Completions API with custom system prompt
 /// Uses same API key and base URL as transcription (for proxy compatibility)
@@ -4042,7 +4055,7 @@ fn run_openai(
 
                     match call_chat_api(
                         &config_for_worker,
-                        preprompt,
+                        &wrap_preprompt(preprompt),
                         selected,
                         "Preprompt+Selected",
                     ) {
@@ -4474,7 +4487,7 @@ fn run_openai(
 
                                     match call_chat_api(
                                         &config_for_worker,
-                                        preprompt,
+                                        &wrap_preprompt(preprompt),
                                         &user_message,
                                         "Preprompt+Selected",
                                     ) {
@@ -4599,7 +4612,7 @@ fn run_openai(
 
                                     match call_chat_api(
                                         &config_for_worker,
-                                        preprompt,
+                                        &wrap_preprompt(preprompt),
                                         &transcribed_text,
                                         "Preprompt",
                                     ) {
@@ -5343,31 +5356,6 @@ fn run_openai(
                     active_preprompt_callback.store(idx, Ordering::SeqCst);
                     println!("[{}] [PREPROMPT] Selected preprompt {}", timestamp(), idx);
                     std::io::stdout().flush().ok();
-
-                    // Undo the typed digit via Cmd+Z sent directly to the frontmost app
-                    // (post_to_pid bypasses our event listener, avoiding re-trigger)
-                    #[cfg(target_os = "macos")]
-                    {
-                        let pid = get_frontmost_app_pid();
-                        thread::spawn(move || {
-                            thread::sleep(Duration::from_millis(30));
-                            if let Some(pid) = pid {
-                                use core_graphics::event::{CGEvent, CGEventFlags};
-                                use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-                                if let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) {
-                                    // Cmd+Z: keycode 6 = 'z'
-                                    if let Ok(ev) = CGEvent::new_keyboard_event(source.clone(), 6, true) {
-                                        ev.set_flags(CGEventFlags::CGEventFlagCommand);
-                                        ev.post_to_pid(pid);
-                                    }
-                                    if let Ok(ev) = CGEvent::new_keyboard_event(source, 6, false) {
-                                        ev.set_flags(CGEventFlags::CGEventFlagCommand);
-                                        ev.post_to_pid(pid);
-                                    }
-                                }
-                            }
-                        });
-                    }
                 }
             }
             EventType::KeyRelease(key)
@@ -5614,8 +5602,33 @@ fn run_openai(
         println!("");
     }
 
-    if let Err(e) = listen(callback) {
-        eprintln!("Error: {:?}", e);
+    // On macOS use grab() to suppress digit keys during recording so they don't
+    // leak into the active application. On other platforms fall back to listen().
+    #[cfg(target_os = "macos")]
+    {
+        let state_for_grab = Arc::clone(&state);
+        #[allow(unused_mut)]
+        let mut callback = callback;
+        let grab_fn = move |event: Event| -> Option<Event> {
+            let suppress = matches!(
+                event.event_type,
+                EventType::KeyPress(Key::Num1 | Key::Num2 | Key::Num3)
+                    | EventType::KeyRelease(Key::Num1 | Key::Num2 | Key::Num3)
+            ) && *state_for_grab.lock().unwrap() == RecordingState::Recording;
+
+            let event_clone = event.clone();
+            callback(event);
+            if suppress { None } else { Some(event_clone) }
+        };
+        if let Err(e) = grab(grab_fn) {
+            eprintln!("Error: {:?}", e);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Err(e) = listen(callback) {
+            eprintln!("Error: {:?}", e);
+        }
     }
 }
 
@@ -6130,26 +6143,46 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
         VAD_SILENCE_MS
     );
 
-    if let Err(e) = listen(callback) {
-        eprintln!("Error: {:?}", e);
+    // On macOS use grab() to suppress digit keys during recording so they don't
+    // leak into the active application. On other platforms fall back to listen().
+    #[cfg(target_os = "macos")]
+    {
+        let state_for_grab = Arc::clone(&state);
+        let callback = callback;
+        let grab_fn = move |event: Event| -> Option<Event> {
+            let suppress = matches!(
+                event.event_type,
+                EventType::KeyPress(Key::Num1 | Key::Num2 | Key::Num3)
+                    | EventType::KeyRelease(Key::Num1 | Key::Num2 | Key::Num3)
+            ) && *state_for_grab.lock().unwrap() == RecordingState::Recording;
 
-        #[cfg(target_os = "macos")]
-        {
+            let event_clone = event.clone();
+            callback(event);
+            if suppress { None } else { Some(event_clone) }
+        };
+        if let Err(e) = grab(grab_fn) {
+            eprintln!("Error: {:?}", e);
             eprintln!("\nGrant Input Monitoring permission:");
             eprintln!("System Settings → Privacy & Security → Input Monitoring");
         }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Err(e) = listen(callback) {
+            eprintln!("Error: {:?}", e);
 
-        #[cfg(target_os = "linux")]
-        {
-            eprintln!("\nOn Linux, you may need to:");
-            eprintln!("1. Run with sudo, OR");
-            eprintln!("2. Add yourself to the 'input' group:");
-            eprintln!("   sudo usermod -aG input $USER && newgrp input");
-        }
+            #[cfg(target_os = "linux")]
+            {
+                eprintln!("\nOn Linux, you may need to:");
+                eprintln!("1. Run with sudo, OR");
+                eprintln!("2. Add yourself to the 'input' group:");
+                eprintln!("   sudo usermod -aG input $USER && newgrp input");
+            }
 
-        #[cfg(target_os = "windows")]
-        {
-            eprintln!("\nOn Windows, try running as Administrator.");
+            #[cfg(target_os = "windows")]
+            {
+                eprintln!("\nOn Windows, try running as Administrator.");
+            }
         }
     }
 }

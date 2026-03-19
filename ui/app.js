@@ -120,6 +120,7 @@ function cacheElements() {
         preprompt2: document.getElementById('preprompt-2'),
         preprompt3: document.getElementById('preprompt-3'),
         saveSettingsBtn: document.getElementById('save-settings'),
+        savePromptsBtn: document.getElementById('save-prompts'),
         // Permissions modal
         permissionsModal: document.getElementById('permissions-modal'),
         openSettingsBtn: document.getElementById('open-settings-btn'),
@@ -193,6 +194,7 @@ function setupEventListeners() {
 
     // Save settings
     elements.saveSettingsBtn.addEventListener('click', saveSettings);
+    elements.savePromptsBtn.addEventListener('click', saveSettings);
 
     // Settings changes
     elements.languageSelect.addEventListener('change', (e) => {
@@ -599,8 +601,8 @@ function renderLanguages() {
 }
 
 async function saveSettings() {
-    elements.saveSettingsBtn.disabled = true;
-    elements.saveSettingsBtn.textContent = 'Reloading...';
+    const saveButtons = [elements.saveSettingsBtn, elements.savePromptsBtn];
+    saveButtons.forEach(btn => { btn.disabled = true; btn.textContent = 'Reloading...'; });
 
     try {
         config.input_method = elements.inputMethodSelect.value;
@@ -618,16 +620,14 @@ async function saveSettings() {
         config.preprompt_2 = elements.preprompt2.value;
         config.preprompt_3 = elements.preprompt3.value;
         await invoke('save_config', { config });
-        elements.saveSettingsBtn.textContent = 'Saved!';
+        saveButtons.forEach(btn => { btn.textContent = 'Saved!'; });
         setTimeout(() => {
-            elements.saveSettingsBtn.textContent = 'Save & Reload';
-            elements.saveSettingsBtn.disabled = false;
+            saveButtons.forEach(btn => { btn.textContent = 'Save & Reload'; btn.disabled = false; });
         }, 1500);
     } catch (e) {
         console.error('Failed to save config:', e);
         alert('Failed to save settings: ' + e);
-        elements.saveSettingsBtn.textContent = 'Save & Reload';
-        elements.saveSettingsBtn.disabled = false;
+        saveButtons.forEach(btn => { btn.textContent = 'Save & Reload'; btn.disabled = false; });
     }
 }
 

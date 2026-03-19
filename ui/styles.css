@@ -97,6 +97,10 @@ body {
     overflow-y: auto;
 }
 
+#prompts-tab {
+    overflow-y: auto;
+}
+
 /* Status Bar */
 .status-bar {
     display: flex;

@@ -52,7 +52,7 @@ base64 = "0.22"
 
 # Cross-platform audio and input
 cpal = "0.15"           # Audio recording (CoreAudio/ALSA/WASAPI)
-rdev = "0.5"            # Global hotkeys
+rdev = { version = "0.5", features = [] }  # Global hotkeys; unstable_grab added per-platform below
 enigo = "0.2"           # Keyboard simulation
 
 # GUI dependencies (optional, enabled with --features gui)
@@ -85,6 +85,7 @@ cocoa = "0.26"          # macOS clipboard for files
 objc = "0.2"            # Objective-C runtime
 core-graphics = { version = "0.24", features = ["elcapitan"] }  # CGEvent with post_to_pid
 core-foundation = "0.9"  # CFString for Accessibility API
+rdev = { version = "0.5", features = ["unstable_grab"] }  # grab() for key suppression
 
 # Windows-only dependencies (tray)
 [target.'cfg(target_os = "windows")'.dependencies]
