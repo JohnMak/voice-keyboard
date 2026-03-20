@@ -1121,10 +1121,10 @@ fn transcribe_openrouter_single_attempt(
 
     let prompt_with_duration = if duration_secs < 30.0 {
         format!(
-            "Длительность аудио: {:.1} сек. Человек говорит со скоростью ~15-20 символов/сек. Если распознанный текст значительно длиннее {} символов — вероятна галлюцинация, перепроверь что реально слышно.\n{}",
+            "{}\nДлительность аудио: {:.1} сек. Человек говорит со скоростью ~15-20 символов/сек. Если распознанный текст значительно длиннее {} символов — вероятна галлюцинация, перепроверь что реально слышно.",
+            config.transcription_prompt,
             duration_secs,
-            (duration_secs * 25.0) as usize,
-            config.transcription_prompt
+            (duration_secs * 25.0) as usize
         )
     } else {
         config.transcription_prompt.clone()
@@ -1575,10 +1575,10 @@ fn transcribe_openai_single_attempt(
     if let Some(p) = prompt {
         let prompt_with_duration = if speech_duration_secs < 30.0 {
             format!(
-                "Длительность аудио: {:.1} сек. Человек говорит со скоростью ~15-20 символов/сек. Если распознанный текст значительно длиннее {} символов — вероятна галлюцинация, перепроверь что реально слышно.\n{}",
+                "{}\nДлительность аудио: {:.1} сек. Человек говорит со скоростью ~15-20 символов/сек. Если распознанный текст значительно длиннее {} символов — вероятна галлюцинация, перепроверь что реально слышно.",
+                p,
                 speech_duration_secs,
-                (speech_duration_secs * 25.0) as usize,
-                p
+                (speech_duration_secs * 25.0) as usize
             )
         } else {
             p.to_string()
