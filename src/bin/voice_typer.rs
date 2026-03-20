@@ -144,7 +144,8 @@ embeddings, RAG, fine-tuning, tokens, prompt, Node.js, Bun, pnpm, ESLint, Pretti
 Prisma, PostgreSQL, Redis, JSON, REST, GraphQL, WebSocket, OAuth, JWT, regex, localhost, endpoint, webhook, cron, баг-репорт. \
 КРИТИЧЕСКИ ВАЖНО: Распознавай ТОЛЬКО реально слышимое в аудио. \
 НИКОГДА не повторяй текст из контекста — контекст только для понимания темы. \
-Если аудио неразборчиво, тишина или шум — ответь ровно одним символом: - \
+Если аудио содержит АБСОЛЮТНУЮ тишину без единого произнесённого слова — ответь ровно одним символом: - \
+Не путай тихую или короткую речь с тишиной — если есть хоть одно слово, распознай его. \
 Не выдумывай слова, которых нет в аудио. \
 ВАЖНО: Выводи ВСЕ услышанное, даже незаконченные предложения. \
 Если фраза обрывается — заканчивай многоточием, но НЕ отбрасывай её. \
@@ -1110,12 +1111,24 @@ impl OpenRouterConfig {
 }
 
 /// Single attempt to transcribe OGG/Opus audio using OpenRouter Chat Completions API
-/// Takes pre-encoded OGG bytes (not raw samples)
+/// Takes pre-encoded OGG bytes (not raw samples) and actual speech duration (before padding)
 fn transcribe_openrouter_single_attempt(
     config: &OpenRouterConfig,
     ogg_bytes: &[u8],
+    duration_secs: f32,
 ) -> Result<String, String> {
     let encoded = base64::engine::general_purpose::STANDARD.encode(ogg_bytes);
+
+    let prompt_with_duration = if duration_secs < 30.0 {
+        format!(
+            "Длительность аудио: {:.1} сек. Человек говорит со скоростью ~15-20 символов/сек. Если распознанный текст значительно длиннее {} символов — вероятна галлюцинация, перепроверь что реально слышно.\n{}",
+            duration_secs,
+            (duration_secs * 25.0) as usize,
+            config.transcription_prompt
+        )
+    } else {
+        config.transcription_prompt.clone()
+    };
 
     let request_body = serde_json::json!({
         "model": config.model,
@@ -1124,12 +1137,13 @@ fn transcribe_openrouter_single_attempt(
             "content": [
                 {
                     "type": "text",
-                    "text": config.transcription_prompt
+                    "text": prompt_with_duration
                 },
                 {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": format!("data:audio/ogg;base64,{}", encoded)
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": encoded,
+                        "format": "ogg"
                     }
                 }
             ]
@@ -1194,11 +1208,12 @@ fn transcribe_openrouter_single_attempt(
 fn transcribe_openrouter_internal(
     config: &OpenRouterConfig,
     ogg_bytes: &[u8],
+    duration_secs: f32,
 ) -> Result<String, String> {
     let mut last_error: String;
 
     // First attempt
-    match transcribe_openrouter_single_attempt(config, ogg_bytes) {
+    match transcribe_openrouter_single_attempt(config, ogg_bytes, duration_secs) {
         Ok(text) => return Ok(text),
         Err(e) => {
             // Network error - stop immediately
@@ -1223,7 +1238,7 @@ fn transcribe_openrouter_internal(
         );
         thread::sleep(Duration::from_millis(delay));
 
-        match transcribe_openrouter_single_attempt(config, ogg_bytes) {
+        match transcribe_openrouter_single_attempt(config, ogg_bytes, duration_secs) {
             Ok(text) => return Ok(text),
             Err(e) => {
                 if is_network_error(&e) {
@@ -1263,11 +1278,12 @@ fn transcribe_with_fallback(
     samples: &[f32],
     prompt: Option<&str>,
     use_ogg: bool,
+    duration_secs: f32,
 ) -> Result<String, String> {
     // Try primary backend
     let primary_result = match primary {
         BackendConfig::OpenRouter(config) => {
-            transcribe_openrouter_internal(config, ogg_bytes)
+            transcribe_openrouter_internal(config, ogg_bytes, duration_secs)
         }
         BackendConfig::OpenAI(config) => {
             transcribe_openai_internal(config, samples, WHISPER_SAMPLE_RATE, prompt, use_ogg)
@@ -1306,7 +1322,7 @@ fn transcribe_with_fallback(
             // Try fallback backend
             let fallback_result = match fallback {
                 BackendConfig::OpenRouter(config) => {
-                    transcribe_openrouter_internal(config, ogg_bytes)
+                    transcribe_openrouter_internal(config, ogg_bytes, duration_secs)
                 }
                 BackendConfig::OpenAI(config) => {
                     transcribe_openai_internal(config, samples, WHISPER_SAMPLE_RATE, prompt, use_ogg)
@@ -1473,6 +1489,9 @@ fn transcribe_openai_single_attempt(
     prompt: Option<&str>,
     use_ogg: bool,
 ) -> Result<(String, String), String> {
+    // Compute actual speech duration before padding (at 16kHz)
+    let speech_duration_secs = samples.len() as f32 / 16000.0;
+
     // Add 1 second of quiet noise at the end to prevent GPT-4o from truncating final phrases
     // Using very low amplitude noise (not silence) to avoid being stripped by audio processing
     const PADDING_SAMPLES: usize = 16000; // 1 second at 16kHz
@@ -1552,11 +1571,21 @@ fn transcribe_openai_single_attempt(
     body.extend_from_slice(b"ru");
     body.extend_from_slice(b"\r\n");
 
-    // Add prompt if provided
+    // Add prompt if provided (prepended with audio duration for anti-hallucination, only for short audio)
     if let Some(p) = prompt {
+        let prompt_with_duration = if speech_duration_secs < 30.0 {
+            format!(
+                "Длительность аудио: {:.1} сек. Человек говорит со скоростью ~15-20 символов/сек. Если распознанный текст значительно длиннее {} символов — вероятна галлюцинация, перепроверь что реально слышно.\n{}",
+                speech_duration_secs,
+                (speech_duration_secs * 25.0) as usize,
+                p
+            )
+        } else {
+            p.to_string()
+        };
         body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
         body.extend_from_slice(b"Content-Disposition: form-data; name=\"prompt\"\r\n\r\n");
-        body.extend_from_slice(p.as_bytes());
+        body.extend_from_slice(prompt_with_duration.as_bytes());
         body.extend_from_slice(b"\r\n");
     }
 
@@ -6685,7 +6714,7 @@ fn run_openrouter(
                 job.duration_secs
             );
 
-            match transcribe_openrouter_internal(&config_for_worker, &job.ogg_bytes) {
+            match transcribe_openrouter_internal(&config_for_worker, &job.ogg_bytes, job.duration_secs) {
                 Ok(text) => {
                     let trimmed = text.trim();
                     if trimmed.is_empty() || trimmed == "-" {
@@ -6832,7 +6861,8 @@ fn run_openrouter(
                         return;
                     }
 
-                    let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
+                    let resampled = resample_48k_to_16k(&phrase_samples);
+                    let duration_secs = resampled.len() as f32 / 16000.0;
                     println!(
                         "[{}] Encoding {:.1}s audio...",
                         timestamp(),
@@ -6840,11 +6870,17 @@ fn run_openrouter(
                     );
                     std::io::stdout().flush().ok();
 
-                    // Encode as OGG/Opus
+                    // Encode as OGG/Opus (with 1s noise padding to prevent phrase truncation)
                     #[cfg(feature = "opus")]
                     let ogg_result = {
-                        let resampled = resample_48k_to_16k(&phrase_samples);
-                        let samples_i16: Vec<i16> = resampled
+                        const PADDING_SAMPLES: usize = 16000; // 1 second at 16kHz
+                        const NOISE_AMPLITUDE: f32 = 0.0005; // Very quiet, barely audible
+                        let mut padded = resampled.clone();
+                        for i in 0..PADDING_SAMPLES {
+                            let noise = ((i as f32 * 0.1).sin() * 0.5 + (i as f32 * 0.23).cos() * 0.5) * NOISE_AMPLITUDE;
+                            padded.push(noise);
+                        }
+                        let samples_i16: Vec<i16> = padded
                             .iter()
                             .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
                             .collect();
@@ -7008,6 +7044,7 @@ fn run_cloud(
                 &job.samples_16k,
                 None,
                 use_ogg,
+                job.duration_secs,
             ) {
                 Ok(text) => {
                     let trimmed = text.trim();
@@ -7156,7 +7193,9 @@ fn run_cloud(
                         return;
                     }
 
-                    let duration_secs = phrase_samples.len() as f32 / RECORDING_SAMPLE_RATE as f32;
+                    // Resample to 16kHz (needed for both backends)
+                    let resampled = resample_48k_to_16k(&phrase_samples);
+                    let duration_secs = resampled.len() as f32 / 16000.0;
                     println!(
                         "[{}] Encoding {:.1}s audio...",
                         timestamp(),
@@ -7164,13 +7203,18 @@ fn run_cloud(
                     );
                     std::io::stdout().flush().ok();
 
-                    // Resample to 16kHz (needed for both backends)
-                    let resampled = resample_48k_to_16k(&phrase_samples);
-
                     // Encode as OGG/Opus (needed for OpenRouter, optional for OpenAI)
+                    // Add 1s of noise padding to prevent phrase truncation by the API
                     #[cfg(feature = "opus")]
                     let ogg_result = {
-                        let samples_i16: Vec<i16> = resampled
+                        const PADDING_SAMPLES: usize = 16000; // 1 second at 16kHz
+                        const NOISE_AMPLITUDE: f32 = 0.0005; // Very quiet, barely audible
+                        let mut padded = resampled.clone();
+                        for i in 0..PADDING_SAMPLES {
+                            let noise = ((i as f32 * 0.1).sin() * 0.5 + (i as f32 * 0.23).cos() * 0.5) * NOISE_AMPLITUDE;
+                            padded.push(noise);
+                        }
+                        let samples_i16: Vec<i16> = padded
                             .iter()
                             .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
                             .collect();
