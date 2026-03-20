@@ -7,6 +7,32 @@
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+    <div id="update-overlay" class="update-overlay" style="display: none;">
+      <div class="update-overlay-content">
+        <img src="app-icon.png" alt="Voice Keyboard" class="update-logo" />
+        <h1>Update Required</h1>
+        <p class="update-message">A new version of Voice Keyboard is available. Please update to continue using the application.</p>
+        <div class="update-versions">
+          <div class="version-row">
+            <span class="version-label">Current version:</span>
+            <span class="version-value" id="update-current-version">—</span>
+          </div>
+          <div class="version-row">
+            <span class="version-label">New version:</span>
+            <span class="version-value update-new" id="update-new-version">—</span>
+          </div>
+        </div>
+        <button id="update-install-btn" class="btn-update" onclick="installUpdate()">Install Update</button>
+        <div id="update-progress" class="update-progress" style="display: none;">
+          <div class="progress-bar-container">
+            <div class="progress-bar" id="update-progress-bar"></div>
+          </div>
+          <span id="update-progress-text" class="update-progress-text">Downloading...</span>
+        </div>
+        <p class="update-hint">The update will be downloaded and installed automatically.</p>
+      </div>
+    </div>
+
     <div class="app">
         <!-- Header with tabs -->
         <header class="header">
@@ -94,6 +120,19 @@
 
         <!-- Settings Tab -->
         <section id="settings-tab" class="tab-content">
+            <div class="app-info-header">
+                <img src="app-icon.png" alt="Voice Keyboard" class="app-logo" />
+                <div class="app-info-details">
+                    <h2 class="app-name">Voice Keyboard</h2>
+                    <span class="app-version" id="app-version">v0.5.0</span>
+                    <span class="app-update-status" id="app-update-status"></span>
+                </div>
+                <div class="app-info-actions">
+                    <button id="check-update-btn" class="btn btn-secondary btn-small" onclick="checkForUpdate()">Check for updates</button>
+                    <a href="#" id="github-link" class="btn-link" onclick="openGitHub(); return false;">GitHub</a>
+                </div>
+            </div>
+
             <div class="settings-group">
                 <h2>Transcription Mode</h2>
                 <div class="mode-selector">

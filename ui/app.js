@@ -76,6 +76,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupModeSelector();
     setupPermissionsListeners();
     setupTauriListeners().catch(e => console.error('Event listeners failed:', e));
+    loadVersionInfo().catch(e => console.error('Failed to load version info:', e));
     await loadConfig();
     await checkPermissions();
     await loadTranscriptions();
@@ -121,6 +122,10 @@ function cacheElements() {
         preprompt3: document.getElementById('preprompt-3'),
         saveSettingsBtn: document.getElementById('save-settings'),
         savePromptsBtn: document.getElementById('save-prompts'),
+        // App info
+        appVersion: document.getElementById('app-version'),
+        appUpdateStatus: document.getElementById('app-update-status'),
+        checkUpdateBtn: document.getElementById('check-update-btn'),
         // Permissions modal
         permissionsModal: document.getElementById('permissions-modal'),
         openSettingsBtn: document.getElementById('open-settings-btn'),
@@ -353,6 +358,32 @@ async function setupTauriListeners() {
             }
         } else {
             console.warn(`[download] progress bar element not found for model=${model_id}`);
+        }
+    });
+
+    // Listen for update-available event from backend
+    await listen('update-available', (event) => {
+        const payload = event.payload;
+        if (payload && payload.version) {
+            setUpdateStatus('update-available', `Update available: v${payload.version}`);
+            showUpdateOverlay(payload);
+        }
+    });
+
+    // Listen for update download/install progress
+    await listen('update-progress', (event) => {
+        const stage = event.payload.stage;
+        const progressText = document.getElementById('update-progress-text');
+        const progressBar = document.getElementById('update-progress-bar');
+        if (stage === 'downloading') {
+            if (progressText) progressText.textContent = 'Downloading update...';
+            if (progressBar) progressBar.style.width = '33%';
+        } else if (stage === 'installing') {
+            if (progressText) progressText.textContent = 'Installing update...';
+            if (progressBar) progressBar.style.width = '66%';
+        } else if (stage === 'restarting') {
+            if (progressText) progressText.textContent = 'Restarting application...';
+            if (progressBar) progressBar.style.width = '100%';
         }
     });
 
@@ -926,4 +957,136 @@ function setupPermissionsListeners() {
         elements.checkAgainBtn.disabled = false;
         elements.checkAgainBtn.textContent = 'Reload and Check';
     });
+}
+
+// ============================================================================
+// Update overlay
+// ============================================================================
+
+function showUpdateOverlay(updateInfo) {
+    const overlay = document.getElementById('update-overlay');
+    const currentVersionEl = document.getElementById('update-current-version');
+    const newVersionEl = document.getElementById('update-new-version');
+
+    if (!overlay) return;
+
+    if (currentVersionEl) {
+        const currentVersion = (updateInfo.current_version)
+            ? updateInfo.current_version
+            : (elements.appVersion ? elements.appVersion.textContent : '—');
+        currentVersionEl.textContent = currentVersion || '—';
+    }
+
+    if (newVersionEl) {
+        const latestVersion = updateInfo.latest_version || updateInfo.version || '—';
+        newVersionEl.textContent = 'v' + latestVersion;
+    }
+
+    window._updateDownloadUrl = updateInfo.download_url || updateInfo.release_url || updateInfo.url || null;
+
+    overlay.style.display = 'flex';
+}
+
+async function installUpdate() {
+    const btn = document.getElementById('update-install-btn');
+    const progressArea = document.getElementById('update-progress');
+    const progressText = document.getElementById('update-progress-text');
+    const url = window._updateDownloadUrl;
+
+    if (!url) {
+        console.error('No download URL available');
+        return;
+    }
+
+    if (btn) {
+        btn.disabled = true;
+    }
+
+    if (progressArea) {
+        progressArea.style.display = '';
+    }
+
+    if (progressText) {
+        progressText.textContent = 'Downloading update...';
+    }
+
+    try {
+        await invoke('install_update', { downloadUrl: url });
+        if (progressText) {
+            progressText.textContent = 'Update installed! Restarting...';
+        }
+    } catch (e) {
+        console.error('Failed to install update:', e);
+        if (progressText) {
+            progressText.textContent = 'Error: ' + e;
+        }
+        if (btn) {
+            btn.disabled = false;
+        }
+    }
+}
+
+// ============================================================================
+// Version info and update checking
+// ============================================================================
+
+async function loadVersionInfo() {
+    try {
+        const info = await invoke('get_version_info');
+        if (info && info.current_version && elements.appVersion) {
+            elements.appVersion.textContent = 'v' + info.current_version;
+        }
+        const updateInfo = info && info.update_info;
+        if (updateInfo && updateInfo.update_available && updateInfo.latest_version) {
+            setUpdateStatus('update-available', `Update available: v${updateInfo.latest_version}`);
+            showUpdateOverlay(updateInfo);
+        }
+    } catch (e) {
+        console.error('Failed to get version info:', e);
+    }
+}
+
+async function checkForUpdate() {
+    const btn = elements.checkUpdateBtn;
+    if (!btn) return;
+
+    btn.disabled = true;
+    btn.textContent = 'Checking...';
+    setUpdateStatus('', '');
+
+    try {
+        const result = await invoke('check_for_update');
+        if (result && result.update_available) {
+            const version = result.latest_version || result.version;
+            setUpdateStatus('update-available', `Update available: v${version}`);
+            showUpdateOverlay(result);
+        } else {
+            setUpdateStatus('up-to-date', 'Up to date \u2713');
+        }
+    } catch (e) {
+        console.error('Failed to check for update:', e);
+        setUpdateStatus('check-failed', 'Check failed');
+        setTimeout(() => setUpdateStatus('', ''), 3000);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Check for updates';
+    }
+}
+
+function setUpdateStatus(className, text) {
+    const el = elements.appUpdateStatus;
+    if (!el) return;
+    el.className = 'app-update-status' + (className ? ' ' + className : '');
+    el.textContent = text;
+}
+
+function setUpdateStatusHtml(className, html) {
+    const el = elements.appUpdateStatus;
+    if (!el) return;
+    el.className = 'app-update-status' + (className ? ' ' + className : '');
+    el.innerHTML = html;
+}
+
+function openGitHub() {
+    window.open('https://github.com/alexmakeev/voice-keyboard', '_blank');
 }

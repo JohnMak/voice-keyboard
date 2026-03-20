@@ -22,6 +22,17 @@ mod audio;
 mod whisper;
 mod debug_log;
 
+/// Information about a software update
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateInfo {
+    pub current_version: String,
+    pub latest_version: String,
+    pub update_available: bool,
+    pub release_url: String,
+    pub download_url: String,
+    pub last_check: String,
+}
+
 // macOS permission check APIs
 #[cfg(target_os = "macos")]
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -56,6 +67,8 @@ struct AppState {
     voice_typer: Arc<Mutex<Option<Child>>>,
     /// Last known status (for polling from frontend)
     last_status: Arc<Mutex<serde_json::Value>>,
+    /// Cached update info from last check
+    update_info: Arc<Mutex<Option<UpdateInfo>>>,
 }
 
 /// A single debug log line with category info
@@ -679,6 +692,440 @@ fn open_privacy_settings() -> Result<(), String> {
 }
 
 // ============================================================================
+// Update check
+// ============================================================================
+
+/// Fetch GitHub releases API and return update info
+async fn do_update_check(current_version: &str) -> Result<UpdateInfo, String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let response = client
+        .get("https://api.github.com/repos/alexmakeev/voice-keyboard/releases/latest")
+        .header("User-Agent", "voice-keyboard-app")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        return Err(format!("GitHub API returned HTTP {}", response.status()));
+    }
+
+    let body = response.text().await.map_err(|e| e.to_string())?;
+    let json: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+
+    let tag_name = json["tag_name"]
+        .as_str()
+        .ok_or_else(|| "Missing tag_name in response".to_string())?;
+
+    let latest_version = tag_name.trim_start_matches('v').to_string();
+
+    let html_url = json["html_url"].as_str().unwrap_or("").to_string();
+
+    // Find platform-specific asset download URL
+    let download_url = {
+        let mut found_url = html_url.clone();
+        if let Some(assets) = json["assets"].as_array() {
+            for asset in assets {
+                let name = asset["name"].as_str().unwrap_or("");
+                let browser_url = asset["browser_download_url"].as_str().unwrap_or("");
+
+                #[cfg(target_os = "macos")]
+                if name.ends_with(".dmg") {
+                    found_url = browser_url.to_string();
+                    break;
+                }
+
+                #[cfg(target_os = "windows")]
+                if name.ends_with(".exe") || name.ends_with(".msi") {
+                    found_url = browser_url.to_string();
+                    break;
+                }
+            }
+        }
+        found_url
+    };
+
+    let current_ver = semver::Version::parse(current_version)
+        .map_err(|e| format!("Invalid current version '{}': {}", current_version, e))?;
+    let latest_ver = semver::Version::parse(&latest_version)
+        .map_err(|e| format!("Invalid latest version '{}': {}", latest_version, e))?;
+
+    let update_available = latest_ver > current_ver;
+    let last_check = chrono::Utc::now().to_rfc3339();
+
+    Ok(UpdateInfo {
+        current_version: current_version.to_string(),
+        latest_version,
+        update_available,
+        release_url: html_url,
+        download_url,
+        last_check,
+    })
+}
+
+/// Get current version and cached update info
+#[tauri::command]
+async fn get_version_info(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let update_info = state.update_info.lock().unwrap().clone();
+    Ok(serde_json::json!({
+        "current_version": current_version,
+        "update_info": update_info,
+    }))
+}
+
+/// Perform an update check and cache the result
+#[tauri::command]
+async fn check_for_update(state: State<'_, AppState>) -> Result<UpdateInfo, String> {
+    let current_version = env!("CARGO_PKG_VERSION");
+    let info = do_update_check(current_version).await?;
+    *state.update_info.lock().unwrap() = Some(info.clone());
+    Ok(info)
+}
+
+/// Download and install a DMG update, then relaunch the app
+#[tauri::command]
+async fn install_update(download_url: String, app_handle: tauri::AppHandle) -> Result<String, String> {
+    tracing::info!("[update] install_update: downloading from {}", download_url);
+
+    // Download DMG to temp directory
+    let temp_dir = std::env::temp_dir();
+    let dmg_path = temp_dir.join("voice-keyboard-update.dmg");
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let response = client
+        .get(&download_url)
+        .send()
+        .await
+        .map_err(|e| format!("Download failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Download HTTP error: {}", response.status()));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read download body: {}", e))?;
+
+    fs::write(&dmg_path, &bytes)
+        .map_err(|e| format!("Failed to write DMG to disk: {}", e))?;
+
+    tracing::info!("[update] DMG downloaded to {}", dmg_path.display());
+
+    // Mount the DMG
+    let attach_output = Command::new("hdiutil")
+        .args(["attach", "-nobrowse", "-noautoopen", dmg_path.to_str().unwrap_or("")])
+        .output()
+        .map_err(|e| {
+            let _ = fs::remove_file(&dmg_path);
+            format!("hdiutil attach failed: {}", e)
+        })?;
+
+    if !attach_output.status.success() {
+        let _ = fs::remove_file(&dmg_path);
+        let stderr = String::from_utf8_lossy(&attach_output.stderr);
+        return Err(format!("hdiutil attach error: {}", stderr));
+    }
+
+    let attach_stdout = String::from_utf8_lossy(&attach_output.stdout);
+    tracing::info!("[update] hdiutil output: {}", attach_stdout);
+
+    // Parse mount point from last line, last tab-separated column
+    let mount_point = attach_stdout
+        .lines()
+        .last()
+        .and_then(|line| line.split('\t').last())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            let _ = fs::remove_file(&dmg_path);
+            "Could not parse mount point from hdiutil output".to_string()
+        })?;
+
+    tracing::info!("[update] Mounted at: {}", mount_point);
+
+    // Find .app in the mounted volume
+    let app_in_dmg = fs::read_dir(&mount_point)
+        .map_err(|e| {
+            let _ = Command::new("hdiutil").args(["detach", &mount_point]).output();
+            let _ = fs::remove_file(&dmg_path);
+            format!("Cannot read mounted volume: {}", e)
+        })?
+        .filter_map(|entry| entry.ok())
+        .find(|entry| {
+            entry.path().extension().map(|ext| ext == "app").unwrap_or(false)
+        })
+        .map(|entry| entry.path())
+        .ok_or_else(|| {
+            let _ = Command::new("hdiutil").args(["detach", &mount_point]).output();
+            let _ = fs::remove_file(&dmg_path);
+            "No .app found in mounted DMG".to_string()
+        })?;
+
+    let new_app_name = app_in_dmg
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Voice Keyboard.app")
+        .to_string();
+
+    tracing::info!("[update] Found app in DMG: {}", new_app_name);
+
+    // Remove old app from /Applications
+    let old_app_path = "/Applications/Voice Keyboard.app";
+    if std::path::Path::new(old_app_path).exists() {
+        let rm_result = Command::new("rm")
+            .args(["-rf", old_app_path])
+            .output();
+        match rm_result {
+            Ok(out) if out.status.success() => {
+                tracing::info!("[update] Removed old app: {}", old_app_path);
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let _ = Command::new("hdiutil").args(["detach", &mount_point]).output();
+                let _ = fs::remove_file(&dmg_path);
+                return Err(format!("Failed to remove old app: {}", stderr));
+            }
+            Err(e) => {
+                let _ = Command::new("hdiutil").args(["detach", &mount_point]).output();
+                let _ = fs::remove_file(&dmg_path);
+                return Err(format!("Failed to remove old app: {}", e));
+            }
+        }
+    }
+
+    // Copy .app to /Applications
+    let new_app_dest = format!("/Applications/{}", new_app_name);
+    let cp_result = Command::new("cp")
+        .args(["-R", app_in_dmg.to_str().unwrap_or(""), &new_app_dest])
+        .output();
+
+    match cp_result {
+        Ok(out) if out.status.success() => {
+            tracing::info!("[update] Copied app to {}", new_app_dest);
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let _ = Command::new("hdiutil").args(["detach", &mount_point]).output();
+            let _ = fs::remove_file(&dmg_path);
+            return Err(format!(
+                "Failed to copy app to /Applications (permission denied?): {}",
+                stderr
+            ));
+        }
+        Err(e) => {
+            let _ = Command::new("hdiutil").args(["detach", &mount_point]).output();
+            let _ = fs::remove_file(&dmg_path);
+            return Err(format!("cp command failed: {}", e));
+        }
+    }
+
+    // Unmount DMG
+    let _ = Command::new("hdiutil")
+        .args(["detach", &mount_point])
+        .output();
+    tracing::info!("[update] Unmounted {}", mount_point);
+
+    // Clean up temp DMG
+    let _ = fs::remove_file(&dmg_path);
+
+    // Relaunch new app and exit current instance
+    tracing::info!("[update] Launching {}", new_app_dest);
+    let _ = Command::new("open")
+        .args(["-n", &new_app_dest])
+        .spawn();
+
+    // Short delay to allow open to start before we exit
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    app_handle.exit(0);
+
+    Ok(format!("Update installed successfully: {}", new_app_name))
+}
+
+/// Combined check + install update command with progress events
+#[tauri::command]
+async fn perform_auto_update(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<String, String> {
+    // Get cached update info or do a fresh check
+    let update_info = {
+        let cached = state.update_info.lock().unwrap().clone();
+        if let Some(info) = cached {
+            info
+        } else {
+            drop(state.update_info.lock().unwrap());
+            let current_version = env!("CARGO_PKG_VERSION");
+            let info = do_update_check(current_version).await?;
+            *state.update_info.lock().unwrap() = Some(info.clone());
+            info
+        }
+    };
+
+    if !update_info.update_available {
+        return Ok("No update available".to_string());
+    }
+
+    let download_url = update_info.download_url.clone();
+
+    // Emit downloading stage
+    let _ = app_handle.emit("update-progress", serde_json::json!({ "stage": "downloading" }));
+    tracing::info!("[update] perform_auto_update: downloading from {}", download_url);
+
+    let temp_dir = std::env::temp_dir();
+    let dmg_path = temp_dir.join("voice-keyboard-update.dmg");
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let response = client
+        .get(&download_url)
+        .send()
+        .await
+        .map_err(|e| format!("Download failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Download HTTP error: {}", response.status()));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read download body: {}", e))?;
+
+    fs::write(&dmg_path, &bytes)
+        .map_err(|e| format!("Failed to write DMG to disk: {}", e))?;
+
+    // Emit installing stage
+    let _ = app_handle.emit("update-progress", serde_json::json!({ "stage": "installing" }));
+    tracing::info!("[update] perform_auto_update: installing");
+
+    // Mount the DMG
+    let attach_output = Command::new("hdiutil")
+        .args(["attach", "-nobrowse", "-noautoopen", dmg_path.to_str().unwrap_or("")])
+        .output()
+        .map_err(|e| {
+            let _ = fs::remove_file(&dmg_path);
+            format!("hdiutil attach failed: {}", e)
+        })?;
+
+    if !attach_output.status.success() {
+        let _ = fs::remove_file(&dmg_path);
+        let stderr = String::from_utf8_lossy(&attach_output.stderr);
+        return Err(format!("hdiutil attach error: {}", stderr));
+    }
+
+    let attach_stdout = String::from_utf8_lossy(&attach_output.stdout);
+    let mount_point = attach_stdout
+        .lines()
+        .last()
+        .and_then(|line| line.split('\t').last())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            let _ = fs::remove_file(&dmg_path);
+            "Could not parse mount point from hdiutil output".to_string()
+        })?;
+
+    // Find .app in mounted volume
+    let app_in_dmg = fs::read_dir(&mount_point)
+        .map_err(|e| {
+            let _ = Command::new("hdiutil").args(["detach", &mount_point]).output();
+            let _ = fs::remove_file(&dmg_path);
+            format!("Cannot read mounted volume: {}", e)
+        })?
+        .filter_map(|entry| entry.ok())
+        .find(|entry| {
+            entry.path().extension().map(|ext| ext == "app").unwrap_or(false)
+        })
+        .map(|entry| entry.path())
+        .ok_or_else(|| {
+            let _ = Command::new("hdiutil").args(["detach", &mount_point]).output();
+            let _ = fs::remove_file(&dmg_path);
+            "No .app found in mounted DMG".to_string()
+        })?;
+
+    let new_app_name = app_in_dmg
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Voice Keyboard.app")
+        .to_string();
+
+    // Remove old app
+    let old_app_path = "/Applications/Voice Keyboard.app";
+    if std::path::Path::new(old_app_path).exists() {
+        let rm_result = Command::new("rm")
+            .args(["-rf", old_app_path])
+            .output();
+        if let Ok(out) = rm_result {
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let _ = Command::new("hdiutil").args(["detach", &mount_point]).output();
+                let _ = fs::remove_file(&dmg_path);
+                return Err(format!("Failed to remove old app: {}", stderr));
+            }
+        }
+    }
+
+    // Copy .app to /Applications
+    let new_app_dest = format!("/Applications/{}", new_app_name);
+    let cp_result = Command::new("cp")
+        .args(["-R", app_in_dmg.to_str().unwrap_or(""), &new_app_dest])
+        .output();
+
+    match cp_result {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let _ = Command::new("hdiutil").args(["detach", &mount_point]).output();
+            let _ = fs::remove_file(&dmg_path);
+            return Err(format!(
+                "Failed to copy app to /Applications (permission denied?): {}",
+                stderr
+            ));
+        }
+        Err(e) => {
+            let _ = Command::new("hdiutil").args(["detach", &mount_point]).output();
+            let _ = fs::remove_file(&dmg_path);
+            return Err(format!("cp command failed: {}", e));
+        }
+    }
+
+    // Unmount and clean up
+    let _ = Command::new("hdiutil")
+        .args(["detach", &mount_point])
+        .output();
+    let _ = fs::remove_file(&dmg_path);
+
+    // Emit restarting stage
+    let _ = app_handle.emit("update-progress", serde_json::json!({ "stage": "restarting" }));
+    tracing::info!("[update] perform_auto_update: restarting with {}", new_app_dest);
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let _ = Command::new("open")
+        .args(["-n", &new_app_dest])
+        .spawn();
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    app_handle.exit(0);
+
+    Ok(format!("Update installed: {}", new_app_name))
+}
+
+// ============================================================================
 // Voice-typer process management
 // ============================================================================
 
@@ -1099,6 +1546,7 @@ fn main() {
         config: Arc::new(Mutex::new(config)),
         voice_typer: Arc::new(Mutex::new(None)),
         last_status: Arc::new(Mutex::new(serde_json::json!({"status": "connecting", "text": "Starting..."}))),
+        update_info: Arc::new(Mutex::new(None)),
     };
 
     tauri::Builder::default()
@@ -1114,6 +1562,31 @@ fn main() {
             let handle = app.handle().clone();
             let state = app.state::<AppState>();
             start_voice_typer(&state, &handle);
+
+            // Background periodic update check
+            {
+                let bg_handle = app.handle().clone();
+                let bg_update_info = app.state::<AppState>().update_info.clone();
+                tauri::async_runtime::spawn(async move {
+                    // Wait 10 seconds after app start before first check
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    loop {
+                        let current_version = env!("CARGO_PKG_VERSION");
+                        match do_update_check(current_version).await {
+                            Ok(info) => {
+                                if info.update_available {
+                                    let _ = bg_handle.emit("update-available", &info);
+                                }
+                                *bg_update_info.lock().unwrap() = Some(info);
+                            }
+                            Err(e) => {
+                                tracing::warn!("[update] Update check failed: {}", e);
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
+                    }
+                });
+            }
 
             // Create tray menu
             let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
@@ -1172,6 +1645,10 @@ fn main() {
             open_privacy_settings,
             restart_voice_typer,
             get_audio_devices,
+            get_version_info,
+            check_for_update,
+            install_update,
+            perform_auto_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
