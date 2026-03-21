@@ -1143,7 +1143,7 @@ fn transcribe_openrouter_single_attempt(
                     "type": "input_audio",
                     "input_audio": {
                         "data": encoded,
-                        "format": "ogg"
+                        "format": "opus"
                     }
                 }
             ]
