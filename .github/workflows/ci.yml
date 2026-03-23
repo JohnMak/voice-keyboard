@@ -94,6 +94,9 @@ jobs:
             pkg-config
 
       - name: Build
+        env:
+          CFLAGS: ${{ startsWith(matrix.target, 'aarch64') && '-march=armv8-a+dotprod' || '' }}
+          CXXFLAGS: ${{ startsWith(matrix.target, 'aarch64') && '-march=armv8-a+dotprod' || '' }}
         run: cargo build --release --bin voice-typer --features whisper --target ${{ matrix.target }}
 
       - name: Run unit tests

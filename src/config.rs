@@ -13,9 +13,9 @@ pub struct Config {
     #[serde(default)]
     pub openai_api_key: Option<String>,
 
-    /// OpenAI API URL (optional, defaults to https://api.openai.com/v1)
-    #[serde(default = "default_openai_api_url")]
-    pub openai_api_url: String,
+    /// OpenAI API URL (optional, falls back to OPENAI_API_URL env var then https://api.openai.com/v1)
+    #[serde(default)]
+    pub openai_api_url: Option<String>,
 
     /// Path to Whisper model file
     pub model_path: PathBuf,
@@ -59,14 +59,22 @@ pub struct Config {
     /// Enable extra hotkeys (Right Cmd = structured, Right Option = translate)
     #[serde(default)]
     pub extra_keys_enabled: bool,
+
+    /// OpenRouter API key (optional, can also use OPENROUTER_API_KEY env var)
+    #[serde(default)]
+    pub openrouter_api_key: String,
+
+    /// OpenRouter model (default: google/gemini-2.5-flash)
+    #[serde(default = "default_openrouter_model")]
+    pub openrouter_model: String,
 }
 
 fn default_language() -> String {
     "auto".to_string()
 }
 
-fn default_openai_api_url() -> String {
-    "https://api.openai.com/v1".to_string()
+fn default_openrouter_model() -> String {
+    "google/gemini-2.5-flash".to_string()
 }
 
 fn default_true() -> bool {
@@ -170,11 +178,21 @@ impl Config {
                     }
                     if let Some(url) = value.get("openai_api_url").and_then(|v| v.as_str()) {
                         if !url.is_empty() {
-                            config.openai_api_url = url.to_string();
+                            config.openai_api_url = Some(url.to_string());
                         }
                     }
                     if let Some(lang) = value.get("language").and_then(|v| v.as_str()) {
                         config.language = lang.to_string();
+                    }
+                    if let Some(key) = value.get("openrouter_api_key").and_then(|v| v.as_str()) {
+                        if !key.is_empty() {
+                            config.openrouter_api_key = key.to_string();
+                        }
+                    }
+                    if let Some(model) = value.get("openrouter_model").and_then(|v| v.as_str()) {
+                        if !model.is_empty() {
+                            config.openrouter_model = model.to_string();
+                        }
                     }
                     Ok(config)
                 }
@@ -239,7 +257,7 @@ impl Default for Config {
 
         Self {
             openai_api_key: None,
-            openai_api_url: default_openai_api_url(),
+            openai_api_url: None,
             model_path: models_dir.join("ggml-large-v3-turbo.bin"),
             model_size: ModelSizeConfig::LargeV3Turbo,
             language: "auto".to_string(),
@@ -251,6 +269,8 @@ impl Default for Config {
             update_channel: UpdateChannel::default(),
             update_url: None,
             extra_keys_enabled: false,
+            openrouter_api_key: String::new(),
+            openrouter_model: default_openrouter_model(),
         }
     }
 }
