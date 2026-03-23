@@ -904,6 +904,7 @@ impl Config {
     }
 }
 
+/// Load CLI config from the TOML file (cross-platform path)
 fn load_config() -> Config {
     let mut config = Config::new();
 
@@ -1164,6 +1165,7 @@ impl OpenAIConfig {
     }
 }
 
+/// Mask an API key for safe logging (show first/last 4 chars only)
 fn mask_api_key(key: &str) -> String {
     let trimmed = key.trim();
     if trimmed.len() <= 8 {
@@ -3599,6 +3601,7 @@ fn start_recording_persistent(
     Ok(stream)
 }
 
+/// Downsample 48 kHz audio to 16 kHz (Whisper's expected sample rate) by taking every 3rd sample
 fn resample_48k_to_16k(samples: &[f32]) -> Vec<f32> {
     samples.iter().step_by(3).copied().collect()
 }

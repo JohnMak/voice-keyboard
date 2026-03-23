@@ -1,3 +1,6 @@
+//! Build script for the Tauri app crate.
+//! Reads APP_VERSION from tauri.conf.json and invokes tauri_build to generate bindings.
+
 use std::fs;
 
 fn main() {

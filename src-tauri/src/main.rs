@@ -166,6 +166,7 @@ pub struct LanguageOption {
     pub native_name: String,
 }
 
+/// Return the list of languages supported by Whisper (shown in the settings UI)
 fn get_available_languages() -> Vec<LanguageOption> {
     vec![
         LanguageOption { code: "en".into(), name: "English".into(), native_name: "English".into() },
@@ -1162,6 +1163,7 @@ async fn relaunch_and_exit(app_handle: &tauri::AppHandle, app_dest: &str) {
     app_handle.exit(0);
 }
 
+/// Download DMG, install the .app bundle and relaunch (macOS-specific update path)
 #[cfg(target_os = "macos")]
 async fn install_update_macos(
     download_url: String,
@@ -1186,6 +1188,7 @@ async fn install_update_macos(
     Ok(format!("Update installed successfully: {}", new_app_dest))
 }
 
+/// Download installer EXE, verify checksum, launch silent NSIS install and exit (Windows-specific)
 #[cfg(target_os = "windows")]
 async fn install_update_windows(
     download_url: String,
@@ -1269,6 +1272,7 @@ async fn perform_auto_update(state: State<'_, AppState>, app_handle: tauri::AppH
     }
 }
 
+/// Download DMG, install, emit progress events and relaunch (macOS auto-update)
 #[cfg(target_os = "macos")]
 async fn perform_auto_update_macos(
     download_url: String,
@@ -1301,6 +1305,7 @@ async fn perform_auto_update_macos(
     Ok(format!("Update installed: {}", new_app_dest))
 }
 
+/// Download installer, launch silent NSIS install and exit (Windows auto-update)
 #[cfg(target_os = "windows")]
 async fn perform_auto_update_windows(
     download_url: String,
@@ -1349,6 +1354,7 @@ async fn perform_auto_update_windows(
 // Voice-typer process management
 // ============================================================================
 
+/// Locate the voice-typer binary by checking VOICE_TYPER_PATH env, then common build output dirs
 fn find_voice_typer_path() -> Result<PathBuf, String> {
     #[cfg(target_os = "windows")]
     const BINARY_NAME: &str = "voice-typer.exe";
@@ -1395,6 +1401,7 @@ fn find_voice_typer_path() -> Result<PathBuf, String> {
     Err("voice-typer not found. Set VOICE_TYPER_PATH to the binary.".to_string())
 }
 
+/// Spawn the voice-typer child process with CLI args derived from AppConfig
 fn spawn_voice_typer(config: &AppConfig) -> Result<Child, String> {
     let path = find_voice_typer_path()?;
 
@@ -1575,6 +1582,7 @@ fn extract_status(line: &str) -> Option<(&'static str, String)> {
     None
 }
 
+/// Emit a status-update event to the frontend and cache the latest status
 fn emit_status(app: &AppHandle, last_status: &Arc<Mutex<serde_json::Value>>, status: &str, text: &str) {
     let payload = serde_json::json!({
         "status": status,
@@ -1584,6 +1592,7 @@ fn emit_status(app: &AppHandle, last_status: &Arc<Mutex<serde_json::Value>>, sta
     let _ = app.emit("status-update", &payload);
 }
 
+/// Store a debug line in memory and emit it to the frontend for real-time display
 fn emit_debug_line(app: &AppHandle, debug_lines: &Arc<Mutex<Vec<DebugLine>>>, line: &str, category: &str) {
     let ts = Local::now().format("%H:%M:%S%.3f").to_string();
     let debug_line = DebugLine {
@@ -1607,6 +1616,7 @@ fn emit_debug_line(app: &AppHandle, debug_lines: &Arc<Mutex<Vec<DebugLine>>>, li
     let _ = app.emit("debug-log", &debug_line);
 }
 
+/// Start the background voice-typer process and begin reading its stdout/stderr
 fn start_voice_typer(state: &AppState, app: &AppHandle) {
     let mut guard = state.voice_typer.lock().unwrap();
     if guard.is_some() {
@@ -1741,6 +1751,7 @@ fn start_voice_typer(state: &AppState, app: &AppHandle) {
     }
 }
 
+/// Kill the background voice-typer process and wait for it to exit
 fn stop_voice_typer(state: &AppState) {
     let mut guard = state.voice_typer.lock().unwrap();
     if let Some(mut child) = guard.take() {
@@ -1914,6 +1925,7 @@ fn main() {
         });
 }
 
+/// Load AppConfig from the platform config directory (falls back to defaults)
 fn load_config() -> AppConfig {
     let config_path = dirs::config_dir()
         .map(|p| p.join("voice-keyboard").join("config.json"));

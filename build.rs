@@ -1,3 +1,6 @@
+//! Build script for the voice-keyboard workspace root crate.
+//! Reads APP_VERSION from src-tauri/tauri.conf.json and sets it as a compile-time env var.
+
 use std::fs;
 
 fn main() {
