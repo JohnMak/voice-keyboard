@@ -293,11 +293,15 @@ impl Updater {
         #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
         return "x86_64-pc-windows-msvc".to_string();
 
+        #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+        return "aarch64-pc-windows-msvc".to_string();
+
         #[cfg(not(any(
             all(target_os = "macos", target_arch = "aarch64"),
             all(target_os = "macos", target_arch = "x86_64"),
             all(target_os = "linux", target_arch = "x86_64"),
             all(target_os = "windows", target_arch = "x86_64"),
+            all(target_os = "windows", target_arch = "aarch64"),
         )))]
         return "unknown".to_string();
     }

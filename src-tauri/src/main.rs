@@ -739,8 +739,14 @@ async fn do_update_check(current_version: &str) -> Result<UpdateInfo, String> {
                     break;
                 }
 
-                #[cfg(target_os = "windows")]
-                if name.ends_with(".exe") || name.ends_with(".msi") {
+                #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+                if name.contains("x64-setup.exe") {
+                    found_url = browser_url.to_string();
+                    break;
+                }
+
+                #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+                if name.contains("arm64-setup.exe") {
                     found_url = browser_url.to_string();
                     break;
                 }
@@ -787,11 +793,24 @@ async fn check_for_update(state: State<'_, AppState>) -> Result<UpdateInfo, Stri
     Ok(info)
 }
 
-/// Download and install a DMG update, then relaunch the app
+/// Download and install an update, then relaunch the app
 #[tauri::command]
 async fn install_update(download_url: String, app_handle: tauri::AppHandle) -> Result<String, String> {
     tracing::info!("[update] install_update: downloading from {}", download_url);
 
+    #[cfg(target_os = "macos")]
+    {
+        install_update_macos(download_url, app_handle).await
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        install_update_windows(download_url, app_handle).await
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn install_update_macos(download_url: String, app_handle: tauri::AppHandle) -> Result<String, String> {
     // Download DMG to temp directory
     let temp_dir = std::env::temp_dir();
     let dmg_path = temp_dir.join("voice-keyboard-update.dmg");
@@ -953,6 +972,56 @@ async fn install_update(download_url: String, app_handle: tauri::AppHandle) -> R
     Ok(format!("Update installed successfully: {}", new_app_name))
 }
 
+#[cfg(target_os = "windows")]
+async fn install_update_windows(download_url: String, app_handle: tauri::AppHandle) -> Result<String, String> {
+    // Download NSIS installer to temp directory
+    let temp_dir = std::env::temp_dir();
+    let installer_path = temp_dir.join("voice-keyboard-update.exe");
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let response = client
+        .get(&download_url)
+        .send()
+        .await
+        .map_err(|e| format!("Download failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Download HTTP error: {}", response.status()));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read download body: {}", e))?;
+
+    fs::write(&installer_path, &bytes)
+        .map_err(|e| format!("Failed to write installer to disk: {}", e))?;
+
+    tracing::info!("[update] Installer downloaded to {}", installer_path.display());
+
+    // Launch the NSIS installer with /S (silent install)
+    Command::new(&installer_path)
+        .arg("/S")
+        .spawn()
+        .map_err(|e| {
+            let _ = fs::remove_file(&installer_path);
+            format!("Failed to launch installer: {}", e)
+        })?;
+
+    tracing::info!("[update] Installer launched, exiting current instance");
+
+    // Give the installer a moment to start before exiting
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Exit current app so installer can replace files
+    std::process::exit(0);
+}
+
 /// Combined check + install update command with progress events
 #[tauri::command]
 async fn perform_auto_update(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<String, String> {
@@ -980,6 +1049,19 @@ async fn perform_auto_update(state: State<'_, AppState>, app_handle: tauri::AppH
     let _ = app_handle.emit("update-progress", serde_json::json!({ "stage": "downloading" }));
     tracing::info!("[update] perform_auto_update: downloading from {}", download_url);
 
+    #[cfg(target_os = "macos")]
+    {
+        perform_auto_update_macos(download_url, app_handle).await
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        perform_auto_update_windows(download_url, app_handle).await
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn perform_auto_update_macos(download_url: String, app_handle: tauri::AppHandle) -> Result<String, String> {
     let temp_dir = std::env::temp_dir();
     let dmg_path = temp_dir.join("voice-keyboard-update.dmg");
 
@@ -1123,6 +1205,59 @@ async fn perform_auto_update(state: State<'_, AppState>, app_handle: tauri::AppH
     app_handle.exit(0);
 
     Ok(format!("Update installed: {}", new_app_name))
+}
+
+#[cfg(target_os = "windows")]
+async fn perform_auto_update_windows(download_url: String, app_handle: tauri::AppHandle) -> Result<String, String> {
+    let temp_dir = std::env::temp_dir();
+    let installer_path = temp_dir.join("voice-keyboard-update.exe");
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let response = client
+        .get(&download_url)
+        .send()
+        .await
+        .map_err(|e| format!("Download failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Download HTTP error: {}", response.status()));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read download body: {}", e))?;
+
+    fs::write(&installer_path, &bytes)
+        .map_err(|e| format!("Failed to write installer to disk: {}", e))?;
+
+    // Emit installing stage
+    let _ = app_handle.emit("update-progress", serde_json::json!({ "stage": "installing" }));
+    tracing::info!("[update] perform_auto_update: launching installer {}", installer_path.display());
+
+    // Launch NSIS installer with /S (silent install)
+    Command::new(&installer_path)
+        .arg("/S")
+        .spawn()
+        .map_err(|e| {
+            let _ = fs::remove_file(&installer_path);
+            format!("Failed to launch installer: {}", e)
+        })?;
+
+    // Emit restarting stage
+    let _ = app_handle.emit("update-progress", serde_json::json!({ "stage": "restarting" }));
+    tracing::info!("[update] perform_auto_update: installer launched, exiting");
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Exit current app so installer can replace files
+    // NSIS installer will relaunch the app after installation
+    std::process::exit(0);
 }
 
 // ============================================================================
