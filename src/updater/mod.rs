@@ -54,7 +54,7 @@ impl Updater {
     /// Create new updater instance
     pub fn new(config: &Config, data_dir: PathBuf) -> Result<Self> {
         let current_version =
-            Version::parse(env!("CARGO_PKG_VERSION")).context("Failed to parse current version")?;
+            Version::parse(env!("APP_VERSION")).context("Failed to parse current version")?;
 
         let logger = UpdateLogger::new(data_dir.join("logs.txt"))?;
 

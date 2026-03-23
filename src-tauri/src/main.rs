@@ -776,7 +776,7 @@ async fn do_update_check(current_version: &str) -> Result<UpdateInfo, String> {
 /// Get current version and cached update info
 #[tauri::command]
 async fn get_version_info(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let current_version = env!("APP_VERSION").to_string();
     let update_info = state.update_info.lock().unwrap().clone();
     Ok(serde_json::json!({
         "current_version": current_version,
@@ -787,7 +787,7 @@ async fn get_version_info(state: State<'_, AppState>) -> Result<serde_json::Valu
 /// Perform an update check and cache the result
 #[tauri::command]
 async fn check_for_update(state: State<'_, AppState>) -> Result<UpdateInfo, String> {
-    let current_version = env!("CARGO_PKG_VERSION");
+    let current_version = env!("APP_VERSION");
     let info = do_update_check(current_version).await?;
     *state.update_info.lock().unwrap() = Some(info.clone());
     Ok(info)
@@ -1032,7 +1032,7 @@ async fn perform_auto_update(state: State<'_, AppState>, app_handle: tauri::AppH
             info
         } else {
             drop(state.update_info.lock().unwrap());
-            let current_version = env!("CARGO_PKG_VERSION");
+            let current_version = env!("APP_VERSION");
             let info = do_update_check(current_version).await?;
             *state.update_info.lock().unwrap() = Some(info.clone());
             info
@@ -1706,7 +1706,7 @@ fn main() {
                     // Wait 10 seconds after app start before first check
                     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                     loop {
-                        let current_version = env!("CARGO_PKG_VERSION");
+                        let current_version = env!("APP_VERSION");
                         match do_update_check(current_version).await {
                             Ok(info) => {
                                 if info.update_available {

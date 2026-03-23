@@ -1547,7 +1547,7 @@ fn get_model_path(model_arg: Option<String>) -> PathBuf {
 }
 
 fn print_version() {
-    const VERSION: &str = env!("CARGO_PKG_VERSION");
+    const VERSION: &str = env!("APP_VERSION");
     const NAME: &str = env!("CARGO_PKG_NAME");
     println!("{} {}", NAME, VERSION);
     println!();
