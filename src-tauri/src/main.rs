@@ -752,6 +752,15 @@ async fn do_update_check(current_version: &str) -> Result<UpdateInfo, String> {
                     found_url = browser_url.to_string();
                     break;
                 }
+
+                #[cfg(target_os = "linux")]
+                if name.ends_with(".AppImage")
+                    || name.ends_with(".deb")
+                    || name.ends_with(".tar.gz")
+                {
+                    found_url = browser_url.to_string();
+                    break;
+                }
             }
         }
         found_url

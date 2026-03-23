@@ -52,7 +52,7 @@ base64 = "0.22"
 
 # Cross-platform audio and input
 cpal = "0.15"           # Audio recording (CoreAudio/ALSA/WASAPI)
-rdev = { version = "0.5", features = [] }  # Global hotkeys; unstable_grab added per-platform below
+rdev = { version = "0.5", default-features = false }  # Global hotkeys; unstable_grab added per-platform below
 enigo = "0.2"           # Keyboard simulation
 
 # GUI dependencies (optional, enabled with --features gui)
@@ -117,6 +117,9 @@ path = "src/bin/voice_typer.rs"
 name = "voice-typer-launcher"
 path = "src/bin/launcher.rs"
 required-features = ["updater"]
+
+[build-dependencies]
+serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"
