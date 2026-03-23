@@ -996,8 +996,30 @@ async fn download_and_verify(
     Ok(())
 }
 
-/// Mount a DMG, replace the .app in /Applications, unmount and clean up.
-/// Returns the installed app name (e.g. "Voice Keyboard.app").
+/// Detect the directory containing the currently running .app bundle.
+/// Falls back to "/Applications" if detection fails.
+#[cfg(target_os = "macos")]
+fn get_current_app_dir() -> String {
+    if let Ok(exe) = std::env::current_exe() {
+        let mut path = exe.as_path();
+        // On macOS, exe is at: /path/to/App.app/Contents/MacOS/binary
+        // Walk up to find the .app bundle, then return its parent directory.
+        while let Some(parent) = path.parent() {
+            if path.extension().map_or(false, |ext| ext == "app") {
+                if let Some(app_dir) = parent.to_str() {
+                    tracing::info!("[update] Detected app directory: {}", app_dir);
+                    return app_dir.to_string();
+                }
+            }
+            path = parent;
+        }
+    }
+    tracing::info!("[update] Could not detect app directory, using /Applications");
+    "/Applications".to_string()
+}
+
+/// Mount a DMG, replace the .app in the detected install directory, unmount and clean up.
+/// Returns the full destination path of the installed app (e.g. "/Applications/Voice Keyboard.app").
 #[cfg(target_os = "macos")]
 fn install_app_from_dmg(dmg_path: &std::path::Path) -> Result<String, String> {
     // Mount the DMG
@@ -1062,11 +1084,14 @@ fn install_app_from_dmg(dmg_path: &std::path::Path) -> Result<String, String> {
 
     tracing::info!("[update] Found app in DMG: {}", new_app_name);
 
-    // Remove old app from /Applications
-    let old_app_path = "/Applications/Voice Keyboard.app";
-    if std::path::Path::new(old_app_path).exists() {
+    // Detect the directory where the current app is installed
+    let install_dir = get_current_app_dir();
+
+    // Remove old app from the install directory
+    let old_app_path = format!("{}/Voice Keyboard.app", install_dir);
+    if std::path::Path::new(&old_app_path).exists() {
         let rm_result = Command::new("rm")
-            .args(["-rf", old_app_path])
+            .args(["-rf", &old_app_path])
             .output();
         match rm_result {
             Ok(out) if out.status.success() => {
@@ -1084,8 +1109,8 @@ fn install_app_from_dmg(dmg_path: &std::path::Path) -> Result<String, String> {
         }
     }
 
-    // Copy .app to /Applications
-    let new_app_dest = format!("/Applications/{}", new_app_name);
+    // Copy .app to the install directory
+    let new_app_dest = format!("{}/{}", install_dir, new_app_name);
     let cp_result = Command::new("cp")
         .args(["-R", app_in_dmg.to_str().unwrap_or(""), &new_app_dest])
         .output();
@@ -1098,7 +1123,8 @@ fn install_app_from_dmg(dmg_path: &std::path::Path) -> Result<String, String> {
             let stderr = String::from_utf8_lossy(&out.stderr);
             cleanup(&mount_point, dmg_path);
             return Err(format!(
-                "Failed to copy app to /Applications (permission denied?): {}",
+                "Failed to copy app to {} (permission denied?): {}",
+                new_app_dest,
                 stderr
             ));
         }
@@ -1115,7 +1141,7 @@ fn install_app_from_dmg(dmg_path: &std::path::Path) -> Result<String, String> {
     tracing::info!("[update] Unmounted {}", mount_point);
     let _ = fs::remove_file(dmg_path);
 
-    Ok(new_app_name)
+    Ok(new_app_dest)
 }
 
 /// Relaunch the new app and exit the current instance
@@ -1148,12 +1174,11 @@ async fn install_update_macos(
         asset_filename.as_deref(),
     ).await?;
 
-    let new_app_name = install_app_from_dmg(&dmg_path)?;
-    let new_app_dest = format!("/Applications/{}", new_app_name);
+    let new_app_dest = install_app_from_dmg(&dmg_path)?;
 
     relaunch_and_exit(&app_handle, &new_app_dest).await;
 
-    Ok(format!("Update installed successfully: {}", new_app_name))
+    Ok(format!("Update installed successfully: {}", new_app_dest))
 }
 
 #[cfg(target_os = "windows")]
@@ -1258,8 +1283,7 @@ async fn perform_auto_update_macos(
     let _ = app_handle.emit("update-progress", serde_json::json!({ "stage": "installing" }));
     tracing::info!("[update] perform_auto_update: installing");
 
-    let new_app_name = install_app_from_dmg(&dmg_path)?;
-    let new_app_dest = format!("/Applications/{}", new_app_name);
+    let new_app_dest = install_app_from_dmg(&dmg_path)?;
 
     // Emit restarting stage
     let _ = app_handle.emit("update-progress", serde_json::json!({ "stage": "restarting" }));
@@ -1267,7 +1291,7 @@ async fn perform_auto_update_macos(
 
     relaunch_and_exit(&app_handle, &new_app_dest).await;
 
-    Ok(format!("Update installed: {}", new_app_name))
+    Ok(format!("Update installed: {}", new_app_dest))
 }
 
 #[cfg(target_os = "windows")]

@@ -239,6 +239,139 @@ impl<F: FnOnce()> SendCallback<F> {
     }
 }
 
+/// Start the platform-specific hotkey listener.
+///
+/// On macOS: uses `rdev::grab()` to intercept keyboard events, suppressing digit keys
+/// (1/2/3) while recording to prevent them from leaking into the active application.
+/// The callback is offloaded to a worker thread via a channel so the grab_fn returns
+/// immediately (rdev::grab blocks the keyboard until the callback returns).
+///
+/// On other platforms: uses `rdev::listen()` without key suppression.
+///
+/// Additionally, a 120-second recording timeout is enforced inside the grab_fn:
+/// if the recording state has been active for over 120 seconds (e.g., due to a lost
+/// key-release event), it is force-reset to Idle on any keyboard activity.
+///
+/// # Parameters
+/// - `state`: shared recording state for digit suppression and timeout checks
+/// - `recording_start`: timestamp of when recording started (for timeout detection)
+/// - `is_recording`: atomic flag for instant recording stop
+/// - `persistent_stream`: audio stream to pause on timeout recovery
+/// - `volume_controller`: to restore system volume on timeout recovery
+/// - `callback`: the event handler closure (different for each runner)
+#[allow(unused_variables)]
+fn start_hotkey_listener(
+    state: Arc<Mutex<RecordingState>>,
+    recording_start: Arc<Mutex<Option<Instant>>>,
+    is_recording: Arc<std::sync::atomic::AtomicBool>,
+    persistent_stream: Arc<Mutex<Option<cpal::Stream>>>,
+    volume_controller: Arc<voice_keyboard::volume::VolumeController>,
+    callback: impl FnMut(Event) + 'static,
+) {
+    #[cfg(target_os = "macos")]
+    {
+        let state_for_grab = Arc::clone(&state);
+        let recording_start_for_grab = Arc::clone(&recording_start);
+        let is_recording_for_grab = Arc::clone(&is_recording);
+        let persistent_stream_for_grab = Arc::clone(&persistent_stream);
+        let volume_controller_for_grab = Arc::clone(&volume_controller);
+
+        // Channel to offload heavy callback work from the grab_fn.
+        // rdev::grab blocks macOS keyboard input until the callback returns,
+        // so grab_fn must return immediately with just the suppress decision.
+        let (event_tx, event_rx) = std::sync::mpsc::channel::<Event>();
+
+        // Worker thread: receives events and runs the (heavy) callback.
+        // SendCallback is needed because `callback` captures cpal::Stream (via Arc<Mutex>)
+        // which is !Send. Access is safe — see SendCallback docs above.
+        #[allow(unused_mut)]
+        let mut callback = callback;
+        let send_worker = SendCallback(move || {
+            while let Ok(event) = event_rx.recv() {
+                callback(event);
+            }
+        });
+        thread::spawn(move || send_worker.run());
+
+        let grab_fn = move |event: Event| -> Option<Event> {
+            // Recording timeout: force-stop if recording has been active for over 120 seconds.
+            // This check runs on every key event, so ANY keyboard activity triggers recovery.
+            {
+                let rec_state = state_for_grab.lock().unwrap();
+                if *rec_state == RecordingState::Recording {
+                    let timed_out = recording_start_for_grab
+                        .lock()
+                        .unwrap()
+                        .map(|start| start.elapsed() > Duration::from_secs(120))
+                        .unwrap_or(false);
+                    if timed_out {
+                        drop(rec_state);
+                        eprintln!(
+                            "[{}] WARNING: Recording timeout (120s) — force-stopping stuck recording",
+                            timestamp()
+                        );
+                        is_recording_for_grab.store(false, std::sync::atomic::Ordering::SeqCst);
+                        let mut rec_state = state_for_grab.lock().unwrap();
+                        *rec_state = RecordingState::Idle;
+                        *recording_start_for_grab.lock().unwrap() = None;
+                        drop(rec_state);
+
+                        // Pause audio stream
+                        {
+                            let stream_guard = persistent_stream_for_grab.lock().unwrap();
+                            if let Some(ref stream) = *stream_guard {
+                                let _ = stream.pause();
+                            }
+                        }
+
+                        // Restore system volume
+                        volume_controller_for_grab.restore();
+
+                        // Still forward the event to the worker thread
+                        let _ = event_tx.send(event.clone());
+                        return Some(event);
+                    }
+                }
+            }
+
+            let suppress = matches!(
+                event.event_type,
+                EventType::KeyPress(Key::Num1 | Key::Num2 | Key::Num3)
+                    | EventType::KeyRelease(Key::Num1 | Key::Num2 | Key::Num3)
+            ) && *state_for_grab.lock().unwrap() == RecordingState::Recording;
+
+            // Send event to worker thread for processing (non-blocking)
+            let _ = event_tx.send(event.clone());
+            if suppress { None } else { Some(event) }
+        };
+        if let Err(e) = grab(grab_fn) {
+            eprintln!("Error: {:?}", e);
+            eprintln!("\nGrant Input Monitoring permission:");
+            eprintln!("System Settings → Privacy & Security → Input Monitoring");
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Err(e) = listen(callback) {
+            eprintln!("Error: {:?}", e);
+
+            #[cfg(target_os = "linux")]
+            {
+                eprintln!();
+                eprintln!("On Linux, make sure you have the necessary permissions.");
+                eprintln!("Try running with sudo or adding your user to the 'input' group:");
+                eprintln!("  sudo usermod -aG input $USER");
+                eprintln!("Then log out and back in.");
+            }
+
+            #[cfg(target_os = "windows")]
+            {
+                eprintln!("\nOn Windows, try running as Administrator.");
+            }
+        }
+    }
+}
+
 /// Text input method
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum InputMethod {
@@ -1778,6 +1911,9 @@ const PREPROMPT_NO_PREAMBLE_SUFFIX: &str = "\n\nIMPORTANT: Return ONLY the resul
 
 /// Wrap a user-configured preprompt with the no-preamble instruction.
 fn wrap_preprompt(preprompt: &str) -> String {
+    if preprompt.is_empty() {
+        return String::new();
+    }
     format!("{}{}", preprompt, PREPROMPT_NO_PREAMBLE_SUFFIX)
 }
 
@@ -5704,44 +5840,9 @@ fn run_openai(
     let callback = move |event: Event| {
         use std::sync::atomic::Ordering;
 
-        // Max recording timeout: force-stop if recording has been active for over 120 seconds.
-        // This check runs on every key event, so ANY keyboard activity will trigger recovery.
-        {
-            let rec_state = state_clone.lock().unwrap();
-            if *rec_state == RecordingState::Recording {
-                let timed_out = recording_start_clone
-                    .lock()
-                    .unwrap()
-                    .map(|start| start.elapsed() > Duration::from_secs(120))
-                    .unwrap_or(false);
-                if timed_out {
-                    drop(rec_state);
-                    eprintln!(
-                        "[{}] WARNING: Recording timeout (120s) — force-stopping stuck recording",
-                        timestamp()
-                    );
-                    is_recording_clone.store(false, Ordering::SeqCst);
-                    let mut rec_state = state_clone.lock().unwrap();
-                    *rec_state = RecordingState::Idle;
-                    drop(rec_state);
-
-                    // Pause audio stream
-                    {
-                        let stream_guard = persistent_stream_clone.lock().unwrap();
-                        if let Some(ref stream) = *stream_guard {
-                            let _ = stream.pause();
-                        }
-                    }
-
-                    // Restore system volume
-                    volume_controller_clone.restore();
-
-                    // Reset debounce
-                    key_debounce_clone.store(false, Ordering::SeqCst);
-                    return;
-                }
-            }
-        }
+        // NOTE: Recording timeout (120s) is handled by start_hotkey_listener's grab_fn.
+        // It resets state to Idle, pauses the stream, and restores volume before the
+        // event reaches this callback.
 
         match event.event_type {
             EventType::KeyPress(key)
@@ -6187,50 +6288,14 @@ fn run_openai(
         println!("");
     }
 
-    // On macOS use grab() to suppress digit keys during recording so they don't
-    // leak into the active application. On other platforms fall back to listen().
-    #[cfg(target_os = "macos")]
-    {
-        let state_for_grab = Arc::clone(&state);
-
-        // Channel to offload heavy callback work from the grab_fn.
-        // rdev::grab blocks macOS keyboard input until the callback returns,
-        // so grab_fn must return immediately with just the suppress decision.
-        let (event_tx, event_rx) = std::sync::mpsc::channel::<Event>();
-
-        // Worker thread: receives events and runs the (heavy) callback.
-        // SendCallback is needed because `callback` captures cpal::Stream (via Arc<Mutex>)
-        // which is !Send. Access is safe — see SendCallback docs above.
-        #[allow(unused_mut)]
-        let mut callback = callback;
-        let send_worker = SendCallback(move || {
-            while let Ok(event) = event_rx.recv() {
-                callback(event);
-            }
-        });
-        thread::spawn(move || send_worker.run());
-
-        let grab_fn = move |event: Event| -> Option<Event> {
-            let suppress = matches!(
-                event.event_type,
-                EventType::KeyPress(Key::Num1 | Key::Num2 | Key::Num3)
-                    | EventType::KeyRelease(Key::Num1 | Key::Num2 | Key::Num3)
-            ) && *state_for_grab.lock().unwrap() == RecordingState::Recording;
-
-            // Send event to worker thread for processing (non-blocking)
-            let _ = event_tx.send(event.clone());
-            if suppress { None } else { Some(event) }
-        };
-        if let Err(e) = grab(grab_fn) {
-            eprintln!("Error: {:?}", e);
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        if let Err(e) = listen(callback) {
-            eprintln!("Error: {:?}", e);
-        }
-    }
+    start_hotkey_listener(
+        Arc::clone(&state),
+        Arc::clone(&recording_start),
+        Arc::clone(&is_recording),
+        Arc::clone(&persistent_stream),
+        Arc::clone(&volume_controller),
+        callback,
+    );
 }
 
 // ============================================================================
@@ -6744,64 +6809,14 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
         VAD_SILENCE_MS
     );
 
-    // On macOS use grab() to suppress digit keys during recording so they don't
-    // leak into the active application. On other platforms fall back to listen().
-    #[cfg(target_os = "macos")]
-    {
-        let state_for_grab = Arc::clone(&state);
-
-        // Channel to offload heavy callback work from the grab_fn.
-        // rdev::grab blocks macOS keyboard input until the callback returns,
-        // so grab_fn must return immediately with just the suppress decision.
-        let (event_tx, event_rx) = std::sync::mpsc::channel::<Event>();
-
-        // Worker thread: receives events and runs the (heavy) callback.
-        // SendCallback is needed because `callback` captures cpal::Stream (via Arc<Mutex>)
-        // which is !Send. Access is safe — see SendCallback docs above.
-        let callback = callback;
-        let send_worker = SendCallback(move || {
-            while let Ok(event) = event_rx.recv() {
-                callback(event);
-            }
-        });
-        thread::spawn(move || send_worker.run());
-
-        let grab_fn = move |event: Event| -> Option<Event> {
-            let suppress = matches!(
-                event.event_type,
-                EventType::KeyPress(Key::Num1 | Key::Num2 | Key::Num3)
-                    | EventType::KeyRelease(Key::Num1 | Key::Num2 | Key::Num3)
-            ) && *state_for_grab.lock().unwrap() == RecordingState::Recording;
-
-            // Send event to worker thread for processing (non-blocking)
-            let _ = event_tx.send(event.clone());
-            if suppress { None } else { Some(event) }
-        };
-        if let Err(e) = grab(grab_fn) {
-            eprintln!("Error: {:?}", e);
-            eprintln!("\nGrant Input Monitoring permission:");
-            eprintln!("System Settings → Privacy & Security → Input Monitoring");
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        if let Err(e) = listen(callback) {
-            eprintln!("Error: {:?}", e);
-
-            #[cfg(target_os = "linux")]
-            {
-                eprintln!("\nOn Linux, you may need to:");
-                eprintln!("1. Run with sudo, OR");
-                eprintln!("2. Add yourself to the 'input' group:");
-                eprintln!("   sudo usermod -aG input $USER && newgrp input");
-            }
-
-            #[cfg(target_os = "windows")]
-            {
-                eprintln!("\nOn Windows, try running as Administrator.");
-            }
-        }
-    }
+    start_hotkey_listener(
+        Arc::clone(&state),
+        Arc::clone(&recording_start),
+        Arc::clone(&is_recording_flag),
+        Arc::clone(&persistent_stream),
+        Arc::clone(&volume_controller),
+        callback,
+    );
 }
 
 // ============================================================================
@@ -7090,57 +7105,14 @@ fn run_openrouter(
     #[cfg(not(feature = "opus"))]
     println!("WARNING: OpenRouter mode requires --features opus for OGG/Opus encoding");
 
-    // On macOS use grab() to suppress digit keys during recording so they don't
-    // leak into the active application. On other platforms fall back to listen().
-    #[cfg(target_os = "macos")]
-    {
-        let state_for_grab = Arc::clone(&state);
-
-        // Channel to offload heavy callback work from the grab_fn.
-        // rdev::grab blocks macOS keyboard input until the callback returns,
-        // so grab_fn must return immediately with just the suppress decision.
-        let (event_tx, event_rx) = std::sync::mpsc::channel::<Event>();
-
-        // Worker thread: receives events and runs the (heavy) callback.
-        let callback = callback;
-        let send_worker = SendCallback(move || {
-            while let Ok(event) = event_rx.recv() {
-                callback(event);
-            }
-        });
-        thread::spawn(move || send_worker.run());
-
-        let grab_fn = move |event: Event| -> Option<Event> {
-            let suppress = matches!(
-                event.event_type,
-                EventType::KeyPress(Key::Num1 | Key::Num2 | Key::Num3)
-                    | EventType::KeyRelease(Key::Num1 | Key::Num2 | Key::Num3)
-            ) && *state_for_grab.lock().unwrap() == RecordingState::Recording;
-
-            // Send event to worker thread for processing (non-blocking)
-            let _ = event_tx.send(event.clone());
-            if suppress { None } else { Some(event) }
-        };
-        if let Err(e) = grab(grab_fn) {
-            eprintln!("Error: {:?}", e);
-            eprintln!("\nGrant Input Monitoring permission:");
-            eprintln!("System Settings → Privacy & Security → Input Monitoring");
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        if let Err(e) = listen(callback) {
-            eprintln!("Error: {:?}", e);
-            #[cfg(target_os = "linux")]
-            {
-                eprintln!();
-                eprintln!("On Linux, make sure you have the necessary permissions.");
-                eprintln!("Try running with sudo or adding your user to the 'input' group:");
-                eprintln!("  sudo usermod -aG input $USER");
-                eprintln!("Then log out and back in.");
-            }
-        }
-    }
+    start_hotkey_listener(
+        Arc::clone(&state),
+        Arc::clone(&recording_start),
+        Arc::clone(&is_recording),
+        Arc::clone(&persistent_stream),
+        Arc::clone(&volume_controller),
+        callback,
+    );
 }
 
 /// Cloud transcription with primary + fallback backends.
@@ -7466,57 +7438,14 @@ fn run_cloud(
         fallback_name
     );
 
-    // On macOS use grab() to suppress digit keys during recording so they don't
-    // leak into the active application. On other platforms fall back to listen().
-    #[cfg(target_os = "macos")]
-    {
-        let state_for_grab = Arc::clone(&state);
-
-        // Channel to offload heavy callback work from the grab_fn.
-        // rdev::grab blocks macOS keyboard input until the callback returns,
-        // so grab_fn must return immediately with just the suppress decision.
-        let (event_tx, event_rx) = std::sync::mpsc::channel::<Event>();
-
-        // Worker thread: receives events and runs the (heavy) callback.
-        let callback = callback;
-        let send_worker = SendCallback(move || {
-            while let Ok(event) = event_rx.recv() {
-                callback(event);
-            }
-        });
-        thread::spawn(move || send_worker.run());
-
-        let grab_fn = move |event: Event| -> Option<Event> {
-            let suppress = matches!(
-                event.event_type,
-                EventType::KeyPress(Key::Num1 | Key::Num2 | Key::Num3)
-                    | EventType::KeyRelease(Key::Num1 | Key::Num2 | Key::Num3)
-            ) && *state_for_grab.lock().unwrap() == RecordingState::Recording;
-
-            // Send event to worker thread for processing (non-blocking)
-            let _ = event_tx.send(event.clone());
-            if suppress { None } else { Some(event) }
-        };
-        if let Err(e) = grab(grab_fn) {
-            eprintln!("Error: {:?}", e);
-            eprintln!("\nGrant Input Monitoring permission:");
-            eprintln!("System Settings → Privacy & Security → Input Monitoring");
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        if let Err(e) = listen(callback) {
-            eprintln!("Error: {:?}", e);
-            #[cfg(target_os = "linux")]
-            {
-                eprintln!();
-                eprintln!("On Linux, make sure you have the necessary permissions.");
-                eprintln!("Try running with sudo or adding your user to the 'input' group:");
-                eprintln!("  sudo usermod -aG input $USER");
-                eprintln!("Then log out and back in.");
-            }
-        }
-    }
+    start_hotkey_listener(
+        Arc::clone(&state),
+        Arc::clone(&recording_start),
+        Arc::clone(&is_recording),
+        Arc::clone(&persistent_stream),
+        Arc::clone(&volume_controller),
+        callback,
+    );
 }
 
 #[cfg(test)]
