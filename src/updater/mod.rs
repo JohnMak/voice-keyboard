@@ -15,7 +15,7 @@ use semver::Version;
 use sha2::{Sha256, Digest};
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 
 /// GitHub repository owner
@@ -319,22 +319,21 @@ impl Updater {
         return "voice-typer".to_string();
     }
 
-    /// Download a file from URL
+    /// Download a file from URL (streams to disk without buffering entire file in memory)
     fn download_file(&self, url: &str, dest: &Path) -> Result<()> {
         let client = reqwest::blocking::Client::builder()
             .user_agent("voice-keyboard-updater")
             .timeout(std::time::Duration::from_secs(300))
             .build()?;
 
-        let response = client.get(url).send()?;
+        let mut response = client.get(url).send()?;
 
         if !response.status().is_success() {
             return Err(anyhow!("Download failed: {}", response.status()));
         }
 
         let mut file = File::create(dest)?;
-        let content = response.bytes()?;
-        file.write_all(&content)?;
+        io::copy(&mut response, &mut file)?;
 
         Ok(())
     }

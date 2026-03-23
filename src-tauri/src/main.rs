@@ -14,9 +14,11 @@ use serde::{Deserialize, Serialize};
 use tauri::{
     AppHandle, Manager, State,
     menu::{Menu, MenuItem},
-    tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
+    tray::TrayIconBuilder,
     Emitter,
 };
+#[cfg(not(target_os = "macos"))]
+use tauri::tray::{MouseButton, TrayIconEvent};
 
 mod audio;
 mod whisper;
@@ -861,13 +863,14 @@ async fn install_update(
 
 /// Download a file from URL to a local path
 async fn download_update_file(url: &str, dest: &std::path::Path) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
-        .timeout(std::time::Duration::from_secs(600))
         .build()
         .map_err(|e| e.to_string())?;
 
-    let response = client
+    let mut response = client
         .get(url)
         .send()
         .await
@@ -877,13 +880,14 @@ async fn download_update_file(url: &str, dest: &std::path::Path) -> Result<(), S
         return Err(format!("Download HTTP error: {}", response.status()));
     }
 
-    let bytes = response
-        .bytes()
+    let mut file = tokio::fs::File::create(dest)
         .await
-        .map_err(|e| format!("Failed to read download body: {}", e))?;
+        .map_err(|e| format!("Failed to create file: {}", e))?;
 
-    fs::write(dest, &bytes)
-        .map_err(|e| format!("Failed to write file to disk: {}", e))?;
+    while let Some(chunk) = response.chunk().await.map_err(|e| format!("Failed to read download chunk: {}", e))? {
+        file.write_all(&chunk).await.map_err(|e| format!("Failed to write chunk to disk: {}", e))?;
+    }
+    file.flush().await.map_err(|e| format!("Failed to flush file: {}", e))?;
 
     tracing::info!("[update] Downloaded to {}", dest.display());
     Ok(())
@@ -1165,7 +1169,8 @@ async fn install_update_macos(
     asset_filename: Option<String>,
     app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
-    let dmg_path = std::env::temp_dir().join("voice-keyboard-update.dmg");
+    let dmg_name = format!("voice-keyboard-update-{}.dmg", std::process::id());
+    let dmg_path = std::env::temp_dir().join(dmg_name);
 
     download_and_verify(
         &download_url,
@@ -1188,7 +1193,8 @@ async fn install_update_windows(
     asset_filename: Option<String>,
     app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
-    let installer_path = std::env::temp_dir().join("voice-keyboard-update.exe");
+    let installer_name = format!("voice-keyboard-update-{}.exe", std::process::id());
+    let installer_path = std::env::temp_dir().join(installer_name);
 
     download_and_verify(
         &download_url,
@@ -1270,7 +1276,8 @@ async fn perform_auto_update_macos(
     asset_filename: Option<String>,
     app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
-    let dmg_path = std::env::temp_dir().join("voice-keyboard-update.dmg");
+    let dmg_name = format!("voice-keyboard-update-{}.dmg", std::process::id());
+    let dmg_path = std::env::temp_dir().join(dmg_name);
 
     download_and_verify(
         &download_url,
@@ -1301,7 +1308,8 @@ async fn perform_auto_update_windows(
     asset_filename: Option<String>,
     app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
-    let installer_path = std::env::temp_dir().join("voice-keyboard-update.exe");
+    let installer_name = format!("voice-keyboard-update-{}.exe", std::process::id());
+    let installer_path = std::env::temp_dir().join(installer_name);
 
     download_and_verify(
         &download_url,
@@ -1837,7 +1845,8 @@ fn main() {
                 .on_tray_icon_event(|tray, event| {
                     // On non-macOS platforms, open settings window on left click
                     // (macOS uses show_menu_on_left_click instead)
-                    if !cfg!(target_os = "macos") {
+                    #[cfg(not(target_os = "macos"))]
+                    {
                         if let TrayIconEvent::Click { button: MouseButton::Left, .. } = event {
                             let app = tray.app_handle();
                             if let Some(window) = app.get_webview_window("main") {
@@ -1846,6 +1855,10 @@ fn main() {
                                 let _ = window.emit("navigate", "settings");
                             }
                         }
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        let _ = (&tray, &event);
                     }
                 })
                 .build(app)?;

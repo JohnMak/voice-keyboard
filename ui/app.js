@@ -12,6 +12,12 @@ let lastPollStatus = null;
 let lastPollTranscriptionCount = 0;
 let lastPollDebugCount = 0;
 let doneTimeout = null;
+const _updateState = {
+    downloadUrl: null,
+    checksumsUrl: null,
+    assetFilename: null,
+    pendingInfo: null,
+};
 let debugFilters = {
     all: true,
     system: true,
@@ -964,14 +970,14 @@ function setupPermissionsListeners() {
 // ============================================================================
 
 function storeUpdateInfo(updateInfo) {
-    window._pendingUpdateInfo = updateInfo;
-    window._updateDownloadUrl = updateInfo.download_url || updateInfo.release_url || updateInfo.url || null;
-    window._updateChecksumsUrl = updateInfo.checksums_url || null;
-    window._updateAssetFilename = updateInfo.asset_filename || null;
+    _updateState.pendingInfo = updateInfo;
+    _updateState.downloadUrl = updateInfo.download_url || updateInfo.release_url || updateInfo.url || null;
+    _updateState.checksumsUrl = updateInfo.checksums_url || null;
+    _updateState.assetFilename = updateInfo.asset_filename || null;
 }
 
 function showUpdateOverlay(updateInfo) {
-    const info = updateInfo || window._pendingUpdateInfo;
+    const info = updateInfo || _updateState.pendingInfo;
     if (!info) return;
 
     const overlay = document.getElementById('update-overlay');
@@ -992,9 +998,9 @@ function showUpdateOverlay(updateInfo) {
         newVersionEl.textContent = 'v' + latestVersion;
     }
 
-    window._updateDownloadUrl = info.download_url || info.release_url || info.url || null;
-    window._updateChecksumsUrl = info.checksums_url || null;
-    window._updateAssetFilename = info.asset_filename || null;
+    _updateState.downloadUrl = info.download_url || info.release_url || info.url || null;
+    _updateState.checksumsUrl = info.checksums_url || null;
+    _updateState.assetFilename = info.asset_filename || null;
 
     overlay.style.display = 'flex';
 }
@@ -1010,7 +1016,7 @@ async function installUpdate() {
     const btn = document.getElementById('update-install-btn');
     const progressArea = document.getElementById('update-progress');
     const progressText = document.getElementById('update-progress-text');
-    const url = window._updateDownloadUrl;
+    const url = _updateState.downloadUrl;
 
     if (!url) {
         console.error('No download URL available');
@@ -1047,8 +1053,8 @@ async function installUpdate() {
     try {
         await invoke('install_update', {
             downloadUrl: url,
-            checksumsUrl: window._updateChecksumsUrl || null,
-            assetFilename: window._updateAssetFilename || null,
+            checksumsUrl: _updateState.checksumsUrl || null,
+            assetFilename: _updateState.assetFilename || null,
         });
         if (progressText) {
             progressText.textContent = 'Update installed! Restarting...';
