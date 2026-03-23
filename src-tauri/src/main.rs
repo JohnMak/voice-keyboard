@@ -32,6 +32,12 @@ pub struct UpdateInfo {
     pub update_available: bool,
     pub release_url: String,
     pub download_url: String,
+    /// Download URL for SHA256SUMS.txt (None if not found in release)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checksums_url: Option<String>,
+    /// Filename of the download asset (for matching in SHA256SUMS.txt)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_filename: Option<String>,
     pub last_check: String,
 }
 
@@ -727,10 +733,25 @@ async fn do_update_check(current_version: &str) -> Result<UpdateInfo, String> {
 
     let html_url = json["html_url"].as_str().unwrap_or("").to_string();
 
-    // Find platform-specific asset download URL
-    let download_url = {
+    // Find platform-specific asset download URL, checksums URL, and asset filename
+    let (download_url, checksums_url, asset_filename) = {
         let mut found_url = html_url.clone();
+        let mut found_checksums_url: Option<String> = None;
+        let mut found_asset_name: Option<String> = None;
+
         if let Some(assets) = json["assets"].as_array() {
+            // First pass: find the SHA256SUMS.txt asset
+            for asset in assets {
+                let name = asset["name"].as_str().unwrap_or("");
+                if name == "SHA256SUMS.txt" {
+                    if let Some(url) = asset["browser_download_url"].as_str() {
+                        found_checksums_url = Some(url.to_string());
+                    }
+                    break;
+                }
+            }
+
+            // Second pass: find the platform-specific installer asset
             for asset in assets {
                 let name = asset["name"].as_str().unwrap_or("");
                 let browser_url = asset["browser_download_url"].as_str().unwrap_or("");
@@ -738,18 +759,21 @@ async fn do_update_check(current_version: &str) -> Result<UpdateInfo, String> {
                 #[cfg(target_os = "macos")]
                 if name.ends_with(".dmg") {
                     found_url = browser_url.to_string();
+                    found_asset_name = Some(name.to_string());
                     break;
                 }
 
                 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
                 if name.contains("x64-setup.exe") {
                     found_url = browser_url.to_string();
+                    found_asset_name = Some(name.to_string());
                     break;
                 }
 
                 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
                 if name.contains("arm64-setup.exe") {
                     found_url = browser_url.to_string();
+                    found_asset_name = Some(name.to_string());
                     break;
                 }
 
@@ -759,11 +783,12 @@ async fn do_update_check(current_version: &str) -> Result<UpdateInfo, String> {
                     || name.ends_with(".tar.gz")
                 {
                     found_url = browser_url.to_string();
+                    found_asset_name = Some(name.to_string());
                     break;
                 }
             }
         }
-        found_url
+        (found_url, found_checksums_url, found_asset_name)
     };
 
     let current_ver = semver::Version::parse(current_version)
@@ -781,6 +806,8 @@ async fn do_update_check(current_version: &str) -> Result<UpdateInfo, String> {
         update_available,
         release_url: html_url,
         download_url,
+        checksums_url,
+        asset_filename,
         last_check,
     })
 }
@@ -807,22 +834,27 @@ async fn check_for_update(state: State<'_, AppState>) -> Result<UpdateInfo, Stri
 
 /// Download and install an update, then relaunch the app
 #[tauri::command]
-async fn install_update(download_url: String, app_handle: tauri::AppHandle) -> Result<String, String> {
+async fn install_update(
+    download_url: String,
+    checksums_url: Option<String>,
+    asset_filename: Option<String>,
+    app_handle: tauri::AppHandle,
+) -> Result<String, String> {
     tracing::info!("[update] install_update: downloading from {}", download_url);
 
     #[cfg(target_os = "macos")]
     {
-        install_update_macos(download_url, app_handle).await
+        install_update_macos(download_url, checksums_url, asset_filename, app_handle).await
     }
 
     #[cfg(target_os = "windows")]
     {
-        install_update_windows(download_url, app_handle).await
+        install_update_windows(download_url, checksums_url, asset_filename, app_handle).await
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let _ = (download_url, app_handle);
+        let _ = (download_url, checksums_url, asset_filename, app_handle);
         Err("Auto-update is not supported on this platform".to_string())
     }
 }
@@ -854,6 +886,113 @@ async fn download_update_file(url: &str, dest: &std::path::Path) -> Result<(), S
         .map_err(|e| format!("Failed to write file to disk: {}", e))?;
 
     tracing::info!("[update] Downloaded to {}", dest.display());
+    Ok(())
+}
+
+/// Download SHA256SUMS.txt and extract the expected hash for a given asset filename.
+/// Returns Ok(None) if checksums URL is not available (backward compatibility).
+/// Returns Err if the download succeeds but the asset is not found in the checksums file.
+async fn fetch_expected_checksum(
+    checksums_url: Option<&str>,
+    asset_filename: Option<&str>,
+) -> Result<Option<String>, String> {
+    let (url, filename) = match (checksums_url, asset_filename) {
+        (Some(u), Some(f)) => (u, f),
+        _ => {
+            tracing::warn!("[update] No checksums URL or asset filename available, skipping verification");
+            return Ok(None);
+        }
+    };
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let response = client
+        .get(url)
+        .header("User-Agent", "voice-keyboard-app")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download SHA256SUMS.txt: {}", e))?;
+
+    if !response.status().is_success() {
+        tracing::warn!("[update] SHA256SUMS.txt download returned HTTP {}, skipping verification", response.status());
+        return Ok(None);
+    }
+
+    let body = response.text().await.map_err(|e| format!("Failed to read SHA256SUMS.txt: {}", e))?;
+
+    parse_checksum_for_file(&body, filename)
+        .map(Some)
+}
+
+/// Parse SHA256SUMS.txt content and find the hash for a specific filename.
+/// Format: `<hash>  <filename>` (two spaces between hash and name).
+fn parse_checksum_for_file(checksums_content: &str, filename: &str) -> Result<String, String> {
+    for line in checksums_content.lines() {
+        // Standard format: "<64-char-hex>  <filename>" (two spaces)
+        // Also handle single space for robustness
+        let parts: Vec<&str> = line.splitn(2, char::is_whitespace).collect();
+        if parts.len() == 2 {
+            let hash = parts[0].trim();
+            let name = parts[1].trim();
+            if name == filename {
+                return Ok(hash.to_lowercase());
+            }
+        }
+    }
+
+    Err(format!(
+        "Asset '{}' not found in SHA256SUMS.txt",
+        filename
+    ))
+}
+
+/// Compute SHA256 hash of a file on disk and compare against expected hash.
+/// Deletes the file if the checksum does not match.
+fn verify_file_checksum(file_path: &std::path::Path, expected_hash: &str) -> Result<(), String> {
+    use sha2::{Sha256, Digest};
+
+    let mut file = File::open(file_path)
+        .map_err(|e| format!("Failed to open file for checksum: {}", e))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)
+        .map_err(|e| format!("Failed to read file for checksum: {}", e))?;
+    let actual_hash = format!("{:x}", hasher.finalize());
+
+    if actual_hash != expected_hash {
+        let _ = fs::remove_file(file_path);
+        return Err(format!(
+            "Checksum verification failed for {}: expected {}, got {}",
+            file_path.display(),
+            expected_hash,
+            actual_hash
+        ));
+    }
+
+    tracing::info!("[update] Checksum verified: {}", file_path.display());
+    Ok(())
+}
+
+/// Download a file and verify its SHA256 checksum against SHA256SUMS.txt from the release.
+/// If checksums_url or asset_filename is None, the file is downloaded without verification
+/// (backward compatibility with older releases).
+async fn download_and_verify(
+    download_url: &str,
+    dest: &std::path::Path,
+    checksums_url: Option<&str>,
+    asset_filename: Option<&str>,
+) -> Result<(), String> {
+    download_update_file(download_url, dest).await?;
+
+    let expected_hash = fetch_expected_checksum(checksums_url, asset_filename).await?;
+
+    if let Some(hash) = expected_hash {
+        verify_file_checksum(dest, &hash)?;
+    }
+
     Ok(())
 }
 
@@ -994,10 +1133,20 @@ async fn relaunch_and_exit(app_handle: &tauri::AppHandle, app_dest: &str) {
 }
 
 #[cfg(target_os = "macos")]
-async fn install_update_macos(download_url: String, app_handle: tauri::AppHandle) -> Result<String, String> {
+async fn install_update_macos(
+    download_url: String,
+    checksums_url: Option<String>,
+    asset_filename: Option<String>,
+    app_handle: tauri::AppHandle,
+) -> Result<String, String> {
     let dmg_path = std::env::temp_dir().join("voice-keyboard-update.dmg");
 
-    download_update_file(&download_url, &dmg_path).await?;
+    download_and_verify(
+        &download_url,
+        &dmg_path,
+        checksums_url.as_deref(),
+        asset_filename.as_deref(),
+    ).await?;
 
     let new_app_name = install_app_from_dmg(&dmg_path)?;
     let new_app_dest = format!("/Applications/{}", new_app_name);
@@ -1008,10 +1157,20 @@ async fn install_update_macos(download_url: String, app_handle: tauri::AppHandle
 }
 
 #[cfg(target_os = "windows")]
-async fn install_update_windows(download_url: String, app_handle: tauri::AppHandle) -> Result<String, String> {
+async fn install_update_windows(
+    download_url: String,
+    checksums_url: Option<String>,
+    asset_filename: Option<String>,
+    app_handle: tauri::AppHandle,
+) -> Result<String, String> {
     let installer_path = std::env::temp_dir().join("voice-keyboard-update.exe");
 
-    download_update_file(&download_url, &installer_path).await?;
+    download_and_verify(
+        &download_url,
+        &installer_path,
+        checksums_url.as_deref(),
+        asset_filename.as_deref(),
+    ).await?;
 
     // Launch the NSIS installer with /S (silent install)
     Command::new(&installer_path)
@@ -1055,6 +1214,8 @@ async fn perform_auto_update(state: State<'_, AppState>, app_handle: tauri::AppH
     }
 
     let download_url = update_info.download_url.clone();
+    let checksums_url = update_info.checksums_url.clone();
+    let asset_filename = update_info.asset_filename.clone();
 
     // Emit downloading stage
     let _ = app_handle.emit("update-progress", serde_json::json!({ "stage": "downloading" }));
@@ -1062,26 +1223,36 @@ async fn perform_auto_update(state: State<'_, AppState>, app_handle: tauri::AppH
 
     #[cfg(target_os = "macos")]
     {
-        perform_auto_update_macos(download_url, app_handle).await
+        perform_auto_update_macos(download_url, checksums_url, asset_filename, app_handle).await
     }
 
     #[cfg(target_os = "windows")]
     {
-        perform_auto_update_windows(download_url, app_handle).await
+        perform_auto_update_windows(download_url, checksums_url, asset_filename, app_handle).await
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let _ = (download_url, app_handle);
+        let _ = (download_url, checksums_url, asset_filename, app_handle);
         Err("Auto-update is not supported on this platform".to_string())
     }
 }
 
 #[cfg(target_os = "macos")]
-async fn perform_auto_update_macos(download_url: String, app_handle: tauri::AppHandle) -> Result<String, String> {
+async fn perform_auto_update_macos(
+    download_url: String,
+    checksums_url: Option<String>,
+    asset_filename: Option<String>,
+    app_handle: tauri::AppHandle,
+) -> Result<String, String> {
     let dmg_path = std::env::temp_dir().join("voice-keyboard-update.dmg");
 
-    download_update_file(&download_url, &dmg_path).await?;
+    download_and_verify(
+        &download_url,
+        &dmg_path,
+        checksums_url.as_deref(),
+        asset_filename.as_deref(),
+    ).await?;
 
     // Emit installing stage
     let _ = app_handle.emit("update-progress", serde_json::json!({ "stage": "installing" }));
@@ -1100,10 +1271,20 @@ async fn perform_auto_update_macos(download_url: String, app_handle: tauri::AppH
 }
 
 #[cfg(target_os = "windows")]
-async fn perform_auto_update_windows(download_url: String, app_handle: tauri::AppHandle) -> Result<String, String> {
+async fn perform_auto_update_windows(
+    download_url: String,
+    checksums_url: Option<String>,
+    asset_filename: Option<String>,
+    app_handle: tauri::AppHandle,
+) -> Result<String, String> {
     let installer_path = std::env::temp_dir().join("voice-keyboard-update.exe");
 
-    download_update_file(&download_url, &installer_path).await?;
+    download_and_verify(
+        &download_url,
+        &installer_path,
+        checksums_url.as_deref(),
+        asset_filename.as_deref(),
+    ).await?;
 
     // Emit installing stage
     let _ = app_handle.emit("update-progress", serde_json::json!({ "stage": "installing" }));

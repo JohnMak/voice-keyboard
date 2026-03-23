@@ -10,8 +10,8 @@
     <div id="update-overlay" class="update-overlay" style="display: none;">
       <div class="update-overlay-content">
         <img src="app-icon.png" alt="Voice Keyboard" class="update-logo" />
-        <h1>Update Required</h1>
-        <p class="update-message">A new version of Voice Keyboard is available. Please update to continue using the application.</p>
+        <h1>Update Available</h1>
+        <p class="update-message">A new version of Voice Keyboard is available.</p>
         <div class="update-versions">
           <div class="version-row">
             <span class="version-label">Current version:</span>
@@ -22,7 +22,10 @@
             <span class="version-value update-new" id="update-new-version">—</span>
           </div>
         </div>
-        <button id="update-install-btn" class="btn-update" type="button" onclick="installUpdate()">Install Update</button>
+        <div class="update-buttons">
+          <button id="update-install-btn" class="btn-update" type="button" onclick="installUpdate()">Update</button>
+          <button id="update-later-btn" class="btn-update-later" type="button" onclick="dismissUpdateOverlay()">Later</button>
+        </div>
         <div id="update-progress" class="update-progress" style="display: none;">
           <div class="progress-bar-container">
             <div class="progress-bar" id="update-progress-bar"></div>

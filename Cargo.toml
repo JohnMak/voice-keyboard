@@ -72,6 +72,8 @@ self_update = { version = "0.41", optional = true, default-features = false, fea
 self-replace = { version = "1.5", optional = true }
 # Semantic version comparison
 semver = { version = "1.0", optional = true }
+# SHA256 checksum verification for updates
+sha2 = { version = "0.10", optional = true }
 # Archive extraction
 flate2 = { version = "1.0", optional = true }
 tar = { version = "0.4", optional = true }
@@ -137,7 +139,7 @@ gui-tray = ["tray-icon", "muda"]  # System tray (Linux requires libgtk-3-dev)
 gui-input = ["hidapi", "gilrs"]  # USB HID + gamepad hotkey binding
 gui = ["gui-core", "gui-tray", "gui-input"]  # Full GUI with all features
 # Auto-update feature
-updater = ["self_update", "self-replace", "semver", "flate2", "tar", "zip"]
+updater = ["self_update", "self-replace", "semver", "flate2", "tar", "zip", "sha2"]
 
 [profile.release]
 lto = true

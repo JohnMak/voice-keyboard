@@ -12,6 +12,7 @@ pub use state::UpdateState;
 use crate::config::{Config, UpdateChannel};
 use anyhow::{anyhow, Context, Result};
 use semver::Version;
+use sha2::{Sha256, Digest};
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Write};
@@ -211,6 +212,9 @@ impl Updater {
 
         self.download_file(&asset.download_url, &temp_archive)?;
 
+        // Verify SHA256 checksum if SHA256SUMS.txt is available in the release
+        self.verify_asset_checksum(release, &asset.name, &temp_archive)?;
+
         // Extract binary
         let temp_binary = temp_dir.join(self.binary_name());
         self.extract_binary(&temp_archive, &temp_binary)?;
@@ -333,6 +337,85 @@ impl Updater {
         file.write_all(&content)?;
 
         Ok(())
+    }
+
+    /// Verify SHA256 checksum of a downloaded asset against SHA256SUMS.txt from the release.
+    /// If SHA256SUMS.txt is not found in the release, logs a warning and proceeds (backward compatibility).
+    fn verify_asset_checksum(
+        &self,
+        release: &Release,
+        asset_name: &str,
+        file_path: &Path,
+    ) -> Result<()> {
+        // Find SHA256SUMS.txt asset in the release
+        let checksums_asset = release.assets.iter().find(|a| a.name == "SHA256SUMS.txt");
+
+        let checksums_asset = match checksums_asset {
+            Some(a) => a,
+            None => {
+                self.log("SHA256SUMS.txt not found in release, skipping checksum verification");
+                return Ok(());
+            }
+        };
+
+        self.log("Downloading SHA256SUMS.txt for verification");
+        let checksums_content = self.download_text(&checksums_asset.download_url)?;
+
+        // Parse expected hash for our asset
+        let expected_hash = self.parse_checksum(&checksums_content, asset_name)?;
+
+        // Compute actual hash
+        let mut file = File::open(file_path)
+            .with_context(|| format!("Failed to open {} for checksum", file_path.display()))?;
+        let mut hasher = Sha256::new();
+        io::copy(&mut file, &mut hasher)?;
+        let actual_hash = format!("{:x}", hasher.finalize());
+
+        if actual_hash != expected_hash {
+            let _ = fs::remove_file(file_path);
+            return Err(anyhow!(
+                "Checksum verification failed for {}: expected {}, got {}",
+                asset_name,
+                expected_hash,
+                actual_hash
+            ));
+        }
+
+        self.log(&format!("Checksum verified for {}", asset_name));
+        Ok(())
+    }
+
+    /// Download a URL and return its text content
+    fn download_text(&self, url: &str) -> Result<String> {
+        let client = reqwest::blocking::Client::builder()
+            .user_agent("voice-keyboard-updater")
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
+
+        let response = client.get(url).send()?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("Download failed: {}", response.status()));
+        }
+
+        Ok(response.text()?)
+    }
+
+    /// Parse SHA256SUMS.txt content and find the hash for a specific filename.
+    /// Format: `<hash>  <filename>` (two spaces between hash and name).
+    fn parse_checksum(&self, checksums_content: &str, filename: &str) -> Result<String> {
+        for line in checksums_content.lines() {
+            let parts: Vec<&str> = line.splitn(2, char::is_whitespace).collect();
+            if parts.len() == 2 {
+                let hash = parts[0].trim();
+                let name = parts[1].trim();
+                if name == filename {
+                    return Ok(hash.to_lowercase());
+                }
+            }
+        }
+
+        Err(anyhow!("Asset '{}' not found in SHA256SUMS.txt", filename))
     }
 
     /// Extract binary from archive

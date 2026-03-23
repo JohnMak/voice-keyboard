@@ -62,6 +62,9 @@ open = "5"
 # Version comparison for update checks
 semver = "1.0"
 
+# SHA256 checksum verification for updates
+sha2 = "0.10"
+
 # HTTP client for model downloads
 reqwest = { version = "0.12", features = ["stream", "rustls-tls"], default-features = false }
 

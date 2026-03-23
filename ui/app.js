@@ -365,8 +365,8 @@ async function setupTauriListeners() {
     await listen('update-available', (event) => {
         const payload = event.payload;
         if (payload && payload.version) {
-            setUpdateStatus('update-available', `Update available: v${payload.version}`);
-            showUpdateOverlay(payload);
+            storeUpdateInfo(payload);
+            setUpdateStatusClickable('update-available', `New version available: v${payload.version}`);
         }
     });
 
@@ -963,7 +963,17 @@ function setupPermissionsListeners() {
 // Update overlay
 // ============================================================================
 
+function storeUpdateInfo(updateInfo) {
+    window._pendingUpdateInfo = updateInfo;
+    window._updateDownloadUrl = updateInfo.download_url || updateInfo.release_url || updateInfo.url || null;
+    window._updateChecksumsUrl = updateInfo.checksums_url || null;
+    window._updateAssetFilename = updateInfo.asset_filename || null;
+}
+
 function showUpdateOverlay(updateInfo) {
+    const info = updateInfo || window._pendingUpdateInfo;
+    if (!info) return;
+
     const overlay = document.getElementById('update-overlay');
     const currentVersionEl = document.getElementById('update-current-version');
     const newVersionEl = document.getElementById('update-new-version');
@@ -971,20 +981,29 @@ function showUpdateOverlay(updateInfo) {
     if (!overlay) return;
 
     if (currentVersionEl) {
-        const currentVersion = (updateInfo.current_version)
-            ? updateInfo.current_version
+        const currentVersion = (info.current_version)
+            ? info.current_version
             : (elements.appVersion ? elements.appVersion.textContent : '—');
         currentVersionEl.textContent = currentVersion || '—';
     }
 
     if (newVersionEl) {
-        const latestVersion = updateInfo.latest_version || updateInfo.version || '—';
+        const latestVersion = info.latest_version || info.version || '—';
         newVersionEl.textContent = 'v' + latestVersion;
     }
 
-    window._updateDownloadUrl = updateInfo.download_url || updateInfo.release_url || updateInfo.url || null;
+    window._updateDownloadUrl = info.download_url || info.release_url || info.url || null;
+    window._updateChecksumsUrl = info.checksums_url || null;
+    window._updateAssetFilename = info.asset_filename || null;
 
     overlay.style.display = 'flex';
+}
+
+function dismissUpdateOverlay() {
+    const overlay = document.getElementById('update-overlay');
+    if (overlay) {
+        overlay.style.display = 'none';
+    }
 }
 
 async function installUpdate() {
@@ -1007,8 +1026,14 @@ async function installUpdate() {
         return;
     }
 
+    const laterBtn = document.getElementById('update-later-btn');
+
     if (btn) {
         btn.disabled = true;
+    }
+
+    if (laterBtn) {
+        laterBtn.style.display = 'none';
     }
 
     if (progressArea) {
@@ -1020,7 +1045,11 @@ async function installUpdate() {
     }
 
     try {
-        await invoke('install_update', { downloadUrl: url });
+        await invoke('install_update', {
+            downloadUrl: url,
+            checksumsUrl: window._updateChecksumsUrl || null,
+            assetFilename: window._updateAssetFilename || null,
+        });
         if (progressText) {
             progressText.textContent = 'Update installed! Restarting...';
         }
@@ -1031,6 +1060,9 @@ async function installUpdate() {
         }
         if (btn) {
             btn.disabled = false;
+        }
+        if (laterBtn) {
+            laterBtn.style.display = '';
         }
     }
 }
@@ -1047,8 +1079,8 @@ async function loadVersionInfo() {
         }
         const updateInfo = info && info.update_info;
         if (updateInfo && updateInfo.update_available && updateInfo.latest_version) {
-            setUpdateStatus('update-available', `Update available: v${updateInfo.latest_version}`);
-            showUpdateOverlay(updateInfo);
+            storeUpdateInfo(updateInfo);
+            setUpdateStatusClickable('update-available', `New version available: v${updateInfo.latest_version}`);
         }
     } catch (e) {
         console.error('Failed to get version info:', e);
@@ -1067,8 +1099,8 @@ async function checkForUpdate() {
         const result = await invoke('check_for_update');
         if (result && result.update_available) {
             const version = result.latest_version || result.version;
-            setUpdateStatus('update-available', `Update available: v${version}`);
-            showUpdateOverlay(result);
+            storeUpdateInfo(result);
+            setUpdateStatusClickable('update-available', `New version available: v${version}`);
         } else {
             setUpdateStatus('up-to-date', 'Up to date \u2713');
         }
@@ -1087,6 +1119,17 @@ function setUpdateStatus(className, text) {
     if (!el) return;
     el.className = 'app-update-status' + (className ? ' ' + className : '');
     el.textContent = text;
+    el.onclick = null;
+}
+
+function setUpdateStatusClickable(className, text) {
+    const el = elements.appUpdateStatus;
+    if (!el) return;
+    el.className = 'app-update-status clickable' + (className ? ' ' + className : '');
+    el.textContent = text;
+    el.onclick = function () {
+        showUpdateOverlay();
+    };
 }
 
 function setUpdateStatusHtml(className, text) {
