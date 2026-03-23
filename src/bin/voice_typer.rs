@@ -5193,6 +5193,45 @@ fn run_openai(
     let callback = move |event: Event| {
         use std::sync::atomic::Ordering;
 
+        // Max recording timeout: force-stop if recording has been active for over 120 seconds.
+        // This check runs on every key event, so ANY keyboard activity will trigger recovery.
+        {
+            let rec_state = state_clone.lock().unwrap();
+            if *rec_state == RecordingState::Recording {
+                let timed_out = recording_start_clone
+                    .lock()
+                    .unwrap()
+                    .map(|start| start.elapsed() > Duration::from_secs(120))
+                    .unwrap_or(false);
+                if timed_out {
+                    drop(rec_state);
+                    eprintln!(
+                        "[{}] WARNING: Recording timeout (120s) — force-stopping stuck recording",
+                        timestamp()
+                    );
+                    is_recording_clone.store(false, Ordering::SeqCst);
+                    let mut rec_state = state_clone.lock().unwrap();
+                    *rec_state = RecordingState::Idle;
+                    drop(rec_state);
+
+                    // Pause audio stream
+                    {
+                        let stream_guard = persistent_stream_clone.lock().unwrap();
+                        if let Some(ref stream) = *stream_guard {
+                            let _ = stream.pause();
+                        }
+                    }
+
+                    // Restore system volume
+                    volume_controller_clone.restore();
+
+                    // Reset debounce
+                    key_debounce_clone.store(false, Ordering::SeqCst);
+                    return;
+                }
+            }
+        }
+
         match event.event_type {
             EventType::KeyPress(key)
                 if key == target_key || target_key2 == Some(key) || target_key3 == Some(key) =>
@@ -5259,6 +5298,33 @@ fn run_openai(
 
                 // Check if not already recording
                 let mut rec_state = state_clone.lock().unwrap();
+                if *rec_state == RecordingState::Recording {
+                    // Force-reset: key_release was lost, user pressed again to recover
+                    eprintln!(
+                        "[{}] WARNING: Forced reset — key pressed while already Recording (lost key_release event)",
+                        timestamp()
+                    );
+                    is_recording_clone.store(false, Ordering::SeqCst);
+                    *rec_state = RecordingState::Idle;
+
+                    // Pause audio stream
+                    {
+                        let stream_guard = persistent_stream_clone.lock().unwrap();
+                        if let Some(ref stream) = *stream_guard {
+                            let _ = stream.pause();
+                        }
+                    }
+
+                    // Restore system volume
+                    volume_controller_clone.restore();
+
+                    // Reset debounce so the next press starts fresh
+                    key_debounce_clone.store(false, Ordering::SeqCst);
+                    drop(rec_state);
+                    // Small delay before allowing a new recording
+                    thread::sleep(Duration::from_millis(200));
+                    return;
+                }
                 if *rec_state == RecordingState::Idle {
                     // Wait for any pending processing to complete before starting new session
                     let pending = processing_count_clone.load(Ordering::SeqCst);
@@ -5276,8 +5342,16 @@ fn run_openai(
                         drop(rec_state); // Release lock while waiting
 
                         // Wait for both: transcriptions to finish AND output to process all results
+                        let wait_start = Instant::now();
                         loop {
                             thread::sleep(Duration::from_millis(50));
+                            if wait_start.elapsed() > Duration::from_secs(10) {
+                                eprintln!(
+                                    "[{}] WARNING: Timed out waiting for previous transcription (10s), proceeding anyway",
+                                    timestamp()
+                                );
+                                break;
+                            }
                             let p = processing_count_clone.load(Ordering::SeqCst);
                             let j = next_sequence_clone.load(Ordering::SeqCst);
                             let o = next_output_seq_for_callback.load(Ordering::SeqCst);
