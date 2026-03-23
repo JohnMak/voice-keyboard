@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{
     AppHandle, Manager, State,
     menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
     Emitter,
 };
 
@@ -1755,6 +1755,20 @@ fn main() {
                             app.exit(0);
                         }
                         _ => {}
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    // On non-macOS platforms, open settings window on left click
+                    // (macOS uses show_menu_on_left_click instead)
+                    if !cfg!(target_os = "macos") {
+                        if let TrayIconEvent::Click { button: MouseButton::Left, .. } = event {
+                            let app = tray.app_handle();
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                                let _ = window.emit("navigate", "settings");
+                            }
+                        }
                     }
                 })
                 .build(app)?;
