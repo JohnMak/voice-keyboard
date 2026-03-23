@@ -208,6 +208,28 @@ enum RecordingState {
     Recording,
 }
 
+/// Wrapper to move non-Send closures to a worker thread.
+///
+/// The grab_fn callback passed to `rdev::grab` on macOS captures `cpal::Stream`
+/// (via `Arc<Mutex<Option<Stream>>>`), which is `!Send` due to internal raw pointers.
+/// However, the stream is always accessed through the Mutex, providing safe synchronization.
+/// The worker thread processes events sequentially, so there is no concurrent access.
+///
+/// SAFETY: The wrapped value is only ever accessed from a single worker thread.
+/// All shared state inside the closure is behind Arc<Mutex<..>> or Arc<AtomicBool>.
+#[cfg(target_os = "macos")]
+struct SendCallback<F>(F);
+
+#[cfg(target_os = "macos")]
+unsafe impl<F> Send for SendCallback<F> {}
+
+#[cfg(target_os = "macos")]
+impl<F: FnOnce()> SendCallback<F> {
+    fn run(self) {
+        (self.0)();
+    }
+}
+
 /// Text input method
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum InputMethod {
@@ -5681,8 +5703,24 @@ fn run_openai(
     #[cfg(target_os = "macos")]
     {
         let state_for_grab = Arc::clone(&state);
+
+        // Channel to offload heavy callback work from the grab_fn.
+        // rdev::grab blocks macOS keyboard input until the callback returns,
+        // so grab_fn must return immediately with just the suppress decision.
+        let (event_tx, event_rx) = std::sync::mpsc::channel::<Event>();
+
+        // Worker thread: receives events and runs the (heavy) callback.
+        // SendCallback is needed because `callback` captures cpal::Stream (via Arc<Mutex>)
+        // which is !Send. Access is safe — see SendCallback docs above.
         #[allow(unused_mut)]
         let mut callback = callback;
+        let send_worker = SendCallback(move || {
+            while let Ok(event) = event_rx.recv() {
+                callback(event);
+            }
+        });
+        thread::spawn(move || send_worker.run());
+
         let grab_fn = move |event: Event| -> Option<Event> {
             let suppress = matches!(
                 event.event_type,
@@ -5690,9 +5728,9 @@ fn run_openai(
                     | EventType::KeyRelease(Key::Num1 | Key::Num2 | Key::Num3)
             ) && *state_for_grab.lock().unwrap() == RecordingState::Recording;
 
-            let event_clone = event.clone();
-            callback(event);
-            if suppress { None } else { Some(event_clone) }
+            // Send event to worker thread for processing (non-blocking)
+            let _ = event_tx.send(event.clone());
+            if suppress { None } else { Some(event) }
         };
         if let Err(e) = grab(grab_fn) {
             eprintln!("Error: {:?}", e);
@@ -6222,7 +6260,23 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
     #[cfg(target_os = "macos")]
     {
         let state_for_grab = Arc::clone(&state);
+
+        // Channel to offload heavy callback work from the grab_fn.
+        // rdev::grab blocks macOS keyboard input until the callback returns,
+        // so grab_fn must return immediately with just the suppress decision.
+        let (event_tx, event_rx) = std::sync::mpsc::channel::<Event>();
+
+        // Worker thread: receives events and runs the (heavy) callback.
+        // SendCallback is needed because `callback` captures cpal::Stream (via Arc<Mutex>)
+        // which is !Send. Access is safe — see SendCallback docs above.
         let callback = callback;
+        let send_worker = SendCallback(move || {
+            while let Ok(event) = event_rx.recv() {
+                callback(event);
+            }
+        });
+        thread::spawn(move || send_worker.run());
+
         let grab_fn = move |event: Event| -> Option<Event> {
             let suppress = matches!(
                 event.event_type,
@@ -6230,9 +6284,9 @@ fn run(whisper_ctx: whisper_rs::WhisperContext, input_method: InputMethod, hotke
                     | EventType::KeyRelease(Key::Num1 | Key::Num2 | Key::Num3)
             ) && *state_for_grab.lock().unwrap() == RecordingState::Recording;
 
-            let event_clone = event.clone();
-            callback(event);
-            if suppress { None } else { Some(event_clone) }
+            // Send event to worker thread for processing (non-blocking)
+            let _ = event_tx.send(event.clone());
+            if suppress { None } else { Some(event) }
         };
         if let Err(e) = grab(grab_fn) {
             eprintln!("Error: {:?}", e);
