@@ -995,6 +995,15 @@ async function installUpdate() {
 
     if (!url) {
         console.error('No download URL available');
+        if (progressText) {
+            progressText.textContent = 'Error: No download URL available';
+        }
+        if (progressArea) {
+            progressArea.style.display = '';
+        }
+        if (btn) {
+            btn.disabled = false;
+        }
         return;
     }
 
@@ -1080,11 +1089,11 @@ function setUpdateStatus(className, text) {
     el.textContent = text;
 }
 
-function setUpdateStatusHtml(className, html) {
+function setUpdateStatusHtml(className, text) {
     const el = elements.appUpdateStatus;
     if (!el) return;
     el.className = 'app-update-status' + (className ? ' ' + className : '');
-    el.innerHTML = html;
+    el.textContent = text;
 }
 
 function openGitHub() {

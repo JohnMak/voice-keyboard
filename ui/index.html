@@ -22,7 +22,7 @@
             <span class="version-value update-new" id="update-new-version">—</span>
           </div>
         </div>
-        <button id="update-install-btn" class="btn-update" onclick="installUpdate()">Install Update</button>
+        <button id="update-install-btn" class="btn-update" type="button" onclick="installUpdate()">Install Update</button>
         <div id="update-progress" class="update-progress" style="display: none;">
           <div class="progress-bar-container">
             <div class="progress-bar" id="update-progress-bar"></div>
@@ -38,10 +38,10 @@
         <header class="header">
             <h1>Voice Keyboard</h1>
             <nav class="tabs">
-                <button class="tab active" data-tab="test">Status</button>
-                <button class="tab" data-tab="prompts">Controls</button>
-                <button class="tab" data-tab="settings">Settings</button>
-                <button class="tab" data-tab="log">Log</button>
+                <button class="tab active" type="button" data-tab="test">Status</button>
+                <button class="tab" type="button" data-tab="prompts">Controls</button>
+                <button class="tab" type="button" data-tab="settings">Settings</button>
+                <button class="tab" type="button" data-tab="log">Log</button>
             </nav>
         </header>
 
@@ -114,7 +114,7 @@
             </div>
 
             <div class="settings-actions">
-                <button id="save-prompts" class="btn btn-primary">Save & Reload</button>
+                <button id="save-prompts" type="button" class="btn btn-primary">Save & Reload</button>
             </div>
         </section>
 
@@ -128,7 +128,7 @@
                     <span class="app-update-status" id="app-update-status"></span>
                 </div>
                 <div class="app-info-actions">
-                    <button id="check-update-btn" class="btn btn-secondary btn-small" onclick="checkForUpdate()">Check for updates</button>
+                    <button id="check-update-btn" type="button" class="btn btn-secondary btn-small" onclick="checkForUpdate()">Check for updates</button>
                     <a href="#" id="github-link" class="btn-link" onclick="openGitHub(); return false;">GitHub</a>
                 </div>
             </div>
@@ -221,7 +221,7 @@
             </div>
 
             <div class="settings-actions">
-                <button id="save-settings" class="btn btn-primary">Save & Reload</button>
+                <button id="save-settings" type="button" class="btn btn-primary">Save & Reload</button>
             </div>
         </section>
 
@@ -250,6 +250,9 @@
                     <label class="filter-chip active" data-filter="transcription">
                         <input type="checkbox" checked> Transcription
                     </label>
+                    <label class="filter-chip active" data-filter="phrase">
+                        <input type="checkbox" checked> Phrase
+                    </label>
                     <label class="filter-chip active" data-filter="error">
                         <input type="checkbox" checked> Errors
                     </label>
@@ -258,7 +261,7 @@
                     <label class="auto-scroll-toggle">
                         <input type="checkbox" id="debug-autoscroll" checked> Auto-scroll
                     </label>
-                    <button id="clear-debug" class="btn btn-secondary btn-small">Clear</button>
+                    <button id="clear-debug" type="button" class="btn btn-secondary btn-small">Clear</button>
                 </div>
             </div>
 
@@ -297,8 +300,8 @@
                 </div>
             </div>
             <div class="modal-actions">
-                <button id="open-settings-btn" class="btn btn-secondary">Open System Settings</button>
-                <button id="check-again-btn" class="btn btn-primary">Reload and Check</button>
+                <button id="open-settings-btn" type="button" class="btn btn-secondary">Open System Settings</button>
+                <button id="check-again-btn" type="button" class="btn btn-primary">Reload and Check</button>
             </div>
         </div>
     </div>
@@ -316,8 +319,8 @@
             </ul>
             <p class="note">No personal data is included except the audio you recorded.</p>
             <div class="modal-actions">
-                <button id="cancel-report" class="btn btn-secondary">Cancel</button>
-                <button id="create-report" class="btn btn-danger">Create & Open GitHub Issue</button>
+                <button id="cancel-report" type="button" class="btn btn-secondary">Cancel</button>
+                <button id="create-report" type="button" class="btn btn-danger">Create & Open GitHub Issue</button>
             </div>
         </div>
     </div>

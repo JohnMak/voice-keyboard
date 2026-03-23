@@ -93,11 +93,8 @@ jobs:
 
       # Skip testing — cannot run ARM64 binaries on x64 runner
       - name: Test binaries
-        continue-on-error: true
         shell: bash
-        run: |
-          echo "Skipping tests: cannot run ARM64 binaries on x64 runner"
-          ./target/aarch64-pc-windows-msvc/release/voice-typer.exe --help || true
+        run: echo "Skipping tests: cannot run ARM64 binaries on x64 runner"
 
       # Prepare artifacts
       - name: Prepare artifacts
