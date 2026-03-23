@@ -971,7 +971,8 @@ function setupPermissionsListeners() {
 
 function storeUpdateInfo(updateInfo) {
     _updateState.pendingInfo = updateInfo;
-    _updateState.downloadUrl = updateInfo.download_url || updateInfo.release_url || updateInfo.url || null;
+    _updateState.downloadUrl = updateInfo.download_url || null;
+    _updateState.releaseUrl = updateInfo.release_url || updateInfo.url || null;
     _updateState.checksumsUrl = updateInfo.checksums_url || null;
     _updateState.assetFilename = updateInfo.asset_filename || null;
 }
@@ -986,6 +987,31 @@ function showUpdateOverlay(updateInfo) {
 
     if (!overlay) return;
 
+    // Reset overlay state to initial conditions
+    const progressArea = document.getElementById('update-progress');
+    const progressText = document.getElementById('update-progress-text');
+    const progressBar = document.getElementById('update-progress-bar');
+    const installBtn = document.getElementById('update-install-btn');
+    const laterBtn = document.getElementById('update-later-btn');
+
+    if (progressArea) {
+        progressArea.style.display = 'none';
+    }
+    if (progressText) {
+        progressText.textContent = 'Downloading...';
+    }
+    if (progressBar) {
+        progressBar.style.width = '0%';
+    }
+    if (installBtn) {
+        installBtn.disabled = false;
+        installBtn.textContent = 'Update';
+        installBtn.onclick = installUpdate;
+    }
+    if (laterBtn) {
+        laterBtn.style.display = '';
+    }
+
     if (currentVersionEl) {
         const currentVersion = (info.current_version)
             ? info.current_version
@@ -998,7 +1024,8 @@ function showUpdateOverlay(updateInfo) {
         newVersionEl.textContent = 'v' + latestVersion;
     }
 
-    _updateState.downloadUrl = info.download_url || info.release_url || info.url || null;
+    _updateState.downloadUrl = info.download_url || null;
+    _updateState.releaseUrl = info.release_url || info.url || null;
     _updateState.checksumsUrl = info.checksums_url || null;
     _updateState.assetFilename = info.asset_filename || null;
 
@@ -1019,15 +1046,36 @@ async function installUpdate() {
     const url = _updateState.downloadUrl;
 
     if (!url) {
-        console.error('No download URL available');
-        if (progressText) {
-            progressText.textContent = 'Error: No download URL available';
-        }
-        if (progressArea) {
-            progressArea.style.display = '';
-        }
-        if (btn) {
-            btn.disabled = false;
+        if (_updateState.releaseUrl) {
+            console.log('No direct download URL, opening release page');
+            if (progressText) {
+                progressText.textContent = 'Please download the update manually from the release page.';
+            }
+            if (progressArea) {
+                progressArea.style.display = '';
+            }
+            if (btn) {
+                btn.textContent = 'Open Release Page';
+                btn.disabled = false;
+                btn.onclick = () => {
+                    invoke('open_url', { url: _updateState.releaseUrl });
+                };
+            }
+            const laterBtn = document.getElementById('update-later-btn');
+            if (laterBtn) {
+                laterBtn.style.display = '';
+            }
+        } else {
+            console.error('No download URL or release URL available');
+            if (progressText) {
+                progressText.textContent = 'Error: No download URL available';
+            }
+            if (progressArea) {
+                progressArea.style.display = '';
+            }
+            if (btn) {
+                btn.disabled = false;
+            }
         }
         return;
     }
@@ -1051,11 +1099,7 @@ async function installUpdate() {
     }
 
     try {
-        await invoke('install_update', {
-            downloadUrl: url,
-            checksumsUrl: _updateState.checksumsUrl || null,
-            assetFilename: _updateState.assetFilename || null,
-        });
+        await invoke('install_update');
         if (progressText) {
             progressText.textContent = 'Update installed! Restarting...';
         }

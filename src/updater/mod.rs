@@ -12,7 +12,7 @@ pub use state::UpdateState;
 use crate::config::{Config, UpdateChannel};
 use anyhow::{anyhow, Context, Result};
 use semver::Version;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufReader};
@@ -339,7 +339,7 @@ impl Updater {
     }
 
     /// Verify SHA256 checksum of a downloaded asset against SHA256SUMS.txt from the release.
-    /// If SHA256SUMS.txt is not found in the release, logs a warning and proceeds (backward compatibility).
+    /// Returns an error if SHA256SUMS.txt is missing (fail-close: never install unverified binaries).
     fn verify_asset_checksum(
         &self,
         release: &Release,
@@ -352,8 +352,9 @@ impl Updater {
         let checksums_asset = match checksums_asset {
             Some(a) => a,
             None => {
-                self.log("SHA256SUMS.txt not found in release, skipping checksum verification");
-                return Ok(());
+                return Err(anyhow!(
+                    "SHA256SUMS.txt not found in release — refusing to install unverified binary"
+                ));
             }
         };
 

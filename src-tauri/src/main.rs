@@ -736,9 +736,11 @@ async fn do_update_check(current_version: &str) -> Result<UpdateInfo, String> {
 
     let html_url = json["html_url"].as_str().unwrap_or("").to_string();
 
-    // Find platform-specific asset download URL, checksums URL, and asset filename
+    // Find platform-specific asset download URL, checksums URL, and asset filename.
+    // found_url starts empty — if no platform asset is found, download_url stays empty
+    // so the UI can show "new version available" but disable the Install button.
     let (download_url, checksums_url, asset_filename) = {
-        let mut found_url = html_url.clone();
+        let mut found_url = String::new();
         let mut found_checksums_url: Option<String> = None;
         let mut found_asset_name: Option<String> = None;
 
@@ -835,14 +837,29 @@ async fn check_for_update(state: State<'_, AppState>) -> Result<UpdateInfo, Stri
     Ok(info)
 }
 
-/// Download and install an update, then relaunch the app
+/// Download and install an update, then relaunch the app.
+/// Reads download URLs from cached UpdateInfo in AppState (populated by check_for_update).
+/// Does NOT accept URLs from the frontend to prevent XSS/injection attacks.
 #[tauri::command]
 async fn install_update(
-    download_url: String,
-    checksums_url: Option<String>,
-    asset_filename: Option<String>,
+    state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
+    let info = state
+        .update_info
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("No cached update info. Run check_for_update first.".to_string())?;
+
+    let download_url = info.download_url;
+    let checksums_url = info.checksums_url;
+    let asset_filename = info.asset_filename;
+
+    if download_url.is_empty() {
+        return Err("No download URL available for this platform. Please download manually from the release page.".to_string());
+    }
+
     tracing::info!("[update] install_update: downloading from {}", download_url);
 
     #[cfg(target_os = "macos")]
@@ -895,17 +912,19 @@ async fn download_update_file(url: &str, dest: &std::path::Path) -> Result<(), S
 }
 
 /// Download SHA256SUMS.txt and extract the expected hash for a given asset filename.
-/// Returns Ok(None) if checksums URL is not available (backward compatibility).
-/// Returns Err if the download succeeds but the asset is not found in the checksums file.
+/// Fail-close: if checksums are unavailable or download fails, returns an error.
+/// Unverified installs are not allowed.
 async fn fetch_expected_checksum(
     checksums_url: Option<&str>,
     asset_filename: Option<&str>,
-) -> Result<Option<String>, String> {
+) -> Result<String, String> {
     let (url, filename) = match (checksums_url, asset_filename) {
         (Some(u), Some(f)) => (u, f),
         _ => {
-            tracing::warn!("[update] No checksums URL or asset filename available, skipping verification");
-            return Ok(None);
+            return Err(
+                "Checksum verification required but no checksums URL or asset filename available. \
+                 Cannot install unverified update.".to_string()
+            );
         }
     };
 
@@ -923,14 +942,15 @@ async fn fetch_expected_checksum(
         .map_err(|e| format!("Failed to download SHA256SUMS.txt: {}", e))?;
 
     if !response.status().is_success() {
-        tracing::warn!("[update] SHA256SUMS.txt download returned HTTP {}, skipping verification", response.status());
-        return Ok(None);
+        return Err(format!(
+            "SHA256SUMS.txt download failed with HTTP {}. Cannot install unverified update.",
+            response.status()
+        ));
     }
 
     let body = response.text().await.map_err(|e| format!("Failed to read SHA256SUMS.txt: {}", e))?;
 
     parse_checksum_for_file(&body, filename)
-        .map(Some)
 }
 
 /// Parse SHA256SUMS.txt content and find the hash for a specific filename.
@@ -982,8 +1002,8 @@ fn verify_file_checksum(file_path: &std::path::Path, expected_hash: &str) -> Res
 }
 
 /// Download a file and verify its SHA256 checksum against SHA256SUMS.txt from the release.
-/// If checksums_url or asset_filename is None, the file is downloaded without verification
-/// (backward compatibility with older releases).
+/// Checksum verification is mandatory (fail-close). If checksums cannot be fetched or
+/// verified, the download is rejected and the file is deleted.
 async fn download_and_verify(
     download_url: &str,
     dest: &std::path::Path,
@@ -992,11 +1012,16 @@ async fn download_and_verify(
 ) -> Result<(), String> {
     download_update_file(download_url, dest).await?;
 
-    let expected_hash = fetch_expected_checksum(checksums_url, asset_filename).await?;
+    let expected_hash = match fetch_expected_checksum(checksums_url, asset_filename).await {
+        Ok(hash) => hash,
+        Err(e) => {
+            // Clean up the downloaded file since we cannot verify it
+            let _ = fs::remove_file(dest);
+            return Err(e);
+        }
+    };
 
-    if let Some(hash) = expected_hash {
-        verify_file_checksum(dest, &hash)?;
-    }
+    verify_file_checksum(dest, &expected_hash)?;
 
     Ok(())
 }
